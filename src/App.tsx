@@ -1,0 +1,7698 @@
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { ScalingContainer } from './components/ScalingContainer';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  Gamepad2, 
+  Settings, 
+  Search, 
+  User, 
+  Clock, 
+  Play, 
+  Download, 
+  Info, 
+  ChevronRight,
+  Terminal,
+  Activity,
+  Cpu,
+  Monitor,
+  LayoutGrid,
+  Moon,
+  Sun,
+  Maximize2,
+  Power,
+  X,
+  Menu,
+  Gamepad,
+  Trophy,
+  ArrowUp,
+  ArrowDown,
+  Keyboard,
+  Package,
+  Trash2,
+  Pause,
+  Copy,
+  FileDown,
+  Filter,
+  RotateCcw,
+  Bell,
+  BellDot,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  Sparkles,
+  BookOpen,
+  ChevronDown,
+  Edit3
+} from 'lucide-react';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+import { MOCK_STORES, MOCK_GAMES, MOCK_LOGS } from './mockData';
+import { Game, StoreType, RunnerType, LogEntry, ViewState, Theme, AppNotification } from './types';
+import { FocusProvider, Focusable, useFocus } from './components/FocusProvider';
+import { NavDebugOverlay } from './components/NavDebugOverlay';
+import { AudioProvider, useAudio } from './components/AudioProvider';
+import { VirtualKeyboard, SuggestionItem } from './components/VirtualKeyboard';
+import { GamepadTester } from './components/GamepadTester';
+import { useGamepad } from './hooks/useGamepad';
+import { InputManager } from './input/InputManager';
+
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+// v0.99.32 — Id stabile e riconoscibile per la card "Steam Big Picture",
+// usato sia qui sia in tutti gli handler (handlePlay, openGameOptions,
+// ecc.) che devono distinguerla da un titolo reale tramite
+// game.isBigPictureLauncher invece di un controllo sull'id, che resta
+// comunque utile per debug/log.
+const STEAM_BIG_PICTURE_ID = 'steam-bigpicture-launcher';
+
+// v1.1.16 — suggerimenti alternativi per la tastiera virtuale, mostrati
+// premendo Shift al posto dei completamenti di default (.com/.exe/ecc.)
+// quando si sta modificando il campo giusto. Curati per essere a basso
+// rischio (un gioco che non li riconosce li ignora, non si rompe) e per
+// coprire le classi di problemi più comuni per giochi Windows via
+// Wine/Proton — non sono flag "universali", la loro utilità dipende dal
+// motore di gioco/runner specifico, da qui il tip contestuale su ognuno.
+//
+// NOTA ONESTA: elenco compilato da conoscenza generale della comunità
+// Linux gaming (ProtonDB e simili), non verificato con test reali in
+// questo ambiente — nessun gioco/runner reale disponibile qui per
+// validarli uno per uno.
+const LAUNCH_ARG_SUGGESTIONS: SuggestionItem[] = [
+  { value: '-windowed',  insertMode: 'append-space', tip: 'Avvia in finestra — il fix più citato per blocchi/freeze da fullscreen esclusivo sotto Wine/Proton' },
+  { value: '-noborder',  insertMode: 'append-space', tip: 'Finestra senza bordi — abbinato a -windowed per un "fullscreen" senza i problemi del fullscreen esclusivo' },
+  { value: '-dx9',       insertMode: 'append-space', tip: 'Forza DirectX 9 — spesso meno stranezze sotto Wine/DXVK delle versioni successive dello stesso gioco' },
+  { value: '-nointro',   insertMode: 'append-space', tip: 'Salta i video di apertura — causa frequente di crash sotto Wine per problemi di codec' },
+  { value: '-novid',     insertMode: 'append-space', tip: 'Come -nointro, variante Source engine (Half-Life 2, CS:S, TF2, Portal, Left 4 Dead)' },
+  { value: '-high',      insertMode: 'append-space', tip: 'Priorità processo alta — suggerito per stutter su giochi Source/più datati' },
+  { value: '-nojoy',     insertMode: 'append-space', tip: 'Disattiva il rilevamento joystick del gioco — utile se confligge col rilevamento controller della Dashboard' },
+];
+
+const ENV_VAR_SUGGESTIONS_WINE: SuggestionItem[] = [
+  { value: 'WINEDEBUG=-all',                          insertMode: 'replace', tip: 'Silenzia il log di debug di Wine — meno rumore, leggero overhead in meno' },
+  { value: 'WINEARCH=win64',                           insertMode: 'replace', tip: 'Forza un prefix a 64 bit' },
+  { value: 'WINEESYNC=1',                              insertMode: 'replace', tip: 'Abilita esync — sincronizzazione più leggera, utile su kernel meno recenti' },
+  { value: 'WINEFSYNC=1',                              insertMode: 'replace', tip: 'Abilita fsync — equivalente più moderno di esync, kernel recenti' },
+  { value: 'WINE_LARGE_ADDRESS_AWARE=1',               insertMode: 'replace', tip: 'Permette a giochi a 32 bit di usare più di 2GB di RAM — fix molto citato' },
+  { value: 'WINEDLLOVERRIDES=winemenubuilder.exe=d',   insertMode: 'replace', tip: 'Disattiva la creazione automatica di collegamenti/voci di menu da parte di Wine' },
+  { value: 'WINEDLLOVERRIDES=d3d11=n',                 insertMode: 'replace', tip: 'Forza la DLL nativa invece di quella integrata — utile per problemi grafici specifici' },
+];
+
+const ENV_VAR_SUGGESTIONS_PROTON: SuggestionItem[] = [
+  { value: 'PROTON_LOG=1',                    insertMode: 'replace', tip: 'Abilita il log di Proton su file — primo passo di ogni diagnosi' },
+  { value: 'PROTON_NO_ESYNC=1',                insertMode: 'replace', tip: 'Disattiva esync — a volte necessario per compatibilità' },
+  { value: 'PROTON_NO_FSYNC=1',                insertMode: 'replace', tip: 'Disattiva fsync — stesso motivo di NO_ESYNC' },
+  { value: 'PROTON_USE_WINED3D=1',             insertMode: 'replace', tip: 'Forza WineD3D al posto di DXVK/VKD3D — utile se DXVK dà problemi specifici' },
+  { value: 'PROTON_FORCE_LARGE_ADDRESS_AWARE=1', insertMode: 'replace', tip: 'Equivalente Proton del fix RAM per giochi a 32 bit' },
+  { value: 'DXVK_HUD=fps',                     insertMode: 'replace', tip: 'Overlay DXVK con FPS a schermo — diagnostica rapida, non modifica nulla' },
+  { value: 'DXVK_ASYNC=1',                     insertMode: 'replace', tip: 'Riduce lo stutter da compilazione shader — uno dei fix più citati in assoluto' },
+];
+
+/**
+ * v0.99.37 — Factory estratta da appendSteamBigPictureCard: prima l'oggetto
+ * Game della card veniva costruito solo inline dentro quella funzione,
+ * quindi esisteva SOLO nell'elenco usato per renderizzare la griglia — mai
+ * nello stato `games` grezzo (che arriva da /api/games, lato server, e non
+ * conosce questa card virtuale). Bug reale confermato: il pannello destro
+ * (`selectedGame = games.find(...) || games[0]`) non trovava mai la card
+ * qui dentro e cadeva sistematicamente sul primo gioco reale della lista
+ * corrente, mostrando info di un titolo a caso invece che della card
+ * selezionata. Estratta qui così la stessa identica definizione può essere
+ * riusata anche per risolvere selectedGame (vedi sotto), senza duplicare i
+ * campi e rischiare che i due punti divergano nel tempo.
+ */
+function makeSteamBigPictureCard(): Game {
+  return {
+    id: STEAM_BIG_PICTURE_ID,
+    title: 'Steam Big Picture',
+    store: 'Steam',
+    runner: 'Steam Native' as RunnerType,
+    isInstalled: true, // sempre "pronta", non richiede mai un'azione di installazione
+    playTimeHours: 0,
+    coverImage: STEAM_BIGPICTURE_COVER,
+    previewImage: STEAM_BIGPICTURE_PREVIEW,
+    description: 'Passa a Steam in modalità Big Picture, con la tua libreria Steam completa e l\'interfaccia controller-first nativa di Valve.',
+    tags: ['Steam', 'Big Picture'],
+    status: 'Ready to Launch',
+    isBigPictureLauncher: true,
+  };
+}
+
+/**
+ * Inietta la card speciale "Steam Big Picture" nell'elenco filtrato della
+ * libreria, SOLO lato frontend — mai persistita nel DB, mai restituita da
+ * gameManager.getGames() (vedi commento su Game.isBigPictureLauncher in
+ * types.ts). Sempre presente quando lo store attivo è 'Steam' o 'All',
+ * anche con libreria Steam reale vuota o il plugin Steam disabilitato — il
+ * suo scopo non è "lanciare un gioco posseduto", è offrire un modo nativo
+ * di passare a Steam Big Picture dalla libreria X-Launcher (rilevante
+ * soprattutto in sessione X11 dedicata, dove non esiste un altro modo
+ * "ovvio" di raggiungere Steam senza uscire dalla Dashboard).
+ *
+ * Posizionata in coda all'elenco filtrato (dopo i titoli reali), non in
+ * testa — non deve competere con la prima card reale per il fallback
+ * automatico del focus (v0.99.4), che resta sulla prima card a sinistra
+ * come da comportamento consolidato.
+ *
+ * Soggetta allo stesso filtro testuale degli altri elementi quando
+ * searchQuery non è vuota: cercando "steam" o "big picture" la si trova
+ * come un vero elemento, cercando il nome di un gioco specifico sparisce
+ * come ci si aspetterebbe da una card che non corrisponde alla query.
+ */
+function appendSteamBigPictureCard(
+  filteredGames: Game[],
+  activeStore: StoreType | 'All',
+  searchQuery: string
+): Game[] {
+  if (activeStore !== 'Steam' && activeStore !== 'All') return filteredGames;
+
+  const card: Game = makeSteamBigPictureCard();
+
+  if (searchQuery) {
+    const s = searchQuery.toLowerCase();
+    const matches = card.title.toLowerCase().includes(s) ||
+      card.description.toLowerCase().includes(s) ||
+      card.tags.some(t => t.toLowerCase().includes(s));
+    if (!matches) return filteredGames;
+  }
+
+  return [...filteredGames, card];
+}
+
+// v0.99.32 — Placeholder SVG inline per la card "Steam Big Picture", in
+// attesa dell'asset grafico dedicato e coerente con lo stile Steam (grid/
+// hero/logo nella cartella grid/ di Steam stesso, vedi il lavoro separato
+// sull'integrazione Non-Steam Game). Nessuna dipendenza da un file esterno
+// per questa fase: un data URI evita un fetch di rete o un file mancante
+// che romperebbe il rendering della card prima che l'asset finale sia pronto.
+const STEAM_BIGPICTURE_COVER = `data:image/svg+xml,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 900">
+  <rect width="600" height="900" fill="#0b1118"/>
+  <circle cx="300" cy="380" r="160" fill="#171d25"/>
+  <circle cx="300" cy="380" r="120" fill="#2a475e"/>
+  <circle cx="300" cy="380" r="60" fill="#66c0f4"/>
+  <circle cx="300" cy="380" r="28" fill="#0b1118"/>
+  <text x="300" y="700" font-family="Arial, sans-serif" font-size="48" font-weight="bold" fill="#66c0f4" text-anchor="middle">STEAM</text>
+  <text x="300" y="750" font-family="Arial, sans-serif" font-size="30" fill="#8f98a0" text-anchor="middle">BIG PICTURE</text>
+</svg>
+`)}`;
+
+// v0.99.37 — Immagine dedicata per il pannello info (aspect-video, 16:9),
+// invece di riusare STEAM_BIGPICTURE_COVER (pensata per la card 3/4 della
+// griglia). Con object-cover, un sorgente 2:3 mostrato in un riquadro 16:9
+// viene ritagliato pesantemente sull'asse verticale — il crop risultante
+// avrebbe escluso proprio il testo "STEAM / BIG PICTURE" in basso,
+// lasciando visibile solo il logo senza alcuna etichetta. Componendo un
+// SVG nativamente 16:9 logo e testo restano sempre nell'inquadratura,
+// nessun ritaglio necessario.
+const STEAM_BIGPICTURE_PREVIEW = `data:image/svg+xml,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900">
+  <rect width="1600" height="900" fill="#0b1118"/>
+  <circle cx="800" cy="380" r="180" fill="#171d25"/>
+  <circle cx="800" cy="380" r="135" fill="#2a475e"/>
+  <circle cx="800" cy="380" r="68" fill="#66c0f4"/>
+  <circle cx="800" cy="380" r="32" fill="#0b1118"/>
+  <text x="800" y="680" font-family="Arial, sans-serif" font-size="56" font-weight="bold" fill="#66c0f4" text-anchor="middle">STEAM</text>
+  <text x="800" y="735" font-family="Arial, sans-serif" font-size="34" fill="#8f98a0" text-anchor="middle">BIG PICTURE</text>
+</svg>
+`)}`;
+
+/**
+ * v0.99.90 — titolo che rivela il testo completo una volta sola se eccede
+ * lo spazio disponibile, poi torna all'inizio (dove riprende ad apparire
+ * come "troncato" a riposo — coerente con l'aspetto di un titolo breve
+ * che invece ci sta per intero). Usato per i titoli delle notifiche,
+ * spesso più lunghi dello spazio disponibile nel pannello da 384px
+ * (w-96) e prima semplicemente tagliati con `truncate`, senza modo di
+ * leggerli per intero senza aprire la notifica.
+ *
+ * Diverso dall'auto-scroll continuo del pannello info (v0.99.38): lì il
+ * contenuto è lungo e la lettura richiede più tempo, qui è un titolo
+ * breve — una singola rivelazione basta, non serve un loop perenne che
+ * distrarrebbe in un elenco con più notifiche visibili insieme.
+ */
+function ScrollOnceTitle({ text, className }: { text: string; className?: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLParagraphElement>(null);
+  const [overflowPx, setOverflowPx] = useState(0);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const textEl = textRef.current;
+    if (!container || !textEl) return;
+    const overflow = textEl.scrollWidth - container.clientWidth;
+    setOverflowPx(overflow > 4 ? overflow : 0);
+  }, [text]);
+
+  return (
+    <div ref={containerRef} className="overflow-hidden whitespace-nowrap">
+      <p
+        ref={textRef}
+        className={cn(className, "inline-block")}
+        style={overflowPx > 0 ? (() => {
+          // v0.99.90 — durata proporzionale alla distanza da percorrere,
+          // non fissa: con una durata fissa un titolo molto più lungo
+          // doveva scorrere la stessa distanza maggiore nello stesso
+          // tempo, risultando visibilmente più veloce e difficile da
+          // leggere. 45px/s è una velocità di lettura comoda; il fattore
+          // 0.4 riflette che nel keyframe (vedi index.css) solo il primo
+          // 40% e l'ultimo 40% sono scorrimento vero e proprio (andata e
+          // ritorno), il resto è la pausa alla fine. Min/max evitano sia
+          // uno scatto troppo rapido su titoli di poco più lunghi dello
+          // spazio disponibile sia un'attesa eccessiva su titoli enormi.
+          const scrollSpeedPxPerSec = 45;
+          const scrollPhaseSec = overflowPx / scrollSpeedPxPerSec;
+          const durationSec = Math.min(Math.max(scrollPhaseSec / 0.4, 3), 14);
+          return {
+            animation: `scroll-once-reveal ${durationSec}s ease-in-out 1s 1`,
+            ['--scroll-distance' as any]: `-${overflowPx}px`,
+          };
+        })() : undefined}
+      >
+        {text}
+      </p>
+    </div>
+  );
+}
+
+// v0.99.90 — Step 15d: metadati statici dei quattro provider cloud —
+// nome, se richiedono un account a pagamento fin dal primo utilizzo
+// (stessa distinzione già usata per l'ordine di priorità di sviluppo:
+// Gemini/DeepSeek hanno un vero utilizzo gratuito, ChatGPT/Claude no) e
+// la nota specifica da mostrare all'attivazione. Non viene dal backend:
+// sono fatti sui provider stessi, non configurazione dell'utente.
+const CLOUD_PROVIDERS: Array<{ id: string; name: string; requiresPaidAccount: boolean; note: string }> = [
+  {
+    id: 'gemini', name: 'Google Gemini', requiresPaidAccount: false,
+    note: 'Tier gratuito reale con limiti di frequenza. Su questo tier, prompt e risposte possono essere usati da Google per migliorare i propri modelli — per dati sensibili serve il tier a pagamento.',
+  },
+  {
+    id: 'deepseek', name: 'DeepSeek', requiresPaidAccount: false,
+    note: '5 milioni di token gratuiti alla registrazione, nessuna carta di credito richiesta.',
+  },
+  {
+    id: 'chatgpt', name: 'ChatGPT (OpenAI)', requiresPaidAccount: true,
+    note: 'Richiede una ricarica prepagata (min. $5) su platform.openai.com — nessun tier gratuito reale, anche per i modelli più economici.',
+  },
+  {
+    id: 'claude', name: 'Claude (Anthropic)', requiresPaidAccount: true,
+    note: 'Pay-as-you-go fin dal primo utilizzo su console.anthropic.com — nessun tier gratuito reale.',
+  },
+];
+
+/**
+ * v1.0.0 — variante di ScrollOnceTitle per campi <input> di sola lettura
+ * (es. Executable Path): un <input> non supporta l'animazione via CSS
+ * transform sul contenuto (il valore non è un nodo di testo manipolabile
+ * come un <p>), ma supporta la manipolazione diretta di `scrollLeft` —
+ * stessa identica logica di "scorri una volta, pausa, torna all'inizio"
+ * di ScrollOnceTitle, riscritta per questo caso specifico. Attiva/riattiva
+ * ogni volta che cambia `trigger` (tipicamente il valore stesso del
+ * campo), cosi selezionare un gioco diverso o modificare il path
+ * riavvia la rivelazione.
+ */
+function useScrollOnceOverflow(ref: React.RefObject<HTMLInputElement>, trigger: unknown) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const overflow = el.scrollWidth - el.clientWidth;
+    el.scrollLeft = 0;
+    if (overflow <= 4) return; // il testo ci sta già, nulla da fare
+
+    let cancelled = false;
+    let rafId: number | null = null;
+    const scrollSpeedPxPerSec = 45; // stessa velocità di lettura di ScrollOnceTitle
+    const scrollPhaseSec = overflow / scrollSpeedPxPerSec;
+    const durationMs = Math.min(Math.max(scrollPhaseSec / 0.4, 3), 14) * 1000;
+
+    const delayTimer = setTimeout(() => {
+      if (cancelled) return;
+      let start: number | null = null;
+      const step = (ts: number) => {
+        if (cancelled) return;
+        if (start === null) start = ts;
+        const t = Math.min((ts - start) / durationMs, 1);
+        // 0-40% andata, 40-60% pausa in fondo, 60-100% ritorno — stesso
+        // schema del keyframe scroll-once-reveal usato per i titoli.
+        const scrollT = t < 0.4 ? t / 0.4 : t < 0.6 ? 1 : 1 - (t - 0.6) / 0.4;
+        el.scrollLeft = overflow * scrollT;
+        if (t < 1) rafId = requestAnimationFrame(step);
+      };
+      rafId = requestAnimationFrame(step);
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(delayTimer);
+      if (rafId != null) cancelAnimationFrame(rafId);
+    };
+  }, [trigger]);
+}
+
+function MainApp() {
+  const [games, setGames] = useState<Game[]>([]);
+  // v1.1.20 — bug confermato: la tab Store Accounts calcolava i conteggi
+  // "Synced"/"Installed" per store filtrando lo stesso array `games` usato
+  // dalla dashboard — che riflette QUALUNQUE filtro di navigazione attivo
+  // in quel momento (store selezionato, ricerca), non l'intera libreria.
+  // Navigando "Tutti i giochi" i conteggi risultavano giusti per
+  // coincidenza (nessun filtro store), ma navigando un singolo store
+  // (es. GOG) `games` conteneva SOLO quel sottoinsieme — gli altri store
+  // mostravano sempre zero. Array dedicato, sempre non filtrato,
+  // indipendente da cosa si sta navigando nella dashboard in quel momento.
+  const [allGamesForAccountCounts, setAllGamesForAccountCounts] = useState<Game[]>([]);
+  // Cache client-side della libreria, chiave sui parametri che ne
+  // determinano il contenuto (store, ricerca, sort, genere, categoria).
+  // Risolve due sintomi distinti osservati cambiando store con L1/R1/mouse:
+  // - "griglia vuota per secondi" finché il fetch non risponde
+  // - "resta visibile la libreria precedente" finché il fetch non risponde
+  // Entrambi erano la stessa causa: nessuna cache, quindi ogni cambio
+  // store doveva sempre attendere un round-trip di rete prima di mostrare
+  // qualcosa di corretto. Con la cache, al cambio store mostriamo subito
+  // l'ultima versione nota per quella combinazione di filtri (se esiste),
+  // e la aggiorniamo silenziosamente in background quando il fetch fresco
+  // risponde — nessun flash, nessun vuoto, nessuna attesa percepita per le
+  // librerie già visitate in questa sessione.
+  const libraryCacheRef = useRef<Map<string, Game[]>>(new Map());
+  // v1.1.22 — bug reale: due percorsi indipendenti chiamano entrambi
+  // `/api/games` e poi `setGames(...)` — il fetch periodico legato ad
+  // activeStore/filtri (con il suo AbortController, che protegge solo
+  // contro se STESSO quando i filtri cambiano) e l'handler dell'evento
+  // SSE 'library-updated' (fetch separato, nessun AbortController in
+  // comune con l'altro). Se il secondo fetch (avviato DOPO, con dati
+  // corretti — es. appena finita un'installazione) si risolve PRIMA del
+  // primo (avviato PRIMA, con dati vecchi, ma più lento a rispondere per
+  // varianza di rete), il risultato vecchio sovrascrive quello corretto
+  // per ultimo — e nulla lo corregge finché non arriva un ALTRO fetch,
+  // che può non arrivare mai se l'utente resta sulla stessa vista.
+  // Sintomo osservato: la card si aggiorna subito correttamente, poi
+  // torna allo stato precedente "da sola" pochi istanti dopo, stabile
+  // anche per minuti. Fix: un numero di sequenza globale — ogni fetch
+  // cattura il proprio numero all'avvio, e applica il risultato a
+  // `setGames` SOLO se nessun fetch più recente è stato avviato nel
+  // frattempo. L'ultimo ad ESSERE AVVIATO vince sempre, non l'ultimo a
+  // rispondere.
+  const librarySeqRef = useRef(0);
+  const buildLibraryCacheKey = useCallback((
+    store: string, search: string, sort: string, order: string, genre: string, category: string
+  ) => `${store}::${search}::${sort}::${order}::${genre}::${category}`, []);
+  // Stato iniziale vuoto, non MOCK_STORES: usare dati finti come stato
+  // iniziale di produzione causava un flash visibile all'avvio — store
+  // (es. Ubisoft) che non corrispondono ai plugin realmente installati,
+  // visibili per la frazione di secondo prima che /api/stores risponda
+  // con l'elenco reale. I mock restano disponibili solo come fallback per
+  // sviluppo/demo offline, non come default silenzioso in produzione.
+  const [stores, setStores] = useState<any[]>([]);
+  const [selectedGameId, setSelectedGameId] = useState<string>('');
+  const [activeStore, setActiveStore] = useState<StoreType | 'All'>('All');
+  // Ref sincronizzato con activeStore: permette a cycleStore di leggere il
+  // valore corrente SENZA dipendere da activeStore nel proprio useCallback.
+  // Causa del bug "L1/R1 impazziti": cycleStore aveva activeStore tra le
+  // dipendenze, quindi cambiava identità ad ogni cambio store; il gamepad
+  // useEffect ha cycleStore tra le sue dipendenze, quindi si rimontava ad
+  // ogni cambio store. Se il tasto fisico restava premuto anche solo un
+  // frame in più (normale per una pressione umana), il remount dell'effect
+  // poteva produrre una nuova lettura "appena premuto" prima che il rilascio
+  // fisico fosse mai avvenuto — cascata di cicli fino al rilascio del tasto,
+  // con direzione finale dipendente dalla durata della pressione, non
+  // dall'input singolo. Con il ref, cycleStore non cambia mai identità.
+  const activeStoreRef = useRef(activeStore);
+  useEffect(() => { activeStoreRef.current = activeStore; }, [activeStore]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [inputDevice, setInputDevice] = useState<'controller' | 'keyboard'>('controller');
+  const [viewState, setViewState] = useState<ViewState>('library');
+  const [theme, setTheme] = useState<Theme>(() => {
+    try { const t = localStorage.getItem('x-launcher-theme'); return (t === 'light' || t === 'dark') ? t : 'dark'; } catch { return 'dark'; }
+  });
+  // v0.99.9: isFullscreen (booleano) sostituito da displayMode a tre stati
+  // — kiosk (--kiosk, comportamento storico), window (finestra normale
+  // ridimensionabile), borderless (finestra massimizzata senza bordi,
+  // niente vero cambio di modalità X11 — introdotta per verificare un
+  // sospetto di input lag più alto in kiosk reale rispetto alla finestra,
+  // probabilmente dovuto a xfwm4 che non disabilita il proprio compositing
+  // per una finestra fullscreen non "override redirect" come quella creata
+  // da --kiosk). Vedi changelog v0.99.9 e kiosk-launch.sh.
+  const [displayMode, setDisplayMode] = useState<'kiosk' | 'window' | 'borderless'>('kiosk');
+  // v0.99.17 — toggle SOLO in memoria (mai persistito): rende visibile/
+  // raggiungibile dal menu una terza voce "Kiosk" oltre a Window/Fullscreen.
+  // Default false: il menu mostra solo le due opzioni standard finché
+  // l'utente non preme Ctrl+Alt+K, che inserisce 'kiosk' nel ciclo del
+  // menu visibile; una seconda pressione la rimuove di nuovo. Resta sempre
+  // false ad ogni avvio fresco della Dashboard — non c'è motivo di
+  // persistere una preferenza di debug fra sessioni diverse.
+  const [kioskOptionVisible, setKioskOptionVisible] = useState(false);
+  const [showGameOptions, setShowGameOptions] = useState(false);
+  const [downloads, setDownloads] = useState<any[]>([]);
+  // v0.99.35 — Set dei gameId completati che l'utente ha già "visto
+  // abbastanza" — nascosti localmente dalla colonna download 6s dopo
+  // il completamento, così la lista non si accumula all'infinito e
+  // il messaggio di fine installazione (che funge anche da notifica,
+  // vedi discussione overlay) ha il tempo di essere notato prima di
+  // sparire. Il task resta comunque sul backend (storico/polling) —
+  // solo la visualizzazione locale lo filtra via.
+  const [hiddenCompletedIds, setHiddenCompletedIds] = useState<Set<string>>(new Set());
+  // v0.99.38 — conferma a due passaggi per l'annullamento di un download:
+  // cancella davvero i dati parziali su disco (vedi downloadManager.ts),
+  // quindi un click singolo accidentale non deve poter buttare via ore di
+  // download. null = nessuna conferma in corso, altrimenti gameId in attesa.
+  const [confirmCancelDownloadId, setConfirmCancelDownloadId] = useState<string | null>(null);
+  // v0.99.38 — nome macchina mostrato accanto all'avatar, al posto del
+  // runner "Proton 8.0-4 Active" hardcoded che non rifletteva mai lo stato
+  // reale (né il runner davvero in uso, che varia per gioco, né altro).
+  const [hostname, setHostname] = useState<string>('');
+  useEffect(() => {
+    fetch('/api/system/hostname').then(r => r.json()).then(d => setHostname(d.hostname ?? '')).catch(() => {});
+  }, []);
+  const [showDownloads, setShowDownloads] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [expandedNotifId, setExpandedNotifId] = useState<string | null>(null);
+  // Azione in attesa di conferma: { type, gameId, gameTitle }
+  const [pendingAction, setPendingAction] = useState<{
+    type: 'install' | 'uninstall';
+    gameId: string;
+    gameTitle: string;
+    // v1.1.18 — snapshot delle Custom Env con switch "solo installazione"
+    // spento, catturato nell'istante in cui si preme INSTALLA — non
+    // ri-letto da nessuna parte al momento della conferma, a differenza
+    // di winetricksVerbs/useKnownFixes (quelli hanno una copia nel DB da
+    // cui ri-leggere in modo sicuro; queste variabili, per costruzione,
+    // non vengono MAI scritte nel DB — l'unica copia esiste qui, nello
+    // stato di questo pending action).
+    installOnlyEnv?: Record<string, string>;
+  } | null>(null);
+  const [showTrailer, setShowTrailer] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<'engine' | 'accounts' | 'input' | 'plugins' | 'ai-models'>('accounts');
+  const [availableRunners, setAvailableRunners] = useState<any[]>([]);
+  const [installableRunners, setInstallableRunners] = useState<any[]>([]);
+  // v0.99.90 — Step 15d: modelli Ollama disponibili sulla macchina e
+  // flag di raggiungibilità. ollamaAvailable determina se la tab
+  // "AI Models" compare affatto nell'header di Impostazioni — se Ollama
+  // non è installato/in esecuzione non ha senso mostrare una sezione
+  // vuota, "per non appesantire la navigazione di elementi inutili"
+  // (richiesta esplicita). null = non ancora verificato.
+  const [ollamaAvailable, setOllamaAvailable] = useState<boolean | null>(null);
+  const [ollamaModels, setOllamaModels] = useState<Array<{ name: string; sizeBytes: number; parameterSize: string | null; quantization: string | null }>>([]);
+  const [activeOllamaModel, setActiveOllamaModel] = useState<string | null>(null);
+  // v0.99.90 — tracciato separatamente dal modello attivo: serve per
+  // sapere se il provider Ollama è acceso o spento, non solo quale
+  // modello userebbe se fosse acceso (premere A sulla riga già
+  // selezionata deve spegnere Ollama, non limitarsi a riselezionarla).
+  const [ollamaEnabled, setOllamaEnabled] = useState(false);
+  // v0.99.90 — Step 15d: consumo token del mese corrente e budget
+  // configurato — il contatore "hai usato X di Y token" discusso in fase
+  // di progettazione, mostrato sia qui (tab AI Models) sia nelle notifiche
+  // stesse (costruito lato server in notificationEngine.ts).
+  const [aiUsage, setAiUsage] = useState<{ totalTokens: number; budget: number }>({ totalTokens: 0, budget: 50_000 });
+  const [budgetDraft, setBudgetDraft] = useState<string>('');
+  // v0.99.90 — Step 15d: stato dei quattro provider cloud (Gemini/
+  // DeepSeek/ChatGPT/Claude). apiKeyDraft è ciò che l'utente ha digitato
+  // in QUESTA sessione tramite la tastiera on-screen — mai il vero
+  // valore salvato (la GET restituisce sempre '••••••••' se una key è
+  // già presente, mai in chiaro, vedi server.ts). hasStoredKey distingue
+  // "una key è già salvata, anche se non la vedo" da "nessuna key mai
+  // inserita" — serve per non mostrare il campo come vuoto/da correggere
+  // quando in realtà è già configurato.
+  const [cloudProviderState, setCloudProviderState] = useState<Record<string, {
+    enabled: boolean;
+    hasStoredKey: boolean;
+    apiKeyDraft: string;
+    testing: boolean;
+    testResult: { success: boolean; message: string } | null;
+  }>>({});
+  const [runnerInstallProgress, setRunnerInstallProgress] = useState<Record<string, string[]>>({});
+  const [runnerInstalling, setRunnerInstalling] = useState<string | null>(null);
+  const [runnerUninstalling, setRunnerUninstalling] = useState<string | null>(null);
+  const [runnerUninstallProgress, setRunnerUninstallProgress] = useState<Record<string, string[]>>({});
+  // runnerId attualmente in stato "conferma azione" (install o uninstall):
+  // prima pressione di A porta qui, la seconda esegue, B annulla. Stesso
+  // pattern a due tap già validato per la disconnessione store (pendingUnlink).
+  const [pendingRunnerAction, setPendingRunnerAction] = useState<{ id: string; action: 'install' | 'uninstall' } | null>(null);
+  // Conferma a 2 tap per la chiusura della Dashboard: stesso pattern già
+  // usato per disconnessione store e disinstallazione runner — un'azione
+  // distruttiva non deve mai eseguire al primo tocco.
+  const [pendingExit, setPendingExit] = useState(false);
+  const [systemTools, setSystemTools] = useState<Record<string, boolean | string>>({});
+  const [diskUsage, setDiskUsage] = useState<{
+    gamesDir: string;
+    usedHuman: string; totalHuman: string; freeHuman: string; usedPercent: number;
+  } | null>(null);
+  const [systemTabLoaded, setSystemTabLoaded] = useState(false);
+  // Store Accounts — polling OAuth
+  const [authPolling, setAuthPolling] = useState<string | null>(null);   // storeId in polling
+  const [authMessage, setAuthMessage] = useState<Record<string, string>>({});
+  const [authUrl, setAuthUrl] = useState<Record<string, string>>({});
+  // storeId attualmente in stato "conferma disconnessione": prima pressione
+  // di A su una card connessa porta qui, la seconda esegue logout, B annulla.
+  const [pendingUnlink, setPendingUnlink] = useState<string | null>(null);
+  const [retroarchCores, setRetroarchCores] = useState<Array<{name: string; path: string}>>([]);
+  // v1.0.0 — nome base (senza path/estensione) del core di default per il
+  // sistema del gioco selezionato — usato per sapere a cosa "tornare"
+  // quando l'utente disattiva l'override di un core alternativo.
+  const [retroarchDefaultCore, setRetroarchDefaultCore] = useState<string>('');
+  const [retroarchAvailable, setRetroarchAvailable] = useState<boolean | null>(null);
+  // Step 4 — stato locale del profilo compat per toggle reattivi (ottimistic UI)
+  const [localCompatProfile, setLocalCompatProfile] = useState<Record<string,boolean>>({});
+  // Step 4 — stato locale config per-game per input reattivi
+  const [localGameConfig, setLocalGameConfig] = useState<Record<string,string>>({});
+  // Step 4 — custom env come stringa KEY=VALUE per riga
+  const [customEnvText, setCustomEnvText] = useState<string>('');
+  // v1.1.18 — persistenza per-riga delle Custom Env Variables. Chiave =
+  // KEY della variabile (non l'indice di riga: sopravvive ad
+  // aggiunta/rimozione/riordino di righe). Assente dalla mappa = true
+  // (persistente) di default — comportamento identico a prima
+  // dell'introduzione di questo switch per chiunque avesse già variabili
+  // salvate: nessuna migrazione a sorpresa. Spento = "solo per questa
+  // installazione", mai scritto nel profilo di compatibilità persistente
+  // (compat_profiles), passato invece — una volta sola — al task di
+  // installazione stesso, con lo stesso meccanismo già usato per
+  // winetricksVerbs/useKnownFixes.
+  const [customEnvPersistentFlags, setCustomEnvPersistentFlags] = useState<Record<string, boolean>>({});
+  // Step 10 — dipendenze Winetricks selezionate nell'overlay
+  const DEFAULT_WINE_VERBS = ['vcrun2022', 'dxvk', 'vkd3d', 'corefonts'];
+  const OPTIONAL_WINE_VERBS = ['vcrun2019', 'vcrun2017', 'vcrun2015', 'xna40', 'd3dcompiler_47', 'physx', 'msxml6', 'mfc140', 'dotnet48', 'dotnet40', 'dotnet35'];
+  const [winetricksVerbs, setWinetricksVerbs] = useState<string[]>(DEFAULT_WINE_VERBS);
+  // v0.99.35 — switch overlay "Disabilita sync NT veloce", persistito
+  // nel compat profile come gli altri toggle (fsr/gameMode/ecc.)
+  const [disableWineSync, setDisableWineSync] = useState<boolean>(false);
+  // v0.99.35 — switch overlay "Usa Known Fixes (Heroic)" (v0.99.38: esteso anche a GOG)
+  const [useKnownFixes, setUseKnownFixes] = useState<boolean>(false);
+  // Step 11 — versione runner corrente per il gioco selezionato
+  const [runnerVersion, setRunnerVersion] = useState<string>('');
+  
+  const [isGamescope, setIsGamescope] = useState(false);
+  const [showDebugConsole, setShowDebugConsole] = useState(false); // Step 13 UI: nascosta di default
+  // Step 12f — Log console avanzata
+  const [logFilter, setLogFilter] = useState<Set<string>>(new Set());   // set vuoto = mostra tutto
+  // Step 13 UI — avatar utente e menu profilo rapido
+  const [avatarImage, setAvatarImage] = useState<string | null>(() => {
+    try { return localStorage.getItem('x-launcher-avatar'); } catch { return null; }
+  });
+  const [showAvatarLibrary, setShowAvatarLibrary] = useState(false);
+
+  // Plugin manager
+  const [pluginRegistry, setPluginRegistry] = useState<Array<{
+    id: string; name: string; description: string;
+    drmFree: boolean; requiredTool: string; enabled: boolean;
+  }>>([]);
+  const [pluginLoadError, setPluginLoadError] = useState<string | null>(null);
+
+  // Input manager — dispositivi connessi e plugin
+  const [inputPlugins, setInputPlugins] = useState(
+    () => InputManager.plugins.map(p => ({ ...p, enabled: p.enabled }))
+  );
+  const [connectedDevices, setConnectedDevices] = useState(InputManager.devices);
+  // v1.1.12 — la parte introduttiva di ogni tab (es. il banner
+  // "funzione sperimentale" in AI Advisor) restava nascosta se lo scroll
+  // del corpo era già avanzato da un'altra tab o da un focus profondo
+  // nella stessa tab (es. focus corretto sul modello installato più in
+  // basso, ma contenuto scrollato oltre l'intestazione). Il focus era
+  // giusto, lo scroll visivo no — due cose distinte che devono essere
+  // sincronizzate esplicitamente ad ogni cambio tab.
+  const settingsBodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // v1.1.14 — 280ms non bastava: il cambio tab imposta il focus con un
+    // suo setTimeout(50ms) PRIMA che l'animazione di centraggio di
+    // FocusProvider parta (che a sua volta parte dopo altri 30ms e dura
+    // 220ms) — il conto reale è 50+30+220=300ms dal cambio tab, non 250.
+    // Margine ulteriore per sicurezza.
+    const t = setTimeout(() => {
+      if (settingsBodyRef.current) settingsBodyRef.current.scrollTop = 0;
+    }, 400);
+    return () => clearTimeout(t);
+  }, [activeSettingsTab]);
+
+  // v1.1.20 — fetch dedicato e sempre non filtrato per i conteggi reali
+  // di Store Accounts, indipendente da qualunque filtro di navigazione
+  // della dashboard attivo in quel momento. Si attiva quando la tab
+  // Accounts diventa visibile (apertura Impostazioni su quella tab, o
+  // cambio verso quella tab a modal già aperto) — non ad ogni apertura di
+  // Impostazioni su una tab diversa, per non fare una fetch inutile.
+  useEffect(() => {
+    if (!showSettings || activeSettingsTab !== 'accounts') return;
+    fetch('/api/games?store=All')
+      .then(r => r.ok ? r.json() : [])
+      .then(setAllGamesForAccountCounts)
+      .catch(() => {});
+  }, [showSettings, activeSettingsTab]);
+  // v1.1.8 — modalità cattura dell'area di test controller: progresso
+  // 0-1 della pressione prolungata di B necessaria per uscire, esposto a
+  // GamepadTester per la barra di avanzamento. Il ref (non lo stato)
+  // tiene il timestamp di inizio pressione: serve solo al calcolo interno
+  // nel loop di polling, non deve causare re-render da solo.
+  const [gamepadTestExitProgress, setGamepadTestExitProgress] = useState(0);
+  const gamepadTestBHoldStartRef = useRef<number | null>(null);
+  const GAMEPAD_TEST_EXIT_HOLD_MS = 1000;
+  // v1.1.11 — breve ritardo fra "soglia raggiunta" e uscita effettiva:
+  // dà il tempo di vedere il LED passare a verde prima che il focus si
+  // sposti davvero fuori dall'area, invece di saltare al menu X-Launcher
+  // nello stesso istante in cui il giallo termina.
+  const [gamepadTestExiting, setGamepadTestExiting] = useState(false);
+  const GAMEPAD_TEST_EXIT_DELAY_MS = 400;
+  const [avatarFiles, setAvatarFiles] = useState<Array<{ filename: string; url: string }>>([]);
+  const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
+  const [pauseScroll, setPauseScroll] = useState(false);
+  const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
+  const [appVersion, setAppVersion] = useState('v1.1.35-rc.2');
+  const logScrollRef = useRef<HTMLDivElement>(null);
+  
+  const [searchQuery, setSearchQuery] = useState('');
+  // FIX v0.99.8: rimosso lo stato previousActiveStore — serviva solo al
+  // rollback "torna allo store di partenza" alla chiusura della ricerca,
+  // comportamento ora eliminato (vedi toggleSearch) perché impediva un
+  // workflow utile: cercare un titolo cross-store con L1/R1 mentre il
+  // filtro resta attivo, e chiudere la ricerca restando sullo store dove
+  // il titolo è stato effettivamente trovato.
+  const [sortBy, setSortBy] = useState<'title' | 'playTime' | 'rating' | 'installDate'>('title');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  // Step 13 UI — filtri per-store indipendenti
+  // Struttura: Record<storeId|'All', { genre, category, onlyInstalled }>
+  const [storeFilters, setStoreFilters] = useState<Record<string, { genre: string; category: string; onlyInstalled: boolean }>>({
+    'All': { genre: '', category: '', onlyInstalled: true }, // default: solo installati
+  });
+  const currentFilter = storeFilters[activeStore] ?? { genre: '', category: '', onlyInstalled: false };
+  const selectedGenre    = currentFilter.genre;
+  const selectedCategory = currentFilter.category;
+  const onlyInstalled    = currentFilter.onlyInstalled;
+
+  // v1.1.24 — stesso motivo/pattern di activeStoreRef (sopra): servono
+  // all'effetto SSE 'library-updated' più sotto, che deve restare una
+  // connessione persistente (mai chiusa/riaperta ad ogni cambio di
+  // store/filtro — vedi commento su quell'effetto) e quindi non può
+  // leggere questi valori dalla propria closure di montaggio, che
+  // sarebbe sempre quella iniziale. searchQuery/sortBy/sortOrder sono
+  // dichiarati poco più sotto in questo stesso file — dichiarare qui il
+  // ref e popolarlo nel prossimo useEffect utile dopo la loro
+  // dichiarazione evita l'errore "usato prima della dichiarazione"
+  // (TS2448) già visto e corretto altrove in questa sessione.
+  const selectedGenreRef = useRef(selectedGenre);
+  useEffect(() => { selectedGenreRef.current = selectedGenre; }, [selectedGenre]);
+  const selectedCategoryRef = useRef(selectedCategory);
+  useEffect(() => { selectedCategoryRef.current = selectedCategory; }, [selectedCategory]);
+  const showGameOptionsRef = useRef(showGameOptions);
+  useEffect(() => { showGameOptionsRef.current = showGameOptions; }, [showGameOptions]);
+  const searchQueryRef = useRef(searchQuery);
+  useEffect(() => { searchQueryRef.current = searchQuery; }, [searchQuery]);
+  const sortByRef = useRef(sortBy);
+  useEffect(() => { sortByRef.current = sortBy; }, [sortBy]);
+  const sortOrderRef = useRef(sortOrder);
+  useEffect(() => { sortOrderRef.current = sortOrder; }, [sortOrder]);
+
+  const setStoreFilter = (key: 'genre' | 'category' | 'onlyInstalled', value: string | boolean) => {
+    setStoreFilters(prev => ({
+      ...prev,
+      [activeStore]: { ...(prev[activeStore] ?? { genre: '', category: '', onlyInstalled: false }), [key]: value },
+    }));
+  };
+  const setSelectedGenre    = (v: string)  => setStoreFilter('genre', v);
+  const setSelectedCategory = (v: string)  => setStoreFilter('category', v);
+  const setOnlyInstalled    = (v: boolean) => setStoreFilter('onlyInstalled', v);
+  const [showSearch, setShowSearch] = useState(false);
+  // Ref diretto all'input di ricerca (v0.99.4): usato da
+  // openSearchWithPhysicalInput per portare il focus nativo del browser
+  // sul campo reale quando l'apertura avviene da mouse/tastiera fisica,
+  // senza passare dalla Virtual Keyboard.
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [showKeyboard, setShowKeyboard] = useState(false);
+
+  const { focusedId, setFocusedId, moveFocus, setFocusFrozen, isFocusFrozen, activeGroup, setActiveGroup, triggerFocusedAction, focusFirstInGroup, cycleSequential, setGroupStrategy } = useFocus();
+  // Ref sincronizzato con focusedId: stesso motivo di activeStoreRef.
+  // L'effect gamepad principale aveva focusedId tra le proprie dipendenze,
+  // ma cycleStore (e altre azioni) chiamano setFocusedId al loro interno —
+  // quindi anche dopo aver stabilizzato l'identità di cycleStore, il solo
+  // CAMBIO DI VALORE di focusedId rimontava comunque l'intero effect ad ogni
+  // selezione, riproponendo lo stesso loop di auto-rialimentazione su
+  // pressione prolungata del tasto fisico. Leggendo dal ref invece che dalla
+  // dipendenza diretta, l'effect non si rimonta più per questo motivo.
+  const focusedIdRef = useRef(focusedId);
+  useEffect(() => { focusedIdRef.current = focusedId; }, [focusedId]);
+  // Stesso motivo dei ref precedenti: pendingUnlink cambia ad ogni
+  // interazione di conferma/annulla disconnessione store, ed essendo
+  // dipendenza dell'effect gamepad principale ne causerebbe il remount ad
+  // ogni singola pressione di A/B su quella card.
+  const pendingUnlinkRef = useRef(pendingUnlink);
+  useEffect(() => { pendingUnlinkRef.current = pendingUnlink; }, [pendingUnlink]);
+  // Se il focus si allontana dalla card in stato "conferma disconnessione"
+  // (es. l'utente naviga con il D-pad invece di premere B), annulla
+  // automaticamente la conferma pendente invece di lasciarla armata in modo
+  // silenzioso e potenzialmente confuso.
+  useEffect(() => {
+    if (pendingUnlink && focusedId !== `store-unlink-${pendingUnlink}`) {
+      setPendingUnlink(null);
+    }
+  }, [focusedId, pendingUnlink]);
+  // Stesso motivo e stesso pattern per pendingRunnerAction (conferma
+  // install/uninstall runner): ref per non rimontare l'effect gamepad ad
+  // ogni singola pressione di A/B, più reset automatico se il focus si
+  // allontana dalla riga del runner in questione senza che l'utente abbia
+  // premuto B esplicitamente.
+  const pendingRunnerActionRef = useRef(pendingRunnerAction);
+  useEffect(() => { pendingRunnerActionRef.current = pendingRunnerAction; }, [pendingRunnerAction]);
+  useEffect(() => {
+    if (!pendingRunnerAction) return;
+    const expectedId = pendingRunnerAction.action === 'install'
+      ? `runner-install-${pendingRunnerAction.id}`
+      : `runner-uninstall-${pendingRunnerAction.id}`;
+    if (focusedId !== expectedId) {
+      setPendingRunnerAction(null);
+    }
+  }, [focusedId, pendingRunnerAction]);
+  const pendingExitRef = useRef(pendingExit);
+  useEffect(() => { pendingExitRef.current = pendingExit; }, [pendingExit]);
+  useEffect(() => {
+    if (pendingExit && focusedId !== 'opt-exit') {
+      setPendingExit(false);
+    }
+  }, [focusedId, pendingExit]);
+  const { state: gamepadState, isJustPressed } = useGamepad();
+  const { play } = useAudio();
+
+  // Gestione tastiera on-screen generalizzata:
+  // activeField identifica quale campo è in editing, fieldValue è il valore corrente,
+  // onFieldCommit è la callback chiamata al Done per persistere il valore.
+  const [activeField, setActiveField] = useState<{
+    id: string;
+    label: string;
+    value: string;
+    onCommit: (val: string) => void;
+    // v0.99.90 — generalizzato: prima era sempre 'game-options' (unico
+    // contesto che usava questo meccanismo finora). Con la tastiera
+    // richiamabile anche da Impostazioni (campo budget token) serve
+    // tornare al gruppo giusto alla chiusura, non sempre allo stesso.
+    returnGroup: string;
+  } | null>(null);
+
+  // v1.1.16 — tip del suggerimento (Shift) attualmente a fuoco sulla
+  // tastiera virtuale, mostrato nell'intestazione del campo fluttuante.
+  // Reset esplicito ad ogni apertura di un campo diverso: senza, il tip
+  // dell'ultimo suggerimento sfogliato in un campo resterebbe visibile
+  // (sbagliato) appena se ne apre un altro, prima ancora che l'utente
+  // tocchi Shift o sfogli qualcosa nel nuovo campo.
+  const [suggestionTip, setSuggestionTip] = useState<string | undefined>(undefined);
+
+  // Apre la tastiera on-screen per un campo specifico
+  const openKeyboardForField = useCallback((
+    id: string,
+    label: string,
+    currentValue: string,
+    onCommit: (val: string) => void,
+    returnGroup: string = 'game-options'
+  ) => {
+    setActiveField({ id, label, value: currentValue, onCommit, returnGroup });
+    setSuggestionTip(undefined);
+    setShowKeyboard(true);
+    setActiveGroup('keyboard');
+    play('select');
+  }, [play, setActiveGroup]);
+
+  // Chiude la tastiera, committa il valore e torna allo scope da cui è
+  // stata aperta (Game Options o Impostazioni — vedi returnGroup sopra).
+  const closeKeyboard = useCallback(() => {
+    const fieldId = activeField?.id;
+    const returnGroup = activeField?.returnGroup ?? 'game-options';
+    if (activeField) {
+      activeField.onCommit(activeField.value);
+    }
+    setShowKeyboard(false);
+    setActiveField(null);
+    setSuggestionTip(undefined);
+    setActiveGroup(returnGroup);
+    if (fieldId) setTimeout(() => setFocusedId(fieldId), 50);
+  }, [activeField, setActiveGroup, setFocusedId]);
+
+  // Unica fonte di verità per il focus iniziale della tastiera: si attiva
+  // quando showKeyboard diventa true, indipendentemente da quale percorso
+  // l'ha aperta (ricerca o campo dell'overlay Game Options).
+  // Il focus iniziale va su 'key-done', NON su un tasto-lettera: se un
+  // residuo di pressione A (rimbalzo del tasto fisico, comune su controller
+  // Bluetooth) viene letto come "appena premuto" anche nel frame
+  // immediatamente successivo all'apertura, finire su 'key-1-Q' significava
+  // scrivere "q" involontariamente — da cui le sequenze "qqqq" osservate.
+  // 'key-done' è sicuro: un A residuo lì chiude semplicemente la tastiera
+  // senza scrivere nulla, comportamento comunque recuperabile dall'utente.
+  useEffect(() => {
+    if (showKeyboard) {
+      setFocusedId('key-done');
+      play('focus');
+    }
+  }, [showKeyboard, setFocusedId, play]);
+
+  // When closing search, restore view or just clear query
+  useEffect(() => {
+    if (!showSearch) {
+      setSearchQuery('');
+    }
+  }, [showSearch]);
+
+  // Chiude la libreria avatar quando si cambia store o libreria
+  useEffect(() => {
+    setShowAvatarLibrary(false);
+  }, [activeStore]);
+
+  // Refresh on-demand della libreria (v0.99.4): forza il daemon a
+  // ri-scansionare i plugin (filesystem ROM, stato install Epic/GOG, ecc.)
+  // ad ogni apertura/cambio di store, al posto di un solo polling periodico
+  // fisso indipendente da cosa l'utente sta effettivamente guardando.
+  // Isolato in un effect dedicato — legato solo ad activeStore, non a
+  // sort/search/genere/categoria, che filtrano la stessa libreria già
+  // scansionata e non richiedono un nuovo scan dei plugin. Fire-and-forget:
+  // la libreria fresca arriva via SSE (library-updated) non appena il
+  // backend completa lo scan; se il refresh fallisce, il fetch principale
+  // (altro effect) mostra comunque l'ultimo stato noto sul DB.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/library/refresh', { method: 'POST', signal: controller.signal }).catch(() => {});
+    return () => controller.abort();
+  }, [activeStore]);
+
+  // Seleziona automaticamente la prima card all'apertura/cambio di libreria
+  // (v0.99.4). Triggerato SOLO da un cambio reale di activeStore (tracciato
+  // con un ref, confrontato contro il valore precedente) — non da
+  // activeGroup che torna a null: quest'ultimo accade anche alla chiusura
+  // di un qualunque overlay (Game Options, Settings, ecc.), e in quel caso
+  // closeGameOptions/equivalenti riportano già correttamente il focus sulla
+  // card che l'utente stava guardando — selezionare di nuovo la prima card
+  // in quel momento avrebbe scavalcato quel comportamento, "rubando" il
+  // focus indietro ogni volta che si chiude un pannello.
+  // Riusa lo stesso meccanismo di scoring (priorità + posizione, "più in
+  // alto poi più a sinistra") già usato dal fallback automatico di
+  // moveFocus e dall'apertura overlay — qui invocato esplicitamente perché
+  // il cambio libreria non passa da moveFocus, quindi nessun input
+  // direzionale lo innescherebbe spontaneamente.
+  const previousStoreForFocusRef = useRef(activeStore);
+  useEffect(() => {
+    if (previousStoreForFocusRef.current === activeStore) return;
+    previousStoreForFocusRef.current = activeStore;
+    if (activeGroup !== null) return; // un overlay è aperto, nessuna interferenza
+    // Piccolo delay: le card del nuovo store devono prima montare i loro
+    // Focusable nel registry (filteredVisibleGames deriva da `games`, che
+    // arriva da un fetch asincrono dopo il cambio di activeStore).
+    const t = setTimeout(() => focusFirstInGroup('dashboard'), 80);
+    return () => clearTimeout(t);
+  }, [activeStore, activeGroup, focusFirstInGroup]);
+
+  // Ping al boot per garantire che la cartella avatars venga creata dal server
+  useEffect(() => {
+    fetch('/api/avatars').catch(() => {});
+  }, []);
+
+  // Fetch versione dal backend
+  useEffect(() => {
+    fetch('/api/version').then(r => r.json()).then(d => {
+      if (d.version) setAppVersion(d.version);
+    }).catch(() => {});
+  }, []);
+
+  // Sincronizza displayMode con la preferenza persistita: kiosk-launch.sh
+  // ha già deciso con quali flag lanciare il browser in base a questo
+  // stesso valore, quindi il menu deve mostrare lo stato reale invece di
+  // ripartire sempre da 'kiosk' indipendentemente da come la Dashboard è
+  // stata effettivamente avviata.
+  //
+  // v0.99.26 — Letto anche `dedicatedSession`: true se kiosk-launch.sh ha
+  // rilevato di girare come sessione X11 dedicata (selezionabile dal menu
+  // sessioni di LightDM, x-launcher.desktop), senza xfwm4/XFCE sotto. In
+  // quel caso "Window" non ha senso nel menu Display Mode — non esiste un
+  // desktop su cui mostrare una finestra normale — sostituito da una voce
+  // "Console Mode" che fa uno switch di sessione LightDM verso XFCE.
+  const [dedicatedSession, setDedicatedSession] = useState(false);
+  useEffect(() => {
+    fetch('/api/config').then(r => r.json()).then(d => {
+      if (d.displayMode === 'kiosk' || d.displayMode === 'window' || d.displayMode === 'borderless') {
+        setDisplayMode(d.displayMode);
+      } else if (typeof d.fullscreen === 'boolean') {
+        // Retrocompatibilità: app.conf scritto da una versione precedente
+        // a v0.99.9, senza displayMode — il backend lo deriva già in
+        // appConfig.ts, ma per sicurezza lo deriviamo anche qui se per
+        // qualche motivo arrivasse solo il vecchio campo.
+        setDisplayMode(d.fullscreen ? 'kiosk' : 'window');
+      }
+      setDedicatedSession(d.dedicatedSession === true);
+    }).catch(() => {});
+  }, []);
+
+  // v0.99.18 — RIMOSSO il meccanismo di auto-requestFullscreen() al primo
+  // input (introdotto in v0.99.12, mantenuto come "riserva" in v0.99.17).
+  // Motivo: con titlebar e pannelli XFCE già nascosti in modalità
+  // Borderless (v0.99.13-15), la finestra è GIÀ visivamente indistinguibile
+  // da un vero schermo intero — chiamare comunque requestFullscreen() al
+  // primo input del controller non produceva alcun cambiamento visibile,
+  // ma mostrava comunque il popup informativo standard del browser ("È
+  // entrato in modalità schermo intero, premi Esc per uscire") ad ogni
+  // singolo avvio dell'HTPC, un fastidio reale senza alcun beneficio.
+  // 'kiosk' ("Fullscreen" in UI) e 'borderless' ("Kiosk" in UI, dietro
+  // Ctrl+Alt+K) sono quindi ora IDENTICI a livello di comportamento del
+  // frontend — restano distinti solo come etichetta/preferenza persistita,
+  // dato che kiosk-launch.sh li gestisce già nello stesso identico modo.
+
+  // v0.99.19 — Nasconde il cursore del mouse quando l'ultimo input
+  // registrato proviene dal gamepad. Senza --kiosk reale (v0.99.12),
+  // Chromium non nasconde più automaticamente il cursore dopo un periodo
+  // di inattività (comportamento integrato della modalità kiosk, perso
+  // passando a Borderless) — resta visibile permanentemente a meno che non
+  // lo gestiamo noi via CSS.
+  //
+  // v0.99.28 — Sostituito il trigger "gamepadState.buttons.size > 0" con
+  // un vero timer di inattività del mouse. Causa del cambiamento: test
+  // reale dell'utente con la finestra impostata always-on-top (wmctrl -b
+  // add,above, v0.99.25) ha confermato in modo definitivo che il problema
+  // non è mai stato di visibilità/posizione della finestra — è
+  // specificamente il FOCUS DELL'INPUT a livello di sistema (distinto da
+  // "above"/raise su X11), che resta assente finché non avviene
+  // un'interazione esplicita (click, Alt+Tab). Senza il focus, il loop che
+  // alimenta gamepadState non si popola in modo affidabile, quindi il
+  // trigger precedente scattava solo dopo che l'utente aveva già dato
+  // focus alla finestra manualmente — niente di nuovo rispetto a prima.
+  //
+  // Visto che il cursore visibile non interferisce più con la navigazione
+  // (fix isStaleMouseEnter, v0.99.19 stesso commit) il problema residuo è
+  // puramente estetico — un timer di inattività del mouse è la soluzione
+  // proporzionata: nessuna dipendenza dal gamepad o dal focus della
+  // finestra, si nasconde semplicemente se il mouse non si muove per un
+  // po', e ricompare al primo movimento reale. CURSOR_IDLE_MS scelto
+  // abbastanza breve da percepirsi reattivo ma non così aggressivo da
+  // nascondere il cursore mentre l'utente sta ancora leggendo/decidendo
+  // con il mouse fermo sopra un elemento.
+  const CURSOR_IDLE_MS = 3000;
+  const [cursorHidden, setCursorHidden] = useState(false);
+  useEffect(() => {
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleHide = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => setCursorHidden(true), CURSOR_IDLE_MS);
+    };
+    const onMouseMove = () => {
+      setCursorHidden(false);
+      scheduleHide();
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    scheduleHide(); // avvia il timer anche se il mouse non si è ancora mai mosso dal boot
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      if (idleTimer) clearTimeout(idleTimer);
+    };
+  }, []);
+
+  // Carica notifiche persistenti dal backend al boot
+  useEffect(() => {
+    fetch('/api/notifications/pending')
+      .then(r => r.ok ? r.json() : [])
+      .then((stored: any[]) => {
+        if (!Array.isArray(stored) || stored.length === 0) return;
+        const mapped = stored.map((n: any): AppNotification => ({
+          id:             n.id,
+          type:           n.type,
+          status:         n.status,
+          title:          n.title,
+          body:           n.body,
+          gameId:         n.game_id,
+          gameTitle:      n.game_title,
+          rawLog:         n.raw_log,
+          primaryAction:  n.primary_action   ? JSON.parse(n.primary_action)   : undefined,
+          secondaryAction:n.secondary_action ? JSON.parse(n.secondary_action) : undefined,
+          source:         n.source,
+          aiProvider:     n.ai_provider,
+          confidence:     n.confidence,
+          timestamp:      n.created_at,
+        }));
+        setNotifications(mapped);
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Carica plugin registry ogni volta che si apre il tab plugins
+  const loadPluginRegistry = () => {
+    setPluginLoadError(null);
+    fetch('/api/plugins')
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        if (Array.isArray(data)) setPluginRegistry(data);
+        else throw new Error('Risposta non è un array');
+      })
+      .catch(e => setPluginLoadError(String(e)));
+  };
+
+  useEffect(() => {
+    if (activeSettingsTab !== 'plugins') return;
+    loadPluginRegistry();
+  }, [activeSettingsTab]);
+
+  useEffect(() => {
+    loadPluginRegistry();
+  }, []);
+
+  // Aggiorna dispositivi connessi quando si apre il tab input
+  useEffect(() => {
+    if (activeSettingsTab !== 'input') return;
+    InputManager.refreshDevices();
+    setConnectedDevices([...InputManager.devices]);
+    setInputPlugins(InputManager.plugins.map(p => ({ id: p.id, name: p.name, description: p.description, vendorIds: p.vendorIds, enabled: p.enabled })));
+  }, [activeSettingsTab]);
+
+  // ── Notification helpers (Step 15a) ─────────────────────────────────────
+  const pushNotification = (n: Omit<AppNotification, 'id' | 'timestamp' | 'status'>) => {
+    const notif: AppNotification = {
+      ...n,
+      id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: new Date().toISOString(),
+      status: 'pending',
+      seen: n.seen ?? false,
+    };
+    // v1.1.29 — su richiesta: una nuova notifica per lo STESSO gioco con
+    // lo STESSO titolo (es. "X installato" ripetuto da test/reinstalli
+    // successivi) sostituisce quella precedente ancora aperta invece di
+    // affiancarsi — non è un problema di processo che duplica, sono
+    // eventi genuinamente distinti nel tempo, ma impilarli tutti quando
+    // nessuno si auto-chiude più (fix v1.1.28) diventa rumore inutile.
+    // Il confronto è per gameId+title esatto, non solo type: due
+    // notifiche 'success' diverse per lo stesso gioco (es. "installato"
+    // e, in futuro, "achievement sbloccato") restano entrambe distinte.
+    setNotifications(prev => [
+      notif,
+      ...prev.filter(p => !(p.gameId && p.gameId === notif.gameId && p.title === notif.title && p.status === 'pending')),
+    ]);
+    // v1.1.28 — rimosso 'success' da qui: un'installazione completata
+    // (tipo 'success') è un esito significativo, non un avviso
+    // transitorio come "modalità Kiosk attivata" — auto-scomparire dopo
+    // soli 6 secondi la faceva trovare già "dismissed" (niente pulsante
+    // di chiusura, titolo che ha già finito di scorrere una volta sola)
+    // a chi apre il pannello notifiche anche solo un po' più tardi.
+    // 'info' resta con auto-dismiss: quello copre avvisi genuinamente
+    // transitori (toggle modalità, passaggio a desktop, ecc.).
+    if (n.type === 'info') {
+      setTimeout(() => {
+        setNotifications(prev =>
+          prev.map(p => p.id === notif.id && p.status === 'pending' ? { ...p, status: 'dismissed' } : p)
+        );
+      }, 6000);
+    }
+  };
+
+  const dismissNotification = (id: string) => {
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, status: 'dismissed' } : n));
+    fetch(`/api/notifications/${id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'dismissed' }),
+    }).catch(() => {});
+  };
+
+  const resolveNotification = (id: string, resolved: boolean) => {
+    const status = resolved ? 'resolved' : 'failed';
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, status } : n));
+    // Persisti stato notifica
+    fetch(`/api/notifications/${id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    }).catch(() => {});
+    // KB writeback: aggiorna score in base all'esito
+    const notif = notifications.find(n => n.id === id);
+    if (notif && (notif.source === 'kb' || notif.source === 'ai')) {
+      if (resolved) {
+        fetch('/api/kb/writeback/resolved', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pattern:      notif.rawLog ?? notif.title,
+            solution:     notif.body,
+            actionType:   notif.primaryAction?.handler ?? 'none',
+            actionParams: notif.primaryAction?.params ?? {},
+            confidence:   notif.confidence ?? 'medium',
+            existingId:   notif.source === 'kb' ? id : undefined,
+          }),
+        }).catch(() => {});
+      } else {
+        fetch('/api/kb/writeback/failed', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        }).catch(() => {});
+      }
+    }
+    // v0.99.38 — test protocol: notifica "ha funzionato?" post-chiusura
+    // (vedi notificationEngine.ts, 'validation-prompt'). Solo il caso
+    // "Ha funzionato" richiede un'azione qui — marca il gioco verificato
+    // con la config attuale. "Non ha funzionato" non richiede nulla:
+    // il gioco resta verified=false, quindi la prossima chiusura
+    // riproporrà la domanda automaticamente (vedi gameManager.ts,
+    // startGameExitPolling), senza bisogno di ricordarselo qui.
+    if (notif && notif.source === 'validation' && resolved && notif.gameId) {
+      fetch(`/api/games/${notif.gameId}/verify`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'manual' }),
+      }).catch(() => {});
+    }
+
+    // v0.99.90 — Step 15d: registra il tentativo AI fallito nel tracker
+    // dedicato (game_id+error_signature), distinto dal writeback KB sopra
+    // che riguarda solo lo scoring della Knowledge Base. Solo sul ramo
+    // KO: un successo non ha bisogno di essere "contato" verso il limite
+    // di MAX_AI_ATTEMPTS, il limite riguarda i tentativi che falliscono.
+    if (notif && notif.source === 'ai' && !resolved && notif.gameId && notif.rawLog) {
+      fetch('/api/ai/attempt-failed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gameId:       notif.gameId,
+          errorText:    notif.rawLog,
+          solution:     notif.body,
+          actionType:   notif.primaryAction?.handler ?? 'none',
+          actionParams: notif.primaryAction?.params ?? {},
+          confidence:   notif.confidence ?? 'low',
+        }),
+      }).catch(() => {});
+    }
+  };
+
+  const unreadCount = notifications.filter(n => n.seen === false).length;
+
+  // Carica (e ricarica) la lista file avatar
+  const loadAvatarFiles = useCallback(() => {
+    // Prima recupera il path effettivo della cartella dal server
+    fetch('/api/avatars/info')
+      .then(r => r.json())
+      .then((info: { dir: string; exists: boolean }) => {
+        if (info?.dir) setAvatarDir(info.dir);
+      })
+      .catch(() => {});
+    // Poi carica i file
+    fetch('/api/avatars')
+      .then(r => r.json())
+      .then((data: Array<{ filename: string; url: string }>) => {
+        setAvatarFiles(Array.isArray(data) ? data : []);
+      })
+      .catch(() => setAvatarFiles([]));
+  }, []);
+
+  useEffect(() => {
+    if (!showAvatarLibrary) return;
+    loadAvatarFiles();
+  }, [showAvatarLibrary, loadAvatarFiles]);
+
+  // FIX v0.99.4 — rimossa la vecchia useEffect "Update selected game when
+  // games list changes (switching stores)": era un meccanismo pre-SSE
+  // (commento in inglese, residuo dei primi step del progetto) diventato
+  // ridondante e in conflitto con la sincronizzazione più recente e protetta
+  // già presente negli handler SSE/fetch (vedi setSelectedGameId con guardia
+  // `if (showGameOptions) return prev;`). A differenza di quella, questa
+  // vecchia versione non aveva ALCUNA protezione sull'overlay aperto: ad
+  // ogni cambio di reference di `games` (anche con contenuto identico, come
+  // ad ogni ciclo del refresh periodico in background) forzava
+  // selectedGameId al primo elemento dell'array corrente se non vi trovava
+  // l'id selezionato — causa diretta del bug "l'overlay punta sempre al
+  // primo gioco GOG (A Plague Tale)": bastava che selectedGameId non fosse
+  // nell'array filtrato del momento (es. utente su un altro store) per
+  // venire sovrascritto silenziosamente, overlay aperto o no.
+
+  // Sync selected game with focused element — SOLO quando l'overlay Game
+  // Options non è aperto. Senza questa guardia, un focusedId "stantio"
+  // ancora puntato su una card della dashboard sottostante (possibile nella
+  // finestra tra apertura overlay e aggiornamento completo dello scope)
+  // sovrascriveva selectedGameId e quindi il contenuto mostrato
+  // dall'overlay — stesso bug del punto sopra, innescato da una via diversa.
+  useEffect(() => {
+    if (showGameOptions) return;
+    if (focusedId?.startsWith('game-')) {
+      const gameId = focusedId.replace('game-', '');
+      if (gameId !== selectedGameId) {
+        setSelectedGameId(gameId);
+      }
+    }
+  }, [focusedId, selectedGameId, showGameOptions]);
+
+  // SSE — aggiorna la libreria automaticamente quando il daemon lo notifica
+  // (installazione/disinstallazione Steam, scan ROM, ecc.)
+  //
+  // FIX (patch-step3-003): selectedGameId non viene mai toccato se l'overlay
+  // è aperto (showGameOptions). Evita il reset della selezione durante la
+  // navigazione delle opzioni di una ROM.
+  //
+  // v1.1.24 — CAUSA RADICE REALE del bug "installo, cambio store, torna
+  // disinstallato": questo effetto aveva activeStore/searchQuery/sortBy/
+  // sortOrder/selectedGenre/selectedCategory/showGameOptions nella
+  // dependency array — quindi ad OGNI cambio di store (o filtro) la
+  // connessione SSE veniva chiusa (`es.close()`) e una NUOVA aperta da
+  // zero. Una connessione EventSource al servizio di notifiche non ha
+  // alcun motivo di dipendere da cosa l'utente sta navigando in quel
+  // momento — è un canale "la libreria è cambiata da qualche parte",
+  // non specifico per store/filtro. Chiudere e riaprire questa
+  // connessione ad ogni cambio di tab creava una finestra di
+  // disconnessione durante la quale un evento 'library-updated' emesso
+  // dal server (es. install appena confermato) non aveva NESSUN client
+  // in ascolto — perso silenziosamente, mai riprocessato. La card
+  // sembrava aggiornarsi "per un attimo" solo grazie al fetch fresco
+  // della normale navigazione tra store, poi restava all'ultimo stato
+  // noto (quello da PRIMA dell'installazione) perché l'evento che
+  // avrebbe dovuto propagare il cambiamento non è mai arrivato a
+  // destinazione. Ora la connessione è aperta una sola volta (deps `[]`)
+  // e resta viva per tutta la sessione; l'handler legge activeStore e
+  // tutti gli altri valori dai ref sincronizzati sopra (stesso pattern
+  // già in uso per activeStoreRef/focusedIdRef), non dalla propria
+  // closure di montaggio.
+  useEffect(() => {
+    const es = new EventSource('/api/events');
+
+    es.onmessage = async (e) => {
+      try {
+        const parsed = JSON.parse(e.data);
+        const { event, payload } = parsed;
+
+        // Notifiche pushed dal NotificationEngine (Step 15b)
+        if (event === 'notification' && payload) {
+          const n = payload as any;
+          const mapped: AppNotification = {
+            id:             n.id,
+            type:           n.type,
+            status:         n.status ?? 'pending',
+            title:          n.title,
+            body:           n.body,
+            gameId:         n.game_id,
+            gameTitle:      n.game_title,
+            rawLog:         n.raw_log,
+            primaryAction:  n.primary_action   ? JSON.parse(n.primary_action)   : undefined,
+            secondaryAction:n.secondary_action ? JSON.parse(n.secondary_action) : undefined,
+            source:         n.source ?? 'system',
+            aiProvider:     n.ai_provider,
+            confidence:     n.confidence,
+            timestamp:      n.created_at ?? new Date().toISOString(),
+            seen:           false,
+          };
+          setNotifications(prev => {
+            if (prev.some(p => p.id === mapped.id)) return prev;
+            // v1.1.29 — stessa logica di pushNotification: sostituisce
+            // una notifica pending precedente per lo stesso gioco+titolo
+            // (es. installazioni ripetute dello stesso gioco durante
+            // test) invece di affiancarla — vedi commento lì per il
+            // dettaglio del confronto.
+            const updated = [
+              mapped,
+              ...prev.filter(p => !(p.gameId && p.gameId === mapped.gameId && p.title === mapped.title && p.status === 'pending')),
+            ];
+            // v1.1.28 — stessa correzione di pushNotification sopra:
+            // 'success' (es. "gioco installato") non si auto-dismette
+            // più. Le due implementazioni erano duplicate e leggermente
+            // divergenti solo per caso — ora coerenti.
+            if (mapped.type === 'info') {
+              setTimeout(() => {
+                setNotifications(p2 => p2.map(p => p.id === mapped.id && p.status === 'pending' ? { ...p, status: 'dismissed' } : p));
+              }, 6000);
+            }
+            return updated;
+          });
+        }
+
+        if (event === 'library-updated') {
+          // Un cambiamento reale alla libreria (install/uninstall) invalida
+          // TUTTA la cache: un nuovo titolo può comparire sia in "All Games"
+          // sia nello store specifico, quindi invalidare solo una chiave
+          // lascerebbe l'altra stale.
+          libraryCacheRef.current.clear();
+
+          const activeStoreNow    = activeStoreRef.current;
+          const searchQueryNow    = searchQueryRef.current;
+          const sortByNow         = sortByRef.current;
+          const sortOrderNow      = sortOrderRef.current;
+          const selectedGenreNow  = selectedGenreRef.current;
+          const selectedCategoryNow = selectedCategoryRef.current;
+
+          const params = new URLSearchParams();
+          params.append('store', activeStoreNow || 'All');
+          params.append('search', searchQueryNow || '');
+          params.append('sortBy', sortByNow || 'title');
+          params.append('order', sortOrderNow || 'asc');
+          if (selectedGenreNow)    params.append('genre', selectedGenreNow);
+          if (selectedCategoryNow) params.append('category', selectedCategoryNow);
+
+          // v1.1.22 — cattura il numero di sequenza PRIMA di avviare la
+          // fetch: se un fetch più recente (da questo stesso handler o
+          // dall'effetto principale legato ad activeStore/filtri) parte
+          // mentre questa è ancora in volo, il risultato di questa va
+          // scartato quando arriva, anche se arriva prima.
+          const mySeq = ++librarySeqRef.current;
+          const res = await fetch(`/api/games?${params.toString()}`);
+          if (res.ok) {
+            const newGames = await res.json();
+            if (mySeq !== librarySeqRef.current) {
+              // Un fetch più recente è già partito: questo risultato non
+              // è più il più aggiornato disponibile, scartato per non
+              // sovrascrivere dati più freschi con dati superati.
+              return;
+            }
+            setGames(newGames);
+            libraryCacheRef.current.set(
+              buildLibraryCacheKey(activeStoreNow || 'All', searchQueryNow || '', sortByNow || 'title', sortOrderNow || 'asc', selectedGenreNow || '', selectedCategoryNow || ''),
+              newGames
+            );
+            setSelectedGameId(prev => {
+              // Overlay aperto → non toccare mai la selezione corrente
+              if (showGameOptionsRef.current) return prev;
+              // v0.99.38 — prima qui si selezionava automaticamente
+              // newGames[0], cioè "il primo gioco alfabeticamente" — bug
+              // percepito come "appare sempre A Plague Tale: Innocence di
+              // default". Nessuna selezione reale non deve produrne una
+              // finta: il pannello destro mostra un messaggio di benvenuto
+              // quando selectedGameId è vuoto (vedi selectedGame più sotto),
+              // la selezione vera arriva solo quando l'utente sposta
+              // davvero il focus su una card.
+              if (!prev) return '';
+              // v0.99.37 — la card Big Picture non è mai in newGames (dati
+              // server, non conosce card virtuali) — senza questo caso
+              // esplicito veniva trattata come selezione "sparita" ad ogni
+              // evento library-updated (install/uninstall di un QUALSIASI
+              // gioco), resettando la selezione a newGames[0] anche se
+              // l'utente aveva Big Picture correttamente selezionata.
+              if (prev === STEAM_BIG_PICTURE_ID) return prev;
+              const stillExists = newGames.some((g: any) => g.id === prev);
+              return stillExists ? prev : (newGames[0]?.id || '');
+            });
+          }
+        }
+      } catch {}
+    };
+
+    es.onerror = () => {};
+
+    return () => es.close();
+  }, []);
+
+  // Fetch initial data + polling separato per log/download
+  //
+  // FIX (patch-step3-003): il polling ogni 5s ora aggiorna SOLO log e
+  // download, non la libreria di giochi. La libreria viene:
+  //   - caricata una volta al boot (o al cambio filtri)
+  //   - aggiornata in tempo reale via SSE (evento library-updated)
+  // Questo elimina il re-render continuo della game grid che causava
+  // il reset involontario della selezione durante l'overlay ROM.
+  useEffect(() => {
+    const safeJson = async (res: Response) => {
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 50)}`);
+      }
+      const ct = res.headers.get('content-type');
+      if (!ct || !ct.includes('application/json')) {
+        throw new Error(`Expected JSON but got ${ct}`);
+      }
+      return res.json();
+    };
+
+    // Carica libreria + stores (solo al boot / cambio filtri)
+    const fetchLibrary = async (signal: AbortSignal) => {
+      const cacheKey = buildLibraryCacheKey(
+        activeStore || 'All', searchQuery || '', sortBy || 'title', sortOrder || 'asc',
+        selectedGenre || '', selectedCategory || ''
+      );
+      // Mostra subito la versione cached per questa combinazione di filtri,
+      // se esiste — elimina sia il flash vuoto sia la libreria precedente
+      // che restava visibile in attesa del fetch fresco.
+      const cached = libraryCacheRef.current.get(cacheKey);
+      if (cached) {
+        setGames(cached);
+      }
+
+      // Refresh on-demand (v0.99.4) avviene in un effect dedicato più sotto,
+      // legato solo ad activeStore — qui restiamo legati anche a sort/search/
+      // genere/categoria, che non richiedono un nuovo scan dei plugin.
+
+      // v1.1.22 — stesso guard di sequenza usato nell'handler
+      // 'library-updated': questo effetto ha già un AbortController, ma
+      // protegge solo contro se stesso (si riattiva quando activeStore/
+      // filtri cambiano) — non contro un fetch avviato da QUELL'ALTRO
+      // percorso indipendente. Il numero di sequenza coordina entrambi.
+      const mySeq = ++librarySeqRef.current;
+
+      try {
+        const params = new URLSearchParams();
+        params.append('store', activeStore || 'All');
+        params.append('search', searchQuery || '');
+        params.append('sortBy', sortBy || 'title');
+        params.append('order', sortOrder || 'asc');
+        if (selectedGenre)    params.append('genre', selectedGenre);
+        if (selectedCategory) params.append('category', selectedCategory);
+
+        setIsFetchingLibrary(true);
+        const [gamesData, storesData] = await Promise.all([
+          fetch(`/api/games?${params.toString()}`, { signal }).then(safeJson),
+          fetch('/api/stores', { signal }).then(safeJson),
+        ]);
+        setIsFetchingLibrary(false);
+
+        if (mySeq !== librarySeqRef.current) {
+          // Un fetch più recente (anche dall'handler SSE) è già partito:
+          // questo risultato non è più il più aggiornato, scartato.
+          return;
+        }
+
+        // Non azzerare la lista durante il fetch — evita il flash vuoto al cambio store
+        if (Array.isArray(gamesData)) {
+          setGames(gamesData);
+          libraryCacheRef.current.set(cacheKey, gamesData);
+        }
+        setStores(storesData);
+
+        if (gamesData.length > 0) {
+          setSelectedGameId(prev => {
+            // v0.99.38 — vedi commento esteso nel listener SSE
+            // 'library-updated' poco sopra: nessuna selezione reale non
+            // deve produrne una finta. Prima: `if (!prev) return
+            // gamesData[0].id` — causava "appare sempre il primo gioco
+            // alfabetico (A Plague Tale: Innocence) al caricamento", anche
+            // se l'utente non aveva ancora selezionato nulla.
+            if (!prev) return '';
+            // v0.99.37 — vedi commento identico nel listener SSE
+            // 'library-updated': la card Big Picture è virtuale, non è mai
+            // in gamesData (risposta server), va esclusa esplicitamente
+            // dal controllo "esiste ancora?" o viene scambiata per una
+            // selezione stale ad ogni fetch/cambio filtro.
+            if (prev === STEAM_BIG_PICTURE_ID) return prev;
+            const stillExists = gamesData.some((g: any) => g.id === prev);
+            return stillExists ? prev : gamesData[0].id;
+          });
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') return;
+        console.error('Failed to fetch library:', err);
+      }
+    };
+
+    // Aggiorna solo log e download (polling leggero, non tocca la game grid)
+    const fetchStatus = async (signal: AbortSignal) => {
+      try {
+        const [logsData, downloadsData] = await Promise.all([
+          fetch('/api/logs', { signal }).then(safeJson),
+          fetch('/api/downloads', { signal }).then(safeJson),
+        ]);
+        setLogs(logsData);
+        setDownloads(downloadsData);
+      } catch (err: any) {
+        if (err.name === 'AbortError') return;
+        console.error('Failed to fetch status:', err);
+      }
+    };
+
+    const controller = new AbortController();
+    fetchLibrary(controller.signal);
+    fetchStatus(controller.signal);
+
+    // Polling solo per log/download — la libreria si aggiorna via SSE
+    const interval = setInterval(() => fetchStatus(controller.signal), 5000);
+    return () => {
+      controller.abort();
+      clearInterval(interval);
+    };
+  }, [activeStore, searchQuery, sortBy, sortOrder, selectedGenre, selectedCategory, buildLibraryCacheKey]);
+
+  // v0.99.35 — quando un task passa a 'completed', programma la sua
+  // rimozione dalla visualizzazione locale dopo 6s. scheduledTimersRef
+  // (non lo stato React) traccia quali gameId hanno già un timer
+  // attivo, indipendentemente dai re-render — necessario perché la
+  // cleanup function di un useEffect scatta a OGNI cambio di
+  // dipendenza, non solo allo smontaggio: senza questo ref, se un
+  // secondo task completasse in un poll successivo mentre il timer
+  // del primo è ancora in corso, la cleanup cancellerebbe anche
+  // quello del primo, riprogrammandolo da capo e allungandone la
+  // visibilità oltre i 6s previsti.
+  const scheduledHideTimersRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    downloads.forEach((t: any) => {
+      if (t.status !== 'completed') return;
+      if (hiddenCompletedIds.has(t.gameId)) return;
+      if (scheduledHideTimersRef.current.has(t.gameId)) return;
+
+      scheduledHideTimersRef.current.add(t.gameId);
+      setTimeout(() => {
+        setHiddenCompletedIds(prev => new Set(prev).add(t.gameId));
+        scheduledHideTimersRef.current.delete(t.gameId);
+      }, 6000);
+    });
+  }, [downloads, hiddenCompletedIds]);
+
+  // Nessun fallback a MOCK_GAMES: mostrare un gioco finto (Cyberpunk 2077)
+  // durante il render iniziale prima che il fetch reale risponda è la stessa
+  // classe di bug del flash store mock. undefined è il valore corretto
+  // quando non esistono ancora dati reali — i punti che consumano
+  // selectedGame già gestiscono il caso "nessun gioco selezionato".
+  // v0.99.37 — fix: la card "Steam Big Picture" non esiste mai in `games`
+  // (stato popolato solo da /api/games, lato server — la card è virtuale,
+  // iniettata solo per il rendering della griglia). Prima di questo fix,
+  // selezionarla faceva sempre fallire il find() e cadere su games[0],
+  // mostrando nel pannello destro le info di un titolo reale a caso invece
+  // che della card selezionata. Risolta qui esplicitamente con la stessa
+  // factory usata per l'iniezione in griglia, prima di provare il find().
+  // v0.99.38 — rimosso il fallback finale `|| games[0]`: prima, quando
+  // selectedGameId era vuoto (nessuna vera selezione dell'utente, es. al
+  // primo caricamento), il pannello destro mostrava comunque il primo
+  // gioco della lista corrente come se fosse selezionato — "appare sempre
+  // A Plague Tale: Innocence di default". Ora selectedGame è
+  // genuinamente undefined in quel caso, e il pannello destro mostra un
+  // messaggio di benvenuto (vedi rendering condizionale più sotto) invece
+  // di una selezione finta.
+  const selectedGame = selectedGameId === STEAM_BIG_PICTURE_ID
+    ? makeSteamBigPictureCard()
+    : games.find(g => g.id === selectedGameId);
+
+  // v1.0.0 — fix navigazione overlay Game Options: Runner Bridge,
+  // Compatibility Layer/Core ed Executable Path si affidavano solo allo
+  // scoring geometrico di FocusProvider per passare da una sezione
+  // all'altra — con risultati diversi a seconda della direzione (su/giù),
+  // soprattutto quando una sezione risulta vuota per questo gioco
+  // specifico (es. Wine-Lutris è l'unico runner disponibile, mai
+  // mostrato come switch essendo il default implicito — la card "Runner
+  // Bridge" resta visibile ma senza alcun elemento selezionabile dentro).
+  // Calcolato qui, in un solo punto, invece che duplicato nel JSX.
+  //
+  // v1.0.0 — FIX CRITICO: questo blocco viveva PRIMA della dichiarazione
+  // di selectedGame (riga sopra) — un ReferenceError "used before
+  // declaration" che manda in crash l'intero render ad ogni caricamento
+  // (schermo nero). Spostato qui, subito dopo, dove selectedGame esiste
+  // già. Errore mio, trovato con tsc mirato su TS2448 dopo la
+  // segnalazione — non l'avevo controllato perché il mio filtro di
+  // verifica precedente cercava solo alcuni codici di errore specifici,
+  // non questa categoria.
+  // v1.1.16 — stessa lezione già documentata sopra per overlayNavAnchors:
+  // questo blocco deve vivere DOPO la dichiarazione di selectedGame, non
+  // prima — l'avevo messo vicino ad activeField (molto più in alto nel
+  // file) e tsc l'ha segnalato subito come TS2448 prima ancora di
+  // arrivare a un test su hardware reale.
+  // Set di suggerimenti alternativo per il campo attualmente in editing:
+  // Launch Arguments → lista curata di flag comuni; una riga Custom Env
+  // Variables → lista curata di variabili, diversa per Wine o Proton in
+  // base al runner del gioco selezionato; ogni altro campo → nessuna
+  // alternativa, Shift si comporta come sempre (solo maiuscolo/minuscolo).
+  const keyboardAltSuggestions = useMemo((): SuggestionItem[] | undefined => {
+    if (!activeField) return undefined;
+    if (activeField.id === 'field-launchArgs') return LAUNCH_ARG_SUGGESTIONS;
+    if (activeField.id.startsWith('envvar-')) {
+      const isProton = (selectedGame?.runner ?? '').toLowerCase().includes('proton');
+      return isProton ? ENV_VAR_SUGGESTIONS_PROTON : ENV_VAR_SUGGESTIONS_WINE;
+    }
+    return undefined;
+  }, [activeField, selectedGame?.runner]);
+
+  const overlayNavAnchors = useMemo(() => {
+    if (!selectedGame) return { lastRunnerBridgeId: undefined, firstMiddleId: undefined, lastMiddleId: undefined, firstOverlayContentId: undefined };
+
+    const nonDefaultRunners = availableRunners.filter((r: any) => (r.id || r) !== 'Wine-Lutris');
+    const runnerBridgeShown = selectedGame.store !== 'Classic Console';
+    const firstRunnerBridgeId = (runnerBridgeShown && nonDefaultRunners.length > 0)
+      ? `game-runner-${nonDefaultRunners[0].id || nonDefaultRunners[0]}`
+      : undefined;
+    const lastRunnerBridgeId = (runnerBridgeShown && nonDefaultRunners.length > 0)
+      ? `game-runner-${nonDefaultRunners[nonDefaultRunners.length - 1].id || nonDefaultRunners[nonDefaultRunners.length - 1]}`
+      : undefined;
+
+    let firstMiddleId: string | undefined;
+    let lastMiddleId: string | undefined;
+    if (selectedGame.runner === 'RetroArch') {
+      const nonDefaultCores = retroarchCores.filter(c => c.name !== retroarchDefaultCore);
+      firstMiddleId = nonDefaultCores[0] ? `core-${nonDefaultCores[0].name}` : undefined;
+      lastMiddleId  = nonDefaultCores.length > 0 ? `core-${nonDefaultCores[nonDefaultCores.length - 1].name}` : undefined;
+    } else if (selectedGame.store !== 'Classic Console') {
+      firstMiddleId = 'compat-fsr';
+      lastMiddleId  = 'compat-battleye';
+    }
+
+    // v1.1.3 — ingresso deterministico dal pulsante di chiusura (in alto a
+    // destra) verso il primo elemento REALE del corpo dell'overlay: prima
+    // Runner Bridge se presente, altrimenti la sezione centrale
+    // (core RetroArch o Compatibility Layer), altrimenti il campo
+    // Executable Path — sempre presente in fondo, unico fallback
+    // garantito per i giochi Classic Console non-RetroArch (dove
+    // Runner Bridge e la sezione centrale sono entrambe assenti/vuote).
+    // Bug reale scoperto in test: senza questo, "giù" dal pulsante di
+    // chiusura usava scoring geometrico puro e atterrava direttamente
+    // sulla colonna destra di Compatibility Layer, scavalcando per intero
+    // Runner Bridge e i core RetroArch.
+    const firstOverlayContentId = firstRunnerBridgeId ?? firstMiddleId ?? 'field-executablePath';
+
+    return { lastRunnerBridgeId, firstMiddleId, lastMiddleId, firstOverlayContentId };
+  }, [selectedGame, availableRunners, retroarchCores, retroarchDefaultCore]);
+
+  // v0.99.38 — auto-scroll per il box descrizione nel pannello info a
+  // destra (v1.0.0: ristretto al SOLO box descrizione, prima riguardava
+  // l'intera colonna — immagine/badge/titolo/tag/playtime restano fissi
+  // ora, vincolati alla loro dimensione naturale, mai coinvolti nello
+  // scroll). Interfaccia controller-first: senza mouse non c'è modo di
+  // trascinare uno scrollbar per leggere un testo che eccede l'altezza
+  // massima del box — un ridimensionamento non basterebbe comunque, il
+  // box ha un max-height deliberatamente vincolato a non eccedere mai lo
+  // spazio della colonna.
+  //
+  // v1.0.0 — FIX incoerenza "a volte parte, a volte no": prima era un
+  // useRef + useEffect(..., [selectedGame?.id]) separati. Il pannello usa
+  // AnimatePresence mode="wait" — al cambio di gioco, il nuovo box viene
+  // montato nel DOM solo DOPO che l'animazione di uscita della card
+  // precedente è finita. L'useEffect invece scattava subito al cambio di
+  // selectedGame.id, PRIMA che il nuovo nodo esistesse davvero — trovava
+  // il ref a `null` o no a seconda di quanto la macchina impiegava a
+  // completare l'animazione in quel momento: una vera race condition,
+  // non un comportamento casuale. Una ref a CALLBACK risolve alla radice:
+  // React la richiama esattamente quando il nodo viene attaccato al DOM,
+  // indipendentemente dai tempi di Framer Motion.
+  // v1.0.0 — DIAGNOSTICA TEMPORANEA (round 2): stavolta con aggiornamento
+  // continuo (ogni 500ms via setInterval, indipendente da ResizeObserver
+  // o da qualunque altro evento) invece di un singolo valore letto una
+  // tantum — deve dirci con certezza se il meccanismo resta bloccato su
+  // "non serve scorrere" per tutta la durata dell'osservazione, o se
+  // semplicemente non viene mai invocato affatto.
+  const descriptionScrollCleanupRef = useRef<(() => void) | null>(null);
+  const descriptionScrollRefCallback = useCallback((el: HTMLDivElement | null) => {
+    // Il nodo precedente (gioco già cambiato, o testo troppo corto per
+    // scorrere) viene smontato — ripulisci sempre prima di ripartire.
+    if (descriptionScrollCleanupRef.current) {
+      descriptionScrollCleanupRef.current();
+      descriptionScrollCleanupRef.current = null;
+    }
+    if (!el) return;
+
+    // v1.0.0 — FIX: prova diagnostica ha dimostrato che l'assegnazione a
+    // scrollTop viene ignorata (before===after nella stessa riga di
+    // codice, non un problema di timing) — sintomo tipico di
+    // overflow-y non davvero impostato su un valore scrollabile a
+    // livello di stile calcolato, nonostante la classe Tailwind
+    // overflow-y-auto sia presente (una regola con specificità più alta
+    // altrove nel CSS può vincere sulla cascata). Lo stile inline ha
+    // sempre la priorità massima, indipendentemente da qualunque foglio
+    // di stile in conflitto — elimina il dubbio alla radice invece di
+    // continuare a cercare quale regola specifica lo stia sovrascrivendo.
+    el.style.overflowY = 'auto';
+    el.style.overflowX = 'hidden';
+
+    el.scrollTop = 0;
+
+    let cancelled     = false;
+    let rafId: number | null = null;
+    let userActive    = false;
+    let cycleRunning  = false;
+    let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+    let startTimer:  ReturnType<typeof setTimeout> | null = null;
+
+    const onUserInteraction = () => {
+      userActive = true;
+      if (resumeTimer) clearTimeout(resumeTimer);
+      resumeTimer = setTimeout(() => { userActive = false; }, 4000);
+    };
+    el.addEventListener('wheel', onUserInteraction, { passive: true });
+    el.addEventListener('touchstart', onUserInteraction, { passive: true });
+
+    const startCycle = () => {
+      if (cancelled || cycleRunning) return;
+      const overflow = el.scrollHeight - el.clientHeight;
+      if (overflow <= 8) return; // contenuto già tutto visibile, nulla da fare
+      cycleRunning = true;
+
+      // v1.0.0 — tempi allungati su richiesta: prima il ciclo (partenza,
+      // velocità, pause alle inversioni) risultava troppo compulsivo,
+      // l'utente non faceva in tempo a leggere con calma prima che il
+      // testo ripartisse. Stesso meccanismo, solo più rilassato.
+      const scrollDurationMs = Math.min(Math.max(overflow * 24, 3000), 11000);
+      let direction: 1 | -1 = 1;
+      let lastTs: number | null = null;
+      let pauseUntil = 0;
+      // v1.0.0 — FIX VERO: il browser arrotonda scrollTop all'intero più
+      // vicino ad ogni lettura/scrittura. Il nostro incremento per
+      // fotogramma (~0.37px in questo caso, overflow=67 fa scattare la
+      // soglia minima di 3000ms) è sotto 0.5px — "prima+incremento" viene
+      // arrotondato allo stesso intero di partenza ad ogni fotogramma,
+      // la frazione non si accumula MAI perché rileggevamo il valore già
+      // arrotondato dal browser come base per il calcolo successivo
+      // (provato con un test diretto: un salto grande a un intero
+      // "stickava" perfettamente, ma il ciclo incrementale restava poi
+      // bloccato esattamente li). Un accumulatore proprio, mai riletto
+      // da el.scrollTop, risolve alla radice — accumula sempre con
+      // precisione piena, indipendentemente da come il browser arrotonda
+      // il valore effettivamente memorizzato/visualizzato.
+      let virtualScrollTop = el.scrollTop;
+
+      const step = (ts: number) => {
+        if (cancelled) return;
+        rafId = requestAnimationFrame(step);
+        if (userActive || ts < pauseUntil) { lastTs = null; return; }
+        if (lastTs == null) { lastTs = ts; return; }
+        const dt = ts - lastTs;
+        lastTs = ts;
+
+        virtualScrollTop += direction * (overflow / scrollDurationMs) * dt;
+        el.scrollTop = virtualScrollTop;
+
+        if (direction === 1 && virtualScrollTop >= overflow - 1) {
+          virtualScrollTop = overflow;
+          el.scrollTop = overflow;
+          direction = -1;
+          pauseUntil = ts + 4500; // pausa in fondo, tempo di finire la lettura
+        } else if (direction === -1 && virtualScrollTop <= 1) {
+          virtualScrollTop = 0;
+          el.scrollTop = 0;
+          direction = 1;
+          pauseUntil = ts + 6000; // pausa più lunga in cima, prima di ripartire da capo
+        }
+      };
+      rafId = requestAnimationFrame(step);
+    };
+
+    // v1.0.0 — FIX per il caso "il ciclo non parte mai per questo
+    // titolo": prima l'overflow veniva misurato UNA sola volta, in un
+    // punto fisso nel tempo (4s dopo il montaggio). Se per quel gioco
+    // specifico il layout sopra il box (titolo su piu righe, badge su
+    // piu righe) impiegava piu tempo del solito ad assestarsi, la misura
+    // poteva cadere nel momento sbagliato — e non veniva piu ritentata,
+    // il ciclo restava spento per sempre anche se il testo eccedeva
+    // chiaramente lo spazio. Un ResizeObserver osserva le dimensioni
+    // REALI del box in continuo (non un singolo istante): ogni volta che
+    // cambiano — incluso il primo assestamento — si rivaluta se serve
+    // scorrere, con debounce di 4s (lo stesso ritardo di lettura di
+    // prima) prima di avviare davvero il ciclo.
+    const resizeObserver = new ResizeObserver(() => {
+      if (cancelled) return;
+      const overflow = el.scrollHeight - el.clientHeight;
+      if (overflow <= 8) {
+        // Il box è cresciuto (o il testo si è accorciato) abbastanza da
+        // non aver più bisogno di scorrere — ferma un ciclo in corso.
+        if (cycleRunning) {
+          cycleRunning = false;
+          if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+          el.scrollTop = 0;
+        }
+        if (startTimer) { clearTimeout(startTimer); startTimer = null; }
+        return;
+      }
+      if (!cycleRunning) {
+        if (startTimer) clearTimeout(startTimer);
+        startTimer = setTimeout(startCycle, 4000);
+      }
+    });
+    resizeObserver.observe(el);
+
+    // v1.0.0 — FIX per il caso reale scoperto: rimuovendo un elemento
+    // diagnostico temporaneo sopra il box, lo scroll smetteva di
+    // partire — non per la posizione del box, ma perché quell'elemento
+    // causava ri-render aggiuntivi che davano al ResizeObserver più
+    // occasioni di ricontrollare la misura. Il ResizeObserver da solo
+    // notifica una volta all'osservazione iniziale e poi solo se la
+    // dimensione cambia DAVVERO — se quella prima misura cade in un
+    // momento in cui il layout non si è ancora assestato (Framer Motion
+    // sta ancora animando, l'immagine di copertina sta ancora
+    // caricando) e la dimensione poi non cambia più, quella misura
+    // sbagliata resta quella definitiva per sempre. Questi ricontrolli
+    // programmati (non legati a un evento di resize) danno al
+    // meccanismo altre occasioni di correggersi, indipendentemente da
+    // cosa succede nel frattempo.
+    // v1.0.0 — il primo tentativo resta a 4s (stesso ritardo di lettura
+    // già richiesto e mantenuto), gli altri sono solo una rete di
+    // sicurezza nel caso quella prima misura cada ancora nel momento
+    // sbagliato — non anticipano mai la partenza, la rallentano se mai,
+    // dato che ripartono da capo solo se il ciclo non è già in corso.
+    const retryDelays = [4000, 6000, 8500, 11000];
+    const retryTimers = retryDelays.map(delay => setTimeout(() => {
+      if (!cancelled && !cycleRunning) startCycle();
+    }, delay));
+
+    descriptionScrollCleanupRef.current = () => {
+      cancelled = true;
+      if (startTimer) clearTimeout(startTimer);
+      if (resumeTimer) clearTimeout(resumeTimer);
+      retryTimers.forEach(clearTimeout);
+      if (rafId != null) cancelAnimationFrame(rafId);
+      resizeObserver.disconnect();
+      el.removeEventListener('wheel', onUserInteraction);
+      el.removeEventListener('touchstart', onUserInteraction);
+    };
+  }, []);
+
+  // v1.0.0 — scorrimento del campo Executable Path quando il path eccede
+  // lo spazio disponibile, stesso principio dei titoli notifica ma
+  // applicato a un <input> di sola lettura (vedi useScrollOnceOverflow
+  // sopra). Riparte ogni volta che il valore cambia — nuovo gioco
+  // selezionato o path modificato dall'utente.
+  const executablePathRef = useRef<HTMLInputElement>(null);
+  useScrollOnceOverflow(executablePathRef, localGameConfig.executablePath);
+
+  // Carica i core RetroArch quando l'overlay si apre per una ROM Classic Console
+  // Step 4 — carica profilo compat e config locale quando si apre l'overlay
+  useEffect(() => {
+    if (!showGameOptions || !selectedGame) return;
+    fetch(`/api/games/${selectedGame.id}/compat`)
+      .then(r => r.ok ? r.json() : {})
+      .then(profile => {
+        setLocalCompatProfile({
+          fsr:      !!profile.fsr,
+          gameMode: !!profile.gameMode,
+          mangohud: !!profile.mangohud,
+          eac:      !!profile.eac,
+          battleye: !!profile.battleye,
+        });
+        setCustomEnvText(
+          Object.entries(profile.customEnv ?? {})
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n')
+        );
+        // v1.1.18 — reset esplicito: tutto ciò che arriva dal profilo
+        // salvato è per definizione persistente (non esisterebbe un
+        // concetto di "non persistente" scritto nel DB — per costruzione
+        // le righe non persistenti non vengono mai salvate). Mappa vuota
+        // = tutte le righe partono come persistenti, coerente col
+        // default deciso.
+        setCustomEnvPersistentFlags({});
+        // Carica verbs winetricks salvati per questo gioco, fallback ai default
+        if (Array.isArray(profile.winetricksVerbs)) {
+          setWinetricksVerbs(profile.winetricksVerbs);
+        } else {
+          setWinetricksVerbs(DEFAULT_WINE_VERBS);
+        }
+        setDisableWineSync(!!profile.disableWineSync);
+        setUseKnownFixes(!!profile.useKnownFixes);
+      })
+      .catch(() => { setWinetricksVerbs(DEFAULT_WINE_VERBS); });
+    setLocalGameConfig({
+      executablePath: selectedGame.executablePath ?? '',
+      launchArgs:     selectedGame.launchArgs     ?? '',
+      steamAppId:     selectedGame.steamAppId     ?? '',
+      dosboxConf:     selectedGame.dosboxConf     ?? '',
+      libretroCore:   selectedGame.libretroCore   ?? '',
+      scummvmId:      selectedGame.scummvmId      ?? '',
+    });
+    fetch('/api/runners')
+      .then(r => r.json())
+      .then((runners: Array<{id: string; version: string; status: string}>) => {
+        const match = runners.find(r => r.id === selectedGame.runner);
+        setRunnerVersion(match?.version ?? selectedGame.runner ?? '');
+      })
+      .catch(() => setRunnerVersion(''));
+    fetch('/api/system-tools')
+      .then(r => r.json())
+      .then(tools => setSystemTools(tools))
+      .catch(() => {});
+    // Carica runner installabili per il picker nell'overlay (se non già caricati)
+    if (installableRunners.length === 0) {
+      fetch('/api/runners/installable')
+        .then(r => r.json())
+        .then(setInstallableRunners)
+        .catch(() => {});
+    }
+  }, [showGameOptions, selectedGame?.id]);
+
+  // Sincronizza executablePath nel form se arriva via SSE dopo il completamento install
+  useEffect(() => {
+    if (!showGameOptions || !selectedGame?.executablePath) return;
+    setLocalGameConfig(prev => {
+      if (prev.executablePath) return prev; // non sovrascrivere se l'utente ha già scritto qualcosa
+      return { ...prev, executablePath: selectedGame.executablePath! };
+    });
+  }, [showGameOptions, selectedGame?.executablePath]);
+
+  useEffect(() => {
+    if (!showGameOptions || !selectedGame) return;
+    // v1.0.0 — fix: prima bastava store==='Classic Console' per mostrare
+    // questa sezione, ma non tutti i giochi Classic Console usano
+    // RetroArch (DOS passa da DOSBox, le avventure da ScummVM) — mostrare
+    // "core RetroArch" per un gioco DOS non ha senso, stessa categoria di
+    // confusione del mostrare Proton per un gioco RetroArch.
+    if (selectedGame.runner !== 'RetroArch') return;
+    const systemParam = selectedGame.system ? `?system=${encodeURIComponent(selectedGame.system)}` : '';
+    fetch(`/api/retroarch/cores${systemParam}`)
+      .then(r => r.json())
+      .then(data => {
+        setRetroarchAvailable(data.retroarchAvailable);
+        setRetroarchCores(data.cores);
+        setRetroarchDefaultCore(data.defaultCore ?? '');
+      })
+      .catch(() => setRetroarchAvailable(false));
+  }, [showGameOptions, selectedGame?.id]);
+
+  // Plugin disabilitati — mappa storeId → drmFree per filtro e badge card
+  const pluginStateMap = useMemo(() => {
+    const map = new Map<string, { enabled: boolean; drmFree: boolean }>();
+    for (const p of pluginRegistry) map.set(p.id, { enabled: p.enabled, drmFree: p.drmFree });
+    return map;
+  }, [pluginRegistry]);
+
+  // Mappa storeId → stato di autenticazione reale, distinta da
+  // pluginStateMap (che riflette solo il toggle manuale on/off in Plugins).
+  // Disconnettersi da uno store (logout) non disabilita il plugin — sono
+  // due concetti diversi: il logout invalida una sessione, il toggle è una
+  // preferenza utente persistente. Senza questa mappa, i titoli non
+  // installati di uno store appena disconnesso restavano visibili come se
+  // nulla fosse cambiato, perché il filtro esistente guardava solo
+  // pluginRegistry.
+  const storeConnectedMap = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const s of stores) map.set(s.id, !!s.isConnected);
+    return map;
+  }, [stores]);
+
+  const filteredVisibleGames = useMemo(() => {
+    // Il filtro per store è già applicato server-side (vedi gameManager.ts,
+    // fetch con ?store=${activeStore}). Filtrare di nuovo qui contro `games`
+    // produceva una griglia vuota istantanea ad ogni cambio di activeStore:
+    // lo stato logico cambiava subito, ma `games` conteneva ancora i dati
+    // del vecchio store fino al completamento del fetch (anche secondi),
+    // quindi g.store === activeStore non trovava più alcuna corrispondenza
+    // nella finestra di latenza. Rimuovendo il doppio filtro, la griglia
+    // mostra sempre esattamente ciò che il server ha già restituito.
+    let result = games;
+    // Plugin disabilitati (toggle manuale): nascondi non installati, mantieni installati
+    result = result.filter(g => {
+      const ps = pluginStateMap.get(g.store as string);
+      if (!ps || ps.enabled) return true;
+      return g.isInstalled;
+    });
+    // Store disconnesso (logout): stessa logica, ma basata sullo stato di
+    // autenticazione reale invece del toggle manuale. Esclude gli store
+    // senza un vero concetto di login (Steam, Amazon, Battle.net, Classic
+    // Console), per cui isConnected non implica una sessione da poter
+    // perdere nello stesso senso.
+    const NO_LOGIN_STORES = new Set(['Steam', 'Amazon Games', 'Battle.net', 'Classic Console']);
+    result = result.filter(g => {
+      const store = g.store as string;
+      if (NO_LOGIN_STORES.has(store)) return true;
+      const connected = storeConnectedMap.get(store);
+      if (connected === undefined || connected) return true;
+      return g.isInstalled;
+    });
+    if (onlyInstalled) result = result.filter(g => g.isInstalled);
+    if (!searchQuery) {
+      return appendSteamBigPictureCard(result, activeStore, '');
+    }
+    const s = searchQuery.toLowerCase();
+    const searched = result.filter(g =>
+      g.title.toLowerCase().includes(s) ||
+      g.description.toLowerCase().includes(s) ||
+      g.tags?.some(t => typeof t === 'string' && t.toLowerCase().includes(s))
+    );
+    // La card resta raggiungibile dalla ricerca col proprio nome, esattamente
+    // come un vero elemento della libreria — non un'eccezione "sempre visibile
+    // a prescindere", solo iniettata e poi soggetta allo stesso filtro testuale
+    // applicato a tutti gli altri elementi.
+    return appendSteamBigPictureCard(searched, activeStore, searchQuery);
+  }, [games, searchQuery, onlyInstalled, pluginStateMap, storeConnectedMap, activeStore]);
+
+  const [time, setTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setTime(new Date()), 10000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const [selectionLocked, _setSelectionLocked] = useState(false); // kept for compat, unused
+
+  // Lancia il gioco — accetta gameId diretto (click sx) o usa selectedGame (play button)
+  // Ref sincronizzati con games/selectedGame/pluginStateMap: stesso motivo
+  // di activeStoreRef/focusedIdRef. Questi tre cambiano molto frequentemente
+  // (fetch libreria, cache, cambio card, toggle plugin) ed erano dipendenze
+  // dirette di handlePlay, che è a sua volta dipendenza dell'effect gamepad
+  // principale — ogni loro cambiamento rimontava l'intero effect. Una
+  // pressione fisica (es. B) che cadeva nello stesso frame di quel remount
+  // poteva andare persa a metà, anche se il suono dell'azione parte comunque
+  // (play('back') è eseguito prima di ogni controllo sui rami if/else).
+  const gamesRef = useRef(games);
+  useEffect(() => { gamesRef.current = games; }, [games]);
+  const selectedGameRef = useRef(selectedGame);
+  useEffect(() => { selectedGameRef.current = selectedGame; }, [selectedGame]);
+  const pluginStateMapRef = useRef(pluginStateMap);
+  useEffect(() => { pluginStateMapRef.current = pluginStateMap; }, [pluginStateMap]);
+  const storeConnectedMapRef = useRef(storeConnectedMap);
+  useEffect(() => { storeConnectedMapRef.current = storeConnectedMap; }, [storeConnectedMap]);
+
+  const handlePlay = useCallback(async (gameId?: string) => {
+    const id = gameId ?? selectedGameRef.current?.id;
+    if (!id) return;
+
+    // v0.99.32 — La card "Steam Big Picture" è iniettata solo lato
+    // frontend (filteredVisibleGames), non esiste in gamesRef (i dati reali
+    // dal backend) — va intercettata qui, PRIMA della ricerca sottostante,
+    // altrimenti game risulterebbe sempre undefined e la funzione
+    // ritornerebbe silenziosamente senza fare nulla.
+    if (id === STEAM_BIG_PICTURE_ID) {
+      fetch('/api/system/steam-bigpicture', { method: 'POST' }).catch(() => {});
+      play('select');
+      return;
+    }
+
+    const game = gamesRef.current.find(g => g.id === id);
+    if (!game) return;
+
+    if (!game.isInstalled) {
+      // Mostra conferma nel pannello download invece di avviare subito
+      setPendingAction({ type: 'install', gameId: id, gameTitle: game.title });
+      setShowDownloads(true);
+      // v0.99.35 — fix: questa chiamata mancava qui (presente invece
+      // nei due punti analoghi dentro l'overlay opzioni gioco, righe
+      // ~5050/5068). Senza questa, activeGroup restava sul valore
+      // precedente all'apertura del pannello — il sistema di focus
+      // non sapeva che il gruppo "downloads" era ora quello attivo,
+      // quindi il bottone "Installa" non riceveva mai il focus
+      // iniziale lanciando l'installazione direttamente dalla card
+      // (a differenza del bottone equivalente nell'overlay, che
+      // impostava activeGroup correttamente). Causa esatta del
+      // sintomo "serve chiudere e riaprire il pannello con L2" — quel
+      // tasto/azione probabilmente chiama setActiveGroup altrove,
+      // sistemando lo stato solo a posteriori.
+      setActiveGroup('downloads');
+      return;
+    }
+
+    // Gioco installato ma plugin disabilitato e DRM richiesto
+    const ps = pluginStateMapRef.current.get(game.store as string);
+    if (ps && !ps.enabled && !ps.drmFree) {
+      // v0.99.38 — fix: era un alert() nativo del browser (compare come
+      // popup di Chromium in alto al centro, fuori dal sistema di
+      // notifiche della dashboard e non navigabile col pad) — lo stesso
+      // scenario lato backend (vedi notificationEngine.ts, evento
+      // 'launch-blocked') passa correttamente dal pannello notifiche,
+      // ma qui il controllo blocca il lancio PRIMA che la richiesta
+      // arrivi mai al server, quindi quel percorso non scattava.
+      pushNotification({
+        type: 'warning',
+        title: `Avvio bloccato — ${game.title}`,
+        body: `Il plugin ${game.store} è disabilitato e richiede DRM per l'avvio. Riattivalo nelle Impostazioni → Plugins.`,
+        gameId: game.id,
+        gameTitle: game.title,
+        source: 'system',
+        primaryAction: { label: 'Vai ai Plugin', handler: 'open_section', params: { section: 'plugins' } },
+      });
+      return;
+    }
+
+    // Gioco installato, plugin abilitato, ma sessione store disconnessa
+    // (logout) e DRM richiesto: avviso non bloccante, non un blocco totale
+    // come sopra — il gioco potrebbe comunque funzionare (cache locale,
+    // modalità offline), ma l'utente deve sapere del rischio prima di
+    // procedere, dato che la sessione non è più valida.
+    const NO_LOGIN_STORES_HANDLEPLAY = new Set(['Steam', 'Amazon Games', 'Battle.net', 'Classic Console']);
+    if (ps && !ps.drmFree && !NO_LOGIN_STORES_HANDLEPLAY.has(game.store as string)) {
+      const connected = storeConnectedMapRef.current.get(game.store as string);
+      if (connected === false) {
+        const proceed = confirm(`"${game.title}" richiede l'autenticazione ${game.store} (DRM) e l'account risulta disconnesso.
+Il gioco potrebbe non avviarsi correttamente. Rifai il login in Impostazioni → Store Accounts per maggiore affidabilità.
+
+Vuoi provare ad avviarlo comunque?`);
+        if (!proceed) return;
+      }
+    }
+
+    play('launch');
+    try {
+      await fetch('/api/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      // Congela l'input gamepad mentre il gioco è in esecuzione.
+      // Polling ogni 3s su /api/status per sapere quando il processo termina.
+      setFocusFrozen(true);
+      const pollGameRunning = setInterval(async () => {
+        try {
+          const res = await fetch('/api/status');
+          const data = await res.json();
+          // Il backend espone { running: boolean } o { gameRunning: boolean }
+          const isRunning = data?.running ?? data?.gameRunning ?? false;
+          if (!isRunning) {
+            clearInterval(pollGameRunning);
+            setFocusFrozen(false);
+          }
+        } catch {
+          // Se il backend non risponde, sblocca dopo 30s come fallback
+          clearInterval(pollGameRunning);
+          setFocusFrozen(false);
+        }
+      }, 3000);
+      // Fallback assoluto: sblocca dopo 5 minuti anche se il polling fallisce
+      setTimeout(() => {
+        clearInterval(pollGameRunning);
+        setFocusFrozen(false);
+      }, 5 * 60 * 1000);
+    } catch (err) {
+      console.error("Launch failed:", err);
+      setFocusFrozen(false);
+    }
+  }, [play]);
+
+  const handleLogin = async (storeId: string) => {
+    play('select');
+    setAuthMessage(prev => ({ ...prev, [storeId]: '⏳ Avvio autenticazione...' }));
+    setAuthUrl(prev => { const n = { ...prev }; delete n[storeId]; return n; });
+    try {
+      const res = await fetch('/api/stores/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: storeId }),
+      });
+      const result = await res.json();
+      if (result.authUrl) {
+        setAuthUrl(prev => ({ ...prev, [storeId]: result.authUrl }));
+      }
+      if (result.message) {
+        setAuthMessage(prev => ({ ...prev, [storeId]: result.message }));
+      }
+      if (result.waitForBrowser) {
+        // Avvia polling — l'utente sta completando il login nel browser
+        setAuthPolling(storeId);
+      } else if (result.success) {
+        // Login completato subito (es. Steam)
+        const [storesData, gamesData] = await Promise.all([
+          fetch('/api/stores').then(r => r.json()),
+          fetch(`/api/games?store=${activeStore}`).then(r => r.json()),
+        ]);
+        setStores(storesData);
+        setGames(gamesData);
+        setAuthMessage(prev => ({ ...prev, [storeId]: '✅ Connesso.' }));
+        play('launch');
+      } else {
+        setAuthMessage(prev => ({ ...prev, [storeId]: result.message ?? 'Errore sconosciuto.' }));
+      }
+    } catch (err) {
+      setAuthMessage(prev => ({ ...prev, [storeId]: '❌ Errore di rete.' }));
+    }
+  };
+
+  const handleLogout = async (storeId: string) => {
+    play('back');
+    setAuthMessage(prev => ({ ...prev, [storeId]: '⏳ Disconnessione in corso...' }));
+    try {
+      const res = await fetch('/api/stores/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: storeId }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        // Richiede sempre i dati per LO STORE DISCONNESSO (storeId), non per
+        // activeStore: l'utente può essere in Manage Accounts mentre la
+        // Dashboard sottostante ha un activeStore completamente diverso
+        // (es. 'All' di default), il che faceva richiedere e visualizzare
+        // dati del tutto slegati dallo store appena disconnesso.
+        const [storesData, gamesData] = await Promise.all([
+          fetch('/api/stores').then(r => r.json()),
+          fetch(`/api/games?store=${storeId}`).then(r => r.json()),
+        ]);
+        setStores(storesData);
+        // Aggiorna solo i giochi di QUESTO store nello stato globale,
+        // lasciando intatti quelli degli altri store già caricati.
+        setGames(prev => [
+          ...prev.filter(g => g.store !== storeId),
+          ...gamesData,
+        ]);
+        setAuthMessage(prev => ({ ...prev, [storeId]: `✅ ${result.message}` }));
+      } else {
+        setAuthMessage(prev => ({ ...prev, [storeId]: `❌ ${result.message}` }));
+      }
+    } catch {
+      setAuthMessage(prev => ({ ...prev, [storeId]: '❌ Errore di rete.' }));
+    }
+  };
+
+  const handleInstallRunner = (runnerId: string) => {
+    if (runnerInstalling) return;
+    setRunnerInstalling(runnerId);
+    setRunnerInstallProgress(prev => ({ ...prev, [runnerId]: ['⏳ Avvio download...'] }));
+
+    const es = new EventSource(`/api/runners/install-stream?id=${encodeURIComponent(runnerId)}`);
+    es.addEventListener('log', (e: any) => {
+      const { message } = JSON.parse(e.data);
+      setRunnerInstallProgress(prev => ({
+        ...prev,
+        [runnerId]: [...(prev[runnerId] ?? []), message].slice(-8),
+      }));
+    });
+    es.addEventListener('done', (e: any) => {
+      const { message } = JSON.parse(e.data);
+      es.close();
+      setRunnerInstalling(null);
+      setRunnerInstallProgress(prev => ({
+        ...prev,
+        [runnerId]: [...(prev[runnerId] ?? []), `✅ ${message}`],
+      }));
+      // Ricarica runners installati
+      fetch('/api/runners').then(r => r.json()).then(setAvailableRunners).catch(() => {});
+      fetch('/api/runners/installable').then(r => r.json()).then(setInstallableRunners).catch(() => {});
+      play('launch');
+      // Pulisce il log dopo che l'utente ha avuto tempo di leggere l'esito:
+      // senza questo, il blocco di righe resta visibile indefinitamente,
+      // persistendo nello stato React fino a un refresh completo della pagina.
+      setTimeout(() => {
+        setRunnerInstallProgress(prev => {
+          const next = { ...prev };
+          delete next[runnerId];
+          return next;
+        });
+      }, 5000);
+    });
+    es.addEventListener('error', (e: any) => {
+      const msg = e.data ? JSON.parse(e.data).message : 'Errore durante l\'installazione.';
+      es.close();
+      setRunnerInstalling(null);
+      setRunnerInstallProgress(prev => ({
+        ...prev,
+        [runnerId]: [...(prev[runnerId] ?? []), `❌ ${msg}`],
+      }));
+      setTimeout(() => {
+        setRunnerInstallProgress(prev => {
+          const next = { ...prev };
+          delete next[runnerId];
+          return next;
+        });
+      }, 5000);
+    });
+    es.onerror = () => {
+      es.close();
+      setRunnerInstalling(null);
+    };
+  };
+
+  const handleUninstallRunner = (runnerId: string) => {
+    if (runnerUninstalling) return;
+    setRunnerUninstalling(runnerId);
+    setRunnerUninstallProgress(prev => ({ ...prev, [runnerId]: ['⏳ Avvio disinstallazione...'] }));
+    // Durata visiva minima: rm -rf su una cartella locale è praticamente
+    // istantaneo, quindi l'animazione di progresso non avrebbe mai il tempo
+    // di essere notata prima di scattare già a "completato" — spiazzante per
+    // l'utente, come segnalato. Questo NON rallenta l'operazione reale (il
+    // backend lavora comunque alla sua velocità naturale): ritarda solo il
+    // momento in cui la UI riporta il completamento, garantendo che
+    // l'animazione indeterminata compia almeno un ciclo visibile completo.
+    const startedAt = Date.now();
+    const MIN_VISUAL_MS = 900;
+
+    const es = new EventSource(`/api/runners/uninstall-stream?id=${encodeURIComponent(runnerId)}`);
+    es.addEventListener('log', (e: any) => {
+      const { message } = JSON.parse(e.data);
+      setRunnerUninstallProgress(prev => ({
+        ...prev,
+        [runnerId]: [...(prev[runnerId] ?? []), message].slice(-8),
+      }));
+    });
+    es.addEventListener('done', (e: any) => {
+      const { message } = JSON.parse(e.data);
+      es.close();
+      const elapsed = Date.now() - startedAt;
+      const remaining = Math.max(0, MIN_VISUAL_MS - elapsed);
+      setTimeout(() => {
+        setRunnerUninstalling(null);
+        setRunnerUninstallProgress(prev => ({
+          ...prev,
+          [runnerId]: [...(prev[runnerId] ?? []), `✅ ${message}`],
+        }));
+        // Ricarica runners: il runner torna tra gli installabili
+        fetch('/api/runners').then(r => r.json()).then(setAvailableRunners).catch(() => {});
+        fetch('/api/runners/installable').then(r => r.json()).then(setInstallableRunners).catch(() => {});
+        play('back');
+        setTimeout(() => {
+          setRunnerUninstallProgress(prev => {
+            const next = { ...prev };
+            delete next[runnerId];
+            return next;
+          });
+        }, 5000);
+      }, remaining);
+    });
+    es.addEventListener('error', (e: any) => {
+      const msg = e.data ? JSON.parse(e.data).message : 'Errore durante la disinstallazione.';
+      es.close();
+      setRunnerUninstalling(null);
+      setRunnerUninstallProgress(prev => ({
+        ...prev,
+        [runnerId]: [...(prev[runnerId] ?? []), `❌ ${msg}`],
+      }));
+      setTimeout(() => {
+        setRunnerUninstallProgress(prev => {
+          const next = { ...prev };
+          delete next[runnerId];
+          return next;
+        });
+      }, 5000);
+    });
+    es.onerror = () => {
+      es.close();
+      setRunnerUninstalling(null);
+    };
+  };
+
+  // Global search toggle — percorso CONTROLLER (tasto Y): apre la search bar
+  // E la Virtual Keyboard, perché un controller non ha modo di digitare
+  // altrimenti. Per il percorso mouse/tastiera fisica vedi
+  // openSearchWithPhysicalInput più sotto — i due sono intenzionalmente
+  // separati (v0.99.4): aprire la VK anche per chi sta già usando mouse e
+  // tastiera fisica era ridondante e ingombrante (overlay fullscreen con
+  // blur sopra tutta la dashboard) per un'azione che l'utente può già fare
+  // nativamente nel campo di testo.
+  const toggleSearch = useCallback(() => {
+    setShowSearch(prev => {
+      const next = !prev;
+      if (next) {
+        setActiveField(null); // assicura che la tastiera sia in modalità ricerca, non in un campo residuo
+        setShowKeyboard(true);
+        setActiveGroup('keyboard');
+        // Il focus iniziale è gestito centralmente dal useEffect su showKeyboard
+      } else {
+        // FIX v0.99.8: rimosso setActiveStore(previousActiveStore) — la
+        // chiusura della ricerca ripristinava sempre lo store da cui era
+        // partita. Comportamento corretto in origine, ma con L1/R1 che ora
+        // possono cambiare store mentre la ricerca resta attiva (v0.99.6,
+        // navigando i risultati filtrati attraverso più librerie senza
+        // perdere il filtro) è emerso un workflow utile non previsto:
+        // cercare un titolo di cui non si ricorda lo store, scorrere con
+        // L1/R1 finché non si trova filtrato altrove. Il rollback
+        // riportava l'utente allo store di partenza proprio nel momento in
+        // cui aveva trovato il titolo altrove — vanificando la scoperta.
+        // Ora Y chiude la ricerca lasciando lo store esattamente dov'è al
+        // momento della chiusura, qualunque libreria si stesse guardando.
+        setShowKeyboard(false);
+        setActiveField(null);
+        setActiveGroup(null);
+        // FIX v0.99.4: 'nav-search' non è più un Focusable (la lente non è
+        // più navigabile da controller, solo cliccabile da mouse — vedi
+        // punto 2 del fix navigazione) — setFocusedId('nav-search') non
+        // avrebbe più alcun target valido nel registry. Nessun
+        // setFocusedId qui: con activeGroup tornato a null, il prossimo
+        // input direzionale del controller (se l'utente lo usa) farà
+        // ricadere correttamente moveFocus sul fallback del group
+        // 'dashboard' tramite il meccanismo già esistente.
+      }
+      return next;
+    });
+    play('select');
+  }, [play, setActiveGroup]);
+
+  // Apre la search bar per interazione mouse/tastiera fisica (v0.99.4):
+  // NESSUNA Virtual Keyboard — porta il focus diretto sull'input reale,
+  // che l'utente può già compilare con la propria tastiera. Chiamata dal
+  // click sulla lente (mouse) e da Ctrl+F.
+  // Il campo è già montato non appena showSearch diventa true (AnimatePresence
+  // con height/opacity, non un mount/unmount condizionale), quindi un breve
+  // delay basta per garantire che il ref dell'input esista già nel DOM.
+  const openSearchWithPhysicalInput = useCallback(() => {
+    if (!showSearch) {
+      // FIX v0.99.8: non salva più previousActiveStore — la chiusura della
+      // ricerca (Y, Escape, "Fatto" su un campo, ecc.) non fa più alcun
+      // rollback dello store: resta sempre su quello visualizzato al
+      // momento della chiusura. Vedi toggleSearch per il dettaglio.
+      setShowSearch(true);
+    } else if (showKeyboard) {
+      // Caso limite: la ricerca era già aperta da Y/controller (con VK
+      // sovrapposta) e l'utente passa al mouse/tastiera fisica — chiude la
+      // VK residua, lasciando solo la search bar e il focus sull'input.
+      setShowKeyboard(false);
+      setActiveField(null);
+      setActiveGroup(null);
+    }
+    setTimeout(() => searchInputRef.current?.focus(), 50);
+  }, [showSearch, showKeyboard, setActiveGroup]);
+
+  // Handler Esc unificato
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'f' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        // FIX v0.99.4: Ctrl+F è già un'azione da tastiera fisica — usa lo
+        // stesso percorso del click mouse sulla lente (focus diretto
+        // sull'input, niente Virtual Keyboard), non più toggleSearch
+        // (che apriva sempre anche la VK, ridondante e ingombrante per chi
+        // sta già usando una tastiera fisica).
+        openSearchWithPhysicalInput();
+        return;
+      }
+      if (e.key === 'Escape') {
+        // FIX v0.99.4: la ricerca può essere stata aperta da due percorsi
+        // distinti — Y/controller (con Virtual Keyboard e activeGroup
+        // 'keyboard' attivi) o mouse/Ctrl+F (solo focus sull'input, nessuno
+        // stato aggiuntivo). Se la VK è effettivamente aperta, toggleSearch
+        // la chiude correttamente insieme al resto dello stato; altrimenti
+        // basta chiudere la search bar.
+        // FIX v0.99.8: rimosso il rollback setActiveStore(previousActiveStore)
+        // — Escape ora chiude la ricerca lasciando lo store esattamente
+        // dov'è, stesso comportamento di Y (vedi toggleSearch).
+        if (showSearch && showKeyboard) { toggleSearch();                return; }
+        if (showSearch)                 { setShowSearch(false);          return; }
+        if (showGameOptions)  { setShowGameOptions(false);     play('back'); return; }
+        if (showNotifications) { setShowNotifications(false);   return; }
+        if (showNotifications) { setShowNotifications(false);   return; }
+        if (showDownloads)    { setShowDownloads(false);       return; }
+        if (viewState !== 'library') { setViewState('library'); return; }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showSearch, showKeyboard, showGameOptions, showDownloads, viewState, toggleSearch, openSearchWithPhysicalInput, play]);
+
+  // Handle Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // ALT + ENTER -> Cicla modalità display (window ↔ kiosk/"Fullscreen",
+      // + borderless/"Kiosk" se kioskOptionVisible è attivo)
+      if (e.altKey && e.key === 'Enter') {
+        e.preventDefault();
+        cycleDisplayMode();
+      }
+      // CTRL + ALT + K -> Toggle visibilità della voce "Kiosk" nel menu
+      // (v0.99.17, sostituisce la precedente Ctrl+Alt+B di v0.99.16).
+      // "Kiosk" qui significa displayMode='borderless' — borderless puro,
+      // senza il tentativo di vera Fullscreen API che invece "Fullscreen"
+      // applica. Prima pressione: la voce entra nel ciclo del menu
+      // visibile (cycleDisplayMode passa a un ciclo a 3 stati). Seconda
+      // pressione: la voce viene rimossa di nuovo dal ciclo — se era
+      // quella attualmente selezionata, si ricade subito su 'kiosk'
+      // ("Fullscreen"), così la Dashboard non resta mai in uno stato non
+      // più raggiungibile dal menu visibile.
+      if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setKioskOptionVisible(prev => {
+          const next = !prev;
+          if (!next && displayMode === 'borderless') {
+            applyDisplayMode('kiosk');
+          }
+          pushNotification({
+            type: 'info',
+            title: next ? 'Voce "Kiosk" abilitata nel menu' : 'Voce "Kiosk" rimossa dal menu',
+            body: next
+              ? 'Ora disponibile ciclando Display Mode (Window → Fullscreen → Kiosk).'
+              : 'Tornata nascosta — riattivabile con Ctrl+Alt+K.',
+            source: 'system',
+          });
+          return next;
+        });
+      }
+      // CTRL + H -> Toggle Debug Console
+      if (e.ctrlKey && e.key === 'h') {
+        e.preventDefault();
+        setShowDebugConsole(prev => !prev);
+        play('select');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [play]);
+
+  // FIX v0.99.4: rimosso searchJustOpenedRef (anti-bounce per "A su
+  // nav-search") — non più necessario: la lente non è più un Focusable
+  // attivabile da A (vedi punto 2 del fix navigazione), e l'apertura
+  // ricerca da controller passa ora dal tasto Y, che ha un ramo `if`
+  // indipendente con la propria edge-detection già garantita da
+  // isJustPressed (consumedRef, v0.96) — nessun rischio di doppia lettura
+  // nello stesso frame come accadeva quando A serviva sia per "apri
+  // ricerca" sia per "azione generica" nello stesso gestore.
+
+  // ───────────────────────────────────────────────────────────────────────
+  // MODELLO DI NAVIGAZIONE (specifica concordata):
+  //
+  // - La Dashboard (top bar store + libreria) è UNA griglia continua:
+  //   su/giù/sx/dx si muovono liberamente fra store bar e card, nessun
+  //   confine. activeGroup resta null quando nessun overlay è aperto.
+  //
+  // - Ogni overlay/pannello modale (game-options, avatar-library, settings,
+  //   downloads, notifications, quick-menu) è uno SCOPE ISOLATO: appena si
+  //   apre, activeGroup viene impostato sul group di quell'overlay, e lo
+  //   stick/D-pad naviga SOLO dentro quel pannello.
+  //
+  // - A: esegue l'azione dell'elemento selezionato (sempre).
+  // - B: chiude il pannello/overlay corrente UN livello alla volta e
+  //   ripristina lo scope precedente (mai più livelli insieme).
+  // - X: su una card della libreria apre l'overlay Game Options; con
+  //   l'overlay già aperto, X lo richiude (toggle), riportando lo scope
+  //   alla Dashboard.
+  // - Select: toggle del quick-menu, con relativo scope dedicato.
+  // - Y: apre la ricerca con la Virtual Keyboard (v0.99.4) — solo quando
+  //   nessun altro overlay/scope è già attivo.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Apre l'overlay Game Options e isola lo scope di navigazione.
+  //
+  // FIX v0.99.4: il focus iniziale non viene più forzato su un id hardcoded
+  // ('game-options-close', il pulsante di chiusura) — quel valore ignorava
+  // il fallbackPriority negativo già dichiarato su quel pulsante, perché
+  // veniva scritto direttamente nello stato invece di passare dal
+  // meccanismo di scoring del FocusProvider: l'id era comunque "valido" nel
+  // nuovo pool, quindi il primo movimento direzionale non lo correggeva.
+  // focusFirstInGroup interroga il registry con lo stesso criterio già
+  // usato per il fallback automatico (priorità + posizione), selezionando
+  // il primo controllo di contenuto reale invece del bottone di chiusura.
+  const openGameOptions = useCallback((gameId: string) => {
+    // v0.99.32 — La card "Steam Big Picture" non ha un overlay di
+    // configurazione sensato (niente winetricks, env vars, runner — non è
+    // un gioco installabile). X/click destro su di essa esegue la stessa
+    // azione di Invio/click sinistro: passa a Big Picture. Un solo
+    // significato per qualunque interazione, coerente con lo scopo della
+    // card.
+    if (gameId === STEAM_BIG_PICTURE_ID) {
+      handlePlay(gameId);
+      return;
+    }
+    setSelectedGameId(gameId);
+    setShowGameOptions(true);
+    setActiveGroup('game-options');
+    play('select');
+    setTimeout(() => focusFirstInGroup('game-options'), 80);
+  }, [play, focusFirstInGroup, setActiveGroup, handlePlay]);
+
+  // Chiude l'overlay Game Options e ripristina lo scope Dashboard.
+  // La card è sempre montata sotto l'overlay (che è sovrapposto, non la
+  // sostituisce), ma lasciamo un micro-delay cautelativo nel caso la card
+  // sia fuori dal viewport corrente e debba ancora completare lo
+  // scrollIntoView innescato da setFocusedId. Con triggerFocusedAction che
+  // ora legge dal registry invece che dal DOM, anche se l'utente preme A
+  // durante questa finestra non si verifica più un click silenzioso a vuoto.
+  const closeGameOptions = useCallback(() => {
+    setShowGameOptions(false);
+    setActiveGroup(null);
+    if (selectedGameId) setTimeout(() => setFocusedId(`game-${selectedGameId}`), 50);
+  }, [selectedGameId, setFocusedId, setActiveGroup]);
+
+  // Ciclo store bar con L1/R1: 'All' + tutti gli store registrati, in ordine.
+  // Esclude il logo X-Launcher (ora apribile solo con Home/Start) e l'icona
+  // avatar (ora puramente decorativa, raggiungibile solo dal menu).
+  // La sola selezione — senza bisogno di A — cambia subito la libreria attiva.
+  // Store con plugin disattivato: nascosti dalla store bar perché l'utente
+  // ha dichiarato di non possedere un account in quello store. Diverso dal
+  // caso "disconnesso" (storeConnectedMap): un plugin disattivato è una
+  // dichiarazione esplicita e persistente, non solo una sessione scaduta —
+  // quindi qui lo store scompare del tutto, non solo i suoi titoli non
+  // installati.
+  const visibleStores = useMemo(
+    () => stores.filter(s => {
+      const ps = pluginStateMap.get(s.id);
+      return !ps || ps.enabled;
+    }),
+    [stores, pluginStateMap]
+  );
+
+  const storeCycleIds = useMemo(() => ['All', ...visibleStores.map(s => s.id)], [visibleStores]);
+
+  // Debounce esplicito: rete di sicurezza indipendente dal fix di stabilità
+  // del remount sopra. Anche con quel fix, un controller Bluetooth può
+  // generare letture "rumorose" del pulsante (pressione-rilascio-pressione
+  // in pochi millisecondi per un solo gesto fisico) a livello di driver/OS,
+  // del tutto fuori dal controllo del nostro codice React. 130ms è un
+  // compromesso: abbastanza per ignorare il rumore del segnale, abbastanza
+  // breve da non rendere la navigazione percettibilmente "gommosa".
+  const lastCycleStoreRef = useRef(0);
+
+  const cycleStore = useCallback((direction: 'next' | 'prev') => {
+    const now = Date.now();
+    if (now - lastCycleStoreRef.current < 130) return;
+    lastCycleStoreRef.current = now;
+
+    const currentIndex = storeCycleIds.indexOf(activeStoreRef.current);
+    // Se il focus non è già su uno store (es. veniamo dalla libreria sotto),
+    // partiamo comunque dall'attualmente attivo per dare continuità.
+    const baseIndex = currentIndex === -1 ? 0 : currentIndex;
+    const len = storeCycleIds.length;
+    const nextIndex = direction === 'next'
+      ? (baseIndex + 1) % len
+      : (baseIndex - 1 + len) % len;
+    const nextStoreId = storeCycleIds[nextIndex];
+
+    setActiveStore(nextStoreId as StoreType | 'All');
+    setFocusedId(nextStoreId === 'All' ? 'store-all' : `store-${nextStoreId}`);
+    play('select');
+  }, [storeCycleIds, setFocusedId, play]);
+
+  // Ciclo tab Settings con L1/R1, stessa identica logica di cycleStore:
+  // ref per evitare che il callback cambi identità ad ogni tab selezionata
+  // (la causa del bug "L1/R1 impazziti" sulla store bar), array fisso delle
+  // 4 tab, debounce dedicato come rete di sicurezza contro il rumore di
+  // segnale dei controller Bluetooth.
+  // v1.1.0 — settings-tabs è il primo group migrato alla strategia
+  // 'sequential': prima esisteva solo grazie al ciclo indexOf/modulo scritto
+  // a mano in cycleSettingsTab (sopra). Dichiarata qui una sola volta al
+  // mount — non cambia mai a runtime, non serve altro.
+  useEffect(() => {
+    setGroupStrategy('settings-tabs', 'sequential');
+  }, [setGroupStrategy]);
+
+  const activeSettingsTabRef = useRef(activeSettingsTab);
+  useEffect(() => { activeSettingsTabRef.current = activeSettingsTab; }, [activeSettingsTab]);
+  const lastCycleSettingsTabRef = useRef(0);
+
+  // Risolve esplicitamente il primo Focusable sensato per ogni tab di
+  // Settings, invece di affidarsi al fallback geometrico generico di
+  // FocusProvider.moveFocus. Quel fallback aveva un bias strutturale:
+  // close-settings è nell'header della maschera, quindi geometricamente
+  // sempre il più in alto di tutta la tab — vinceva sempre il calcolo
+  // "elemento più in alto" indipendentemente da quanto in basso si trovasse
+  // il primo controllo reale del contenuto. Qui invece sappiamo esattamente
+  // cosa esiste per ciascuna tab e puntiamo lì in modo deterministico.
+  const getFirstFocusableForSettingsTab = useCallback((tab: 'accounts' | 'engine' | 'plugins' | 'input' | 'ai-models'): string | null => {
+    switch (tab) {
+      case 'accounts': {
+        const visibleAccountStores = stores.filter(s => {
+          const ps = pluginStateMapRef.current.get(s.id);
+          return !ps || ps.enabled;
+        });
+        const first = visibleAccountStores[0];
+        if (!first) return null;
+        const noLogin = ['Amazon Games', 'Battle.net', 'Classic Console'].includes(first.id);
+        if (noLogin) return null; // nessun controllo interattivo su questa card
+        return first.isConnected ? `store-unlink-${first.id}` : `store-connect-${first.id}`;
+      }
+      case 'engine': {
+        if (availableRunners[0]) return `runner-uninstall-${availableRunners[0].id}`;
+        if (installableRunners[0]) return `runner-install-${installableRunners[0].id}`;
+        return 'system-tools-area';
+      }
+      case 'plugins':
+        return pluginRegistry[0] ? `plugin-toggle-${pluginRegistry[0].id}` : null;
+      case 'input':
+        return inputPlugins[0] ? `input-plugin-toggle-${inputPlugins[0].id}` : null;
+      case 'ai-models':
+        return ollamaModels[0] ? `ollama-model-select-${ollamaModels[0].name}` : null;
+      default:
+        return null;
+    }
+  }, [stores, availableRunners, installableRunners, pluginRegistry, inputPlugins, ollamaModels]);
+
+  // Ref sincronizzato con getFirstFocusableForSettingsTab: stesso motivo di
+  // activeStoreRef/focusedIdRef. Qualunque cambio in stores/pluginRegistry/
+  // inputPlugins/ecc. (es. attivare o disattivare un plugin) cambia
+  // l'identità di questa funzione; senza il ref, cycleSettingsTab — che la
+  // usa — cambierebbe identità a sua volta, e siccome cycleSettingsTab è
+  // dipendenza dell'effect gamepad principale, l'intero effect si
+  // rimonterebbe. Se una pressione fisica (B, nel caso riportato) cadeva
+  // nello stesso frame di quel remount, l'input poteva andare parzialmente
+  // perso: il suono parte comunque (eseguito prima di ogni controllo di
+  // stato), ma la logica di chiusura non viene mai eseguita.
+  const getFirstFocusableForSettingsTabRef = useRef(getFirstFocusableForSettingsTab);
+  useEffect(() => { getFirstFocusableForSettingsTabRef.current = getFirstFocusableForSettingsTab; }, [getFirstFocusableForSettingsTab]);
+
+  const cycleSettingsTab = useCallback((direction: 'next' | 'prev') => {
+    const now = Date.now();
+    if (now - lastCycleSettingsTabRef.current < 130) return;
+    lastCycleSettingsTabRef.current = now;
+
+    // v1.1.0 — migrato dal ciclo indexOf/modulo scritto a mano su
+    // settingsTabCycleIds al meccanismo generico cycleSequential
+    // (FocusProvider), stessa astrazione discussa per il modello di
+    // navigazione device-agnostic. fromId esplicito perché il riferimento
+    // qui è "quale tab è attiva", non il focus visivo corrente (che nella
+    // maggior parte dei casi è dentro al contenuto della tab).
+    const nextId = cycleSequential('settings-tabs', direction, {
+      wrap: true,
+      fromId: `settings-tab-${activeSettingsTabRef.current}`,
+    });
+    if (!nextId) return;
+    const nextTab = nextId.replace('settings-tab-', '') as 'accounts' | 'engine' | 'plugins' | 'input' | 'ai-models';
+
+    setActiveSettingsTab(nextTab);
+    play('select');
+    const target = getFirstFocusableForSettingsTabRef.current(nextTab);
+    setTimeout(() => setFocusedId(target ?? nextId), 50);
+  }, [cycleSequential, play, setFocusedId]);
+
+  useEffect(() => {
+    // Se il focus è congelato (gioco in esecuzione) ignora tutto l'input
+    if (isFocusFrozen) return;
+
+    // v1.1.8 — Modalità cattura area di test controller: mentre questo
+    // widget ha il focus, la Dashboard NON deve interpretare alcun input
+    // come azione — altrimenti ogni pressione/movimento durante il test
+    // attiverebbe anche una funzione reale (navigazione, cicli store,
+    // ecc.), che è esattamente quello che il test dovrebbe escludere
+    // dall'equazione. Unica eccezione: una pressione PROLUNGATA di B
+    // (soglia GAMEPAD_TEST_EXIT_HOLD_MS) riporta alla navigazione
+    // normale — la sola via di uscita garantita, per non restare
+    // "intrappolati" nel widget con un controller e nessuna tastiera.
+    // v1.1.10 — la rilevazione della pressione prolungata di B è stata
+    // spostata in un useEffect dedicato più sotto, con un proprio timer
+    // indipendente da gamepadState: qui bastava sospendere tutto il resto,
+    // ma calcolare la durata della pressione DENTRO questo effetto era
+    // sbagliato — si riesegue solo quando gamepadState cambia (nuovo
+    // pulsante o asse), e un B tenuto premuto senza muovere gli stick non
+    // cambia nulla frame dopo frame: il progresso restava fermo al primo
+    // istante invece di avanzare durante l'attesa.
+    if (focusedIdRef.current === 'gamepad-test-area') return;
+
+    if (isJustPressed('Up'))    moveFocus('up');
+    if (isJustPressed('Down'))  moveFocus('down');
+    if (isJustPressed('Left'))  moveFocus('left');
+    if (isJustPressed('Right')) moveFocus('right');
+
+    // L1/R1 → ciclo store bar con wrap-around — PRIORITÀ ASSOLUTA (v0.99.6).
+    //
+    // Regola di riferimento: se l'utente preme L1/R1, vuole guardare
+    // un'altra libreria — punto. Qualunque operazione "interattiva" in
+    // corso sulla dashboard viene annullata per dare spazio al cambio
+    // store, senza dover prima chiudere manualmente quell'overlay.
+    //
+    // Due categorie di activeGroup, comportamento opposto:
+    // - CATEGORIA A — overlay che interrompono l'interazione con la
+    //   libreria corrente (ricerca/keyboard, game-options, avatar-library):
+    //   L1/R1 li annulla esplicitamente e procede col cambio store. Sono
+    //   "nel mezzo" di un'azione sulla libreria attuale — cambiare libreria
+    //   è incompatibile col restare lì, quindi ha senso che vinca il cambio.
+    // - CATEGORIA B — pannelli indipendenti dalla libreria visualizzata
+    //   (quick-menu, settings, downloads, notifications): L1/R1 resta
+    //   bloccato, NESSUNA interferenza. Un download/installazione in corso,
+    //   o la configurazione di un account, continuano indipendentemente da
+    //   quale libreria è in primo piano — non hanno alcuna relazione con
+    //   "quale store sto guardando", quindi non vanno mai annullati da un
+    //   input che riguarda solo la navigazione fra librerie.
+    const isCancellableOverlay = activeGroup === 'keyboard' || activeGroup === 'game-options' || activeGroup === 'avatar-library';
+    if (activeGroup === null || isCancellableOverlay) {
+      // FIX v0.99.7: isJustPressed consuma il fronte di pressione alla
+      // prima lettura nel frame corrente (vedi useGamepad.ts) — chiamarlo
+      // due volte per lo stesso tasto (una per l'annullamento overlay, una
+      // per cycleStore) faceva sì che la seconda chiamata ritornasse sempre
+      // false, perché il fronte era già stato consumato dalla prima. Letto
+      // una sola volta per tasto e il valore booleano riusato sotto.
+      const l1Pressed = isJustPressed('L1');
+      const r1Pressed = isJustPressed('R1');
+      if (l1Pressed || r1Pressed) {
+        if (activeGroup === 'keyboard' && activeField) {
+          // La VK è aperta per un campo dell'overlay Game Options (es.
+          // executablePath), non per la ricerca — activeGroup vale
+          // 'keyboard' in entrambi i casi (vedi openKeyboardForField), va
+          // quindi distinto tramite activeField. Annullare qui significa
+          // chiudere l'intero overlay Game Options sottostante, non solo
+          // la VK: lasciarlo aperto mentre lo store cambia sotto
+          // produrrebbe un overlay configurato su un gioco di uno store
+          // non più visualizzato.
+          setShowKeyboard(false);
+          setActiveField(null);
+          setShowGameOptions(false);
+        } else if (activeGroup === 'keyboard') {
+          // VK aperta per la ricerca — annulla la ricerca senza il
+          // ripristino "torna allo store precedente" di toggleSearch: il
+          // prossimo store lo decide comunque cycleStore appena sotto.
+          setShowSearch(false);
+          setShowKeyboard(false);
+          setSearchQuery('');
+        } else if (activeGroup === 'game-options') {
+          setShowGameOptions(false);
+        } else if (activeGroup === 'avatar-library') {
+          setShowAvatarLibrary(false);
+        }
+        if (isCancellableOverlay) setActiveGroup(null);
+      }
+      if (l1Pressed) cycleStore('prev');
+      if (r1Pressed) cycleStore('next');
+    }
+
+    // L2/R2 → scorciatoia diretta per Downloads/Notifiche, senza dover
+    // navigare con D-pad/stick fino in fondo alla pagina per raggiungere il
+    // footer. Stessa identica logica già usata da footer-downloads/
+    // footer-notifications — qui semplicemente la rendiamo raggiungibile
+    // con un dorsale, simmetrico a L1/R1 per la store bar. Esclude
+    // esplicitamente il caso in cui Select sia premuto insieme, per non
+    // collidere con la combo Select+R2 del debug console.
+    if (activeGroup === null && !gamepadState.buttons.has('Select')) {
+      if (isJustPressed('L2')) {
+        setShowDownloads(p => {
+          const next = !p;
+          setShowNotifications(false);
+          setActiveGroup(next ? 'downloads' : null);
+          if (next) setTimeout(() => setFocusedId('downloads-close'), 50);
+          return next;
+        });
+        play('select');
+      }
+      if (isJustPressed('R2')) {
+        setShowNotifications(p => {
+          const next = !p;
+          setShowDownloads(false);
+          setActiveGroup(next ? 'notifications' : null);
+          if (next) {
+            setTimeout(() => setFocusedId('notifications-close'), 50);
+            // Marca come lette solo le notifiche già presenti al momento
+            // dell'apertura: l'utente sta fisicamente vedendo il pannello
+            // adesso, quindi tutto ciò che già conteneva è "letto" da qui
+            // in avanti — eventuali nuovi arrivi successivi resteranno
+            // comunque non letti finché non si riapre.
+            setNotifications(prev => prev.map(n => ({ ...n, seen: true })));
+          }
+          return next;
+        });
+        play('select');
+      }
+    }
+
+    // L1/R1 → ciclo tab Settings con wrap-around, solo quando l'overlay
+    // Settings è aperto. Isolato da D-pad/stick, che dentro ogni tab naviga
+    // solo i controlli del suo contenuto (settings-tab-* sono nel proprio
+    // group "settings-tabs", escluso dal pool "settings" usato da moveFocus).
+    if (activeGroup === 'settings') {
+      if (isJustPressed('L1')) cycleSettingsTab('prev');
+      if (isJustPressed('R1')) cycleSettingsTab('next');
+    }
+
+    // A → esegue l'azione dell'elemento attualmente selezionato
+    if (isJustPressed('A')) {
+      // FIX v0.99.4: rimosso il ramo `focusedIdRef.current === 'nav-search'`
+      // — la lente non è più un Focusable (vedi punto 2 del fix
+      // navigazione), quindi focusedId non può più assumere quel valore.
+      // L'apertura ricerca da controller passa ora esclusivamente dal
+      // tasto Y (vedi isJustPressed('Y') più sotto). Rimosso anche il
+      // relativo bounce-guard (searchJustOpenedRef), non più necessario.
+      if (focusedIdRef.current?.startsWith('game-') && !showGameOptions) {
+        const gameId = focusedIdRef.current.replace('game-', '');
+        handlePlay(gameId);
+      } else {
+        // Invoca onEnter dell'elemento focalizzato leggendo dal registry
+        // (FocusProvider), non più dal DOM: il vecchio approccio con
+        // document.querySelector('[data-focused="true"]') poteva trovare
+        // null in una finestra di desincronizzazione tra activeGroup e
+        // focusedId (es. subito dopo la chiusura di un overlay), producendo
+        // una pressione di A silenziosamente a vuoto e un apparente freeze.
+        triggerFocusedAction();
+      }
+    }
+
+    // X → apre/chiude l'overlay Game Options (toggle), sempre su una card
+    if (isJustPressed('X')) {
+      if (showGameOptions) {
+        closeGameOptions();
+      } else if (focusedIdRef.current?.startsWith('game-')) {
+        const gameId = focusedIdRef.current.replace('game-', '');
+        openGameOptions(gameId);
+      }
+    }
+
+    // Y → apre/chiude la ricerca con la Virtual Keyboard (v0.99.4).
+    //
+    // FIX v0.99.5: la condizione precedente (`activeGroup === null`) faceva
+    // di Y un tasto "solo apertura" — una volta aperta la ricerca,
+    // activeGroup diventa 'keyboard' e la guardia bloccava ogni pressione
+    // successiva, impedendo la chiusura. Risultato osservato: la seconda
+    // pressione di Y non chiudeva nulla, e con activeGroup bloccato su
+    // 'keyboard' anche L1/R1 (controllati dalla stessa guardia altrove)
+    // restavano sordi alla navigazione store — l'unica via d'uscita era
+    // passare da un altro overlay (es. il menu) che resettava lo stato per
+    // un percorso diverso.
+    //
+    // Regola corretta: Y è il toggle della ricerca, sempre.
+    // - Nessun overlay attivo (activeGroup === null) → Y apre.
+    // - L'overlay attivo è proprio quello della ricerca (activeGroup ===
+    //   'keyboard', ricerca aperta da Y stesso) → Y chiude.
+    // - Un overlay DIVERSO occupa lo scope (Settings, Game Options, ecc.)
+    //   → Y non deve interferire, resta bloccato.
+    if (isJustPressed('Y') && (activeGroup === null || activeGroup === 'keyboard')) {
+      toggleSearch();
+    }
+
+    // B → chiude UN livello alla volta, ripristinando lo scope precedente
+    if (isJustPressed('B')) {
+      play('back');
+      if (pendingUnlinkRef.current) {
+        // Annulla la conferma di disconnessione in corso, senza chiudere
+        // nient'altro — priorità massima su qualunque altra azione di B.
+        setPendingUnlink(null);
+      } else if (pendingRunnerActionRef.current) {
+        // Stessa priorità: annulla la conferma install/uninstall runner.
+        setPendingRunnerAction(null);
+      } else if (pendingExitRef.current) {
+        // Stessa priorità: annulla la conferma di chiusura Dashboard.
+        setPendingExit(false);
+      } else if (showKeyboard) {
+        // La tastiera può essere aperta per la ricerca o per un campo
+        // dell'overlay Game Options: ciascuno ha la sua chiusura corretta.
+        if (activeField) {
+          closeKeyboard();
+        } else {
+          toggleSearch();
+        }
+      } else if (showAvatarLibrary) {
+        setShowAvatarLibrary(false);
+        setActiveGroup('quick-menu');
+        setFocusedId('opt-avatar');
+      } else if (showSettings) {
+        setShowSettings(false);
+        setActiveGroup('quick-menu');
+        setFocusedId('opt-accounts');
+      } else if (showGameOptions) {
+        closeGameOptions();
+      } else if (showNotifications) {
+        setShowNotifications(false);
+        setActiveGroup(null);
+        setFocusedId('footer-notifications');
+      } else if (showDownloads) {
+        setShowDownloads(false);
+        setActiveGroup(null);
+        setFocusedId('footer-downloads');
+      } else if (viewState === 'quick-menu') {
+        setViewState('library');
+        setActiveGroup(null);
+      }
+    }
+
+    // Select + R2 → Toggle Debug Console
+    if (gamepadState.buttons.has('Select') && isJustPressed('R2')) {
+      setShowDebugConsole(prev => !prev);
+      play('select');
+    }
+
+    // Select (da solo) O Start → toggle quick-menu con scope dedicato.
+    // Start è il trigger ufficiale da specifica (Home esclus0 per conflitto
+    // con l'overlay di Steam); Select resta attivo per compatibilità con la
+    // combo Select+R2 del debug console e come scorciatoia equivalente.
+    if ((isJustPressed('Select') || isJustPressed('Start')) && !gamepadState.buttons.has('R2')) {
+      // Se un overlay secondario è aperto SOPRA il quick-menu (Settings,
+      // Avatar Library), Start/Select deve chiuderlo e tornare al menu,
+      // non aprire ciecamente un secondo livello di quick-menu sopra di
+      // esso. Senza questo controllo, viewState resta 'library' mentre
+      // Settings è aperto (opt-accounts lo imposta esplicitamente così),
+      // quindi il ramo "apri" veniva preso comunque, sovrascrivendo
+      // activeGroup da 'settings' a 'quick-menu' mentre showSettings
+      // restava true — uno stato incoerente che bloccava sia i controlli
+      // di Settings sia il ciclo store L1/R1 della dashboard sottostante.
+      if (showSettings) {
+        setShowSettings(false);
+        setActiveGroup('quick-menu');
+        setFocusedId('opt-accounts');
+        play('back');
+      } else if (showAvatarLibrary) {
+        setShowAvatarLibrary(false);
+        setActiveGroup('quick-menu');
+        setFocusedId('opt-avatar');
+        play('back');
+      } else {
+        setViewState(prev => {
+          const next = prev === 'quick-menu' ? 'library' : 'quick-menu';
+          setActiveGroup(next === 'quick-menu' ? 'quick-menu' : null);
+          if (next === 'quick-menu') setTimeout(() => setFocusedId('opt-accounts'), 50);
+          return next;
+        });
+        play('select');
+      }
+    }
+
+  }, [gamepadState, isJustPressed, moveFocus, isFocusFrozen, viewState, play,
+      showDownloads, showSettings, showNotifications, selectedGameId,
+      showGameOptions, showAvatarLibrary, handlePlay, setFocusedId, toggleSearch,
+      setActiveGroup, openGameOptions, closeGameOptions, showKeyboard, activeField, closeKeyboard,
+      activeGroup, cycleStore, triggerFocusedAction, cycleSettingsTab]);
+
+  // v1.1.10 — timer indipendente per "tieni premuto B per uscire"
+  // dall'area di test controller. Deliberatamente NON agganciato a
+  // gamepadState/isJustPressed: quelli si aggiornano solo quando qualcosa
+  // CAMBIA (pulsanti o assi, per evitare re-render inutili in tutto il
+  // resto dell'app — vedi useGamepad.ts), ma un B tenuto premuto fermo,
+  // senza muovere alcuno stick, non genera alcun cambiamento frame dopo
+  // frame: quel meccanismo da solo non basta a misurare una durata di
+  // pressione. Questo effetto legge InputManager direttamente ogni 50ms,
+  // indipendentemente da eventuali "cambiamenti", finché l'area di test
+  // ha il focus.
+  useEffect(() => {
+    if (focusedId !== 'gamepad-test-area') {
+      gamepadTestBHoldStartRef.current = null;
+      setGamepadTestExitProgress(0);
+      setGamepadTestExiting(false);
+      return;
+    }
+    const interval = setInterval(() => {
+      if (gamepadTestExiting) return; // già in fase di uscita ritardata, non rielaborare
+      const raw = InputManager.readPrimary();
+      if (raw.buttons.has('B')) {
+        if (gamepadTestBHoldStartRef.current === null) {
+          gamepadTestBHoldStartRef.current = Date.now();
+        }
+        const elapsed = Date.now() - gamepadTestBHoldStartRef.current;
+        setGamepadTestExitProgress(Math.min(1, elapsed / GAMEPAD_TEST_EXIT_HOLD_MS));
+        if (elapsed >= GAMEPAD_TEST_EXIT_HOLD_MS) {
+          // Soglia raggiunta: mostra subito il LED verde (captureActive
+          // diventa false lato widget), ma l'uscita vera e propria
+          // (moveFocus + suono) avviene dopo un breve ritardo, così il
+          // verde è visibile invece di sparire nello stesso istante in
+          // cui si lascia la schermata.
+          setGamepadTestExiting(true);
+          setTimeout(() => {
+            moveFocus('up');
+            play('back');
+            gamepadTestBHoldStartRef.current = null;
+            setGamepadTestExitProgress(0);
+            setGamepadTestExiting(false);
+          }, GAMEPAD_TEST_EXIT_DELAY_MS);
+        }
+      } else if (gamepadTestBHoldStartRef.current !== null) {
+        gamepadTestBHoldStartRef.current = null;
+        setGamepadTestExitProgress(0);
+      }
+    }, 50);
+    return () => clearInterval(interval);
+  }, [focusedId, moveFocus, play, gamepadTestExiting]);
+
+
+  // Monitor focus changes for sound
+  useEffect(() => {
+    setShowTrailer(false);
+  }, [selectedGameId]);
+
+  // Monitor focus changes for sound
+  useEffect(() => {
+    if (focusedId) play('focus');
+  }, [focusedId, play]);
+
+  // Step 12f — auto-scroll del log quando arrivano nuove voci (se non in pausa)
+  useEffect(() => {
+    if (!pauseScroll && logScrollRef.current) {
+      logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight;
+    }
+  }, [logs, pauseScroll]);
+
+  // v0.99.37 — fix: availableRunners veniva popolata SOLO dall'effetto lazy
+  // legato alla tab System (sotto), pensato per limitare il costo delle
+  // fetch più pesanti (installable, system-tools, disk) a quando l'utente
+  // apre davvero quella tab. Ma le switch runner nell'overlay Game Options
+  // (sezione "Runner Bridge") leggono la STESSA availableRunners — se
+  // l'utente non apre mai Impostazioni > System, quelle switch restano
+  // vuote per l'intera sessione anche con runner alternativi già
+  // installati e rilevati su disco. /api/runners da sola è economica
+  // (legge solo la tabella runners già popolata al boot del daemon, nessuna
+  // scansione filesystem) — la carichiamo qui una volta all'avvio,
+  // indipendentemente dalla tab System, che continua comunque a
+  // ricaricarla (ridondante ma innocuo) insieme ai dati più pesanti.
+  useEffect(() => {
+    fetch('/api/runners').then(r => r.json()).then(setAvailableRunners).catch(() => {});
+  }, []);
+
+  // v0.99.90 — Step 15d: verifica raggiungibilità Ollama + elenco modelli.
+  // Al boot (una volta) e ad ogni apertura di Impostazioni (cosi se Ollama
+  // viene avviato DOPO il boot della dashboard, la tab compare comunque
+  // la prossima volta che l'utente apre Impostazioni, senza dover
+  // riavviare l'intera dashboard). Timeout breve lato server (2s) — non
+  // deve mai far percepire un ritardo all'apertura del pannello.
+  const refreshOllamaModels = React.useCallback(() => {
+    fetch('/api/ai/ollama/models')
+      .then(r => r.json())
+      .then(data => {
+        setOllamaAvailable(Boolean(data?.available));
+        setOllamaModels(Array.isArray(data?.models) ? data.models : []);
+      })
+      .catch(() => { setOllamaAvailable(false); setOllamaModels([]); });
+    fetch('/api/ai/providers')
+      .then(r => r.json())
+      .then((providers: any[]) => {
+        const ollama = providers.find(p => p.providerId === 'ollama');
+        setActiveOllamaModel(ollama?.model ?? null);
+        setOllamaEnabled(Boolean(ollama?.enabled));
+
+        // v0.99.90 — stato dei quattro provider cloud dalla stessa
+        // risposta — nessuna chiamata separata. Preserva apiKeyDraft
+        // già digitato in questa sessione (non sovrascriverlo con
+        // vuoto solo perché abbiamo ri-fatto il fetch), aggiorna solo
+        // enabled/hasStoredKey/testResult.
+        setCloudProviderState(prev => {
+          const next = { ...prev };
+          for (const id of ['gemini', 'deepseek', 'chatgpt', 'claude']) {
+            const p = providers.find((x: any) => x.providerId === id);
+            next[id] = {
+              enabled:      Boolean(p?.enabled),
+              hasStoredKey: Boolean(p?.apiKey), // mascherata ma non vuota = presente
+              apiKeyDraft:  prev[id]?.apiKeyDraft ?? '',
+              testing:      false,
+              testResult:   prev[id]?.testResult ?? null,
+            };
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
+    // v0.99.90 — consumo/budget token, stesso ciclo di refresh (boot +
+    // ogni apertura di Impostazioni) delle altre informazioni di questa tab.
+    fetch('/api/ai/usage')
+      .then(r => r.json())
+      .then(data => {
+        setAiUsage({ totalTokens: data?.totalTokens ?? 0, budget: data?.budget ?? 50_000 });
+        setBudgetDraft(String(data?.budget ?? 50_000));
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { refreshOllamaModels(); }, [refreshOllamaModels]);
+  useEffect(() => { if (showSettings) refreshOllamaModels(); }, [showSettings, refreshOllamaModels]);
+
+  // v0.99.90 — Step 15d: salva enabled/apiKey per un provider cloud.
+  // Aggiornamento parziale lato server (vedi fix in server.ts) — inviare
+  // solo apiKeyDraft se non vuoto evita di cancellare una key già salvata
+  // quando l'utente tocca solo il toggle enabled.
+  const saveCloudProvider = React.useCallback((id: string, patch: { enabled?: boolean; apiKey?: string }) => {
+    const state = cloudProviderState[id];
+    fetch(`/api/ai/providers/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: patch.enabled ?? state?.enabled ?? false,
+        apiKey:  patch.apiKey,
+        priority: CLOUD_PROVIDERS.findIndex(p => p.id === id) + 1, // 0 è Ollama
+      }),
+    }).then(() => refreshOllamaModels()).catch(() => {});
+  }, [cloudProviderState, refreshOllamaModels]);
+
+  const testCloudProvider = React.useCallback((id: string) => {
+    setCloudProviderState(prev => ({ ...prev, [id]: { ...prev[id], testing: true, testResult: null } }));
+    const draft = cloudProviderState[id]?.apiKeyDraft;
+    fetch(`/api/ai/providers/${id}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: draft || undefined }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        setCloudProviderState(prev => ({
+          ...prev,
+          [id]: { ...prev[id], testing: false, testResult: { success: Boolean(data?.success), message: data?.message ?? 'Nessuna risposta.' } },
+        }));
+      })
+      .catch(() => {
+        setCloudProviderState(prev => ({
+          ...prev,
+          [id]: { ...prev[id], testing: false, testResult: { success: false, message: 'Richiesta fallita — daemon non raggiungibile?' } },
+        }));
+      });
+  }, [cloudProviderState]);
+
+  // v1.1.12 — prima l'unico modo per liberarsi di una API key salvata
+  // (es. non valida, generata per lo scopo sbagliato) era sovrascriverla
+  // con una nuova: nessuna via per tornare a "nessuna key" senza averne
+  // già un'altra pronta. Rimuove l'intera credenziale lato server —
+  // enabled torna false insieme, coerente con "provider non configurato".
+  const removeCloudProviderKey = React.useCallback((id: string) => {
+    fetch(`/api/ai/providers/${id}`, { method: 'DELETE' })
+      .then(() => {
+        setCloudProviderState(prev => ({
+          ...prev,
+          [id]: { ...prev[id], enabled: false, apiKeyDraft: '', hasStoredKey: false, testResult: null },
+        }));
+      })
+      .catch(() => {});
+  }, []);
+
+  // Step 13 — carica dati System tab quando viene aperta (lazy, una volta sola per sessione)
+  useEffect(() => {
+    if (activeSettingsTab !== 'engine' || systemTabLoaded) return;
+    setSystemTabLoaded(true);
+    const loadSystemData = () => {
+      Promise.all([
+        fetch('/api/runners').then(r => r.json()).catch(() => []),
+        fetch('/api/runners/installable').then(r => r.json()).catch(() => []),
+        fetch('/api/system-tools').then(r => r.json()).catch(() => ({})),
+        fetch('/api/system/disk').then(r => r.json()).catch(() => null),
+      ]).then(([installed, installable, tools, disk]) => {
+        setAvailableRunners(installed);
+        setInstallableRunners(installable);
+        setSystemTools(tools);
+        if (disk && typeof disk.totalBytes === 'number') setDiskUsage(disk);
+      });
+    };
+    loadSystemData();
+  }, [activeSettingsTab, systemTabLoaded]);
+
+  // Auto-refresh periodico dei Tool di sistema: a differenza di runner e
+  // spazio disco (caricati una volta e aggiornabili solo a richiesta),
+  // i tool di sistema devono riflettere automaticamente l'installazione di
+  // nuovi strumenti senza che l'utente debba premere Aggiorna manualmente.
+  // Attivo solo mentre la tab System è effettivamente aperta.
+  useEffect(() => {
+    if (activeSettingsTab !== 'engine') return;
+    const iv = setInterval(() => {
+      fetch('/api/system-tools').then(r => r.json()).then(setSystemTools).catch(() => {});
+    }, 8000);
+    return () => clearInterval(iv);
+  }, [activeSettingsTab]);
+
+  // Step 13 — polling isAuthenticated per store in attesa completamento OAuth browser
+  useEffect(() => {
+    if (!authPolling) return;
+    const iv = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/stores/login-status/${encodeURIComponent(authPolling)}`);
+        const { authenticated } = await res.json();
+        if (authenticated) {
+          clearInterval(iv);
+          setAuthPolling(null);
+          setAuthMessage(prev => ({ ...prev, [authPolling]: '✅ Autenticato con successo!' }));
+          // Fix: forza sync libreria dopo auth (tutti gli store, non solo Epic)
+          await fetch('/api/library/refresh', { method: 'POST' }).catch(() => {});
+          // Re-sync stores e libreria
+          const [storesData, gamesData] = await Promise.all([
+            fetch('/api/stores').then(r => r.json()),
+            fetch(`/api/games?store=${activeStore}`).then(r => r.json()),
+          ]);
+          setStores(storesData);
+          setGames(gamesData);
+          play('launch');
+        }
+      } catch {}
+    }, 2500);
+    // Timeout 150s
+    const timeout = setTimeout(() => {
+      clearInterval(iv);
+      setAuthPolling(null);
+      setAuthMessage(prev => ({
+        ...prev,
+        [authPolling]: '⏱ Timeout — riprova o usa il terminale.',
+      }));
+    }, 150000);
+    return () => { clearInterval(iv); clearTimeout(timeout); };
+  }, [authPolling]);
+
+  // v0.99.16 — Semplificazione del menu: dopo aver confermato su hardware
+  // reale che la modalità Borderless dà una reattività ottima (v0.99.9-15),
+  // il menu visibile mostra solo due opzioni — "Window" e "Fullscreen".
+  // v0.99.17 — Ctrl+Alt+K rende disponibile/nasconde una terza voce
+  // "Kiosk" (= displayMode='borderless') nel ciclo del menu, invece di
+  // attivarla direttamente senza mai mostrarla.
+  // v0.99.18 — RIMOSSA ogni gestione di requestFullscreen()/
+  // exitFullscreen(): 'kiosk' ("Fullscreen" in UI) e 'borderless' ("Kiosk"
+  // in UI) sono ora identici a livello di comportamento del frontend —
+  // entrambi avviano semplicemente in modalità borderless con titlebar e
+  // pannelli XFCE nascosti (kiosk-launch.sh li gestisce già allo stesso
+  // modo), senza alcuna chiamata aggiuntiva alla Fullscreen API del DOM,
+  // che produceva solo il popup informativo del browser ad ogni avvio
+  // senza alcun beneficio visivo (la finestra è già a schermo intero).
+  //
+  // Logica comune di applicazione estratta in applyDisplayMode: persistenza
+  // su app.conf e notifica, condivisa da tutti i punti che cambiano modalità.
+  const applyDisplayMode = (next: 'kiosk' | 'window' | 'borderless') => {
+    setDisplayMode(next);
+
+    // Persiste la preferenza: kiosk-launch.sh la legge al PROSSIMO avvio
+    // per decidere se passare --start-maximized/--use-system-title-bar
+    // (borderless/kiosk) o le dimensioni di finestra normali (window).
+    // Non più necessaria per kiosk↔borderless durante questa sessione —
+    // serve solo a far ripartire la Dashboard nello stato giusto se viene
+    // chiusa e riavviata in un secondo momento.
+    fetch('/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayMode: next }),
+    }).catch(() => {});
+
+    const labels: Record<typeof next, string> = {
+      kiosk: 'Fullscreen',
+      window: 'Finestra',
+      borderless: 'Kiosk',
+    };
+    // v1.1.28 — messaggio corretto: verificato che questa funzione fa
+    // solo due cose, nessuna delle quali cambia davvero la modalità
+    // finestra a livello di sistema in QUESTA sessione — setDisplayMode
+    // aggiorna solo lo stato React/UI interno, e la PATCH a /api/config
+    // persiste la preferenza per kiosk-launch.sh, che la legge solo al
+    // PROSSIMO avvio (vedi commento sopra). Il messaggio precedente
+    // ("applicato immediatamente, nessun riavvio necessario") era
+    // semplicemente falso per il cambio di modalità reale — confermato
+    // da test su hardware reale.
+    pushNotification({
+      type: 'info',
+      title: `Modalità: ${labels[next]}`,
+      body: 'Preferenza salvata — sarà attiva al prossimo riavvio della Dashboard.',
+      source: 'system',
+    });
+  };
+
+  // Ciclo VISIBILE nel menu (v0.99.17): due stati per default (window ↔
+  // kiosk, mostrato come "Fullscreen" in UI), tre se kioskOptionVisible è
+  // stato attivato con Ctrl+Alt+K (si aggiunge 'borderless', mostrato come
+  // "Kiosk" in UI — borderless puro, senza il tentativo di vera Fullscreen
+  // API che invece "Fullscreen"/kiosk applica). Il nome "Kiosk" qui è
+  // storico/interno: non avvia mai più il vero --kiosk di Chromium
+  // (abbandonato in v0.99.12), resta solo un'etichetta per distinguere la
+  // variante "borderless puro" da quella con Fullscreen API.
+  const cycleDisplayMode = () => {
+    const order: Array<'kiosk' | 'window' | 'borderless'> = kioskOptionVisible
+      ? ['window', 'kiosk', 'borderless']
+      : ['window', 'kiosk'];
+    const currentIndex = order.indexOf(displayMode);
+    // Se lo stato attuale non è nel ciclo corrente (es. era 'borderless'
+    // e l'utente ha appena disattivato kioskOptionVisible), riparte da
+    // 'window' invece di un indice -1 che produrrebbe un risultato errato.
+    const next = order[currentIndex === -1 ? 0 : (currentIndex + 1) % order.length];
+    applyDisplayMode(next);
+  };
+
+  // v0.99.26 — Visibile solo quando dedicatedSession è true (sessione X11
+  // dedicata, senza XFCE sotto, vedi kiosk-launch.sh). Esegue uno switch di
+  // sessione LightDM verso XFCE — non chiude X-Launcher, lo lascia in
+  // esecuzione in background sulla propria sessione, esattamente come
+  // "Switch User" lascerebbe la sessione precedente intatta.
+  const switchToDesktop = () => {
+    pushNotification({
+      type: 'info',
+      title: 'Passaggio al Desktop',
+      body: 'X-Launcher resta in esecuzione in background — torna qui dal menu utente di XFCE.',
+      source: 'system',
+    });
+    fetch('/api/system/switch-session', { method: 'POST', body: JSON.stringify({ target: 'desktop' }), headers: { 'Content-Type': 'application/json' } }).catch(() => {});
+  };
+
+  // Chiude la Dashboard: la conferma a 2 tap è gestita dalla voce di menu
+  // stessa (vedi opt-exit), questa funzione esegue solo l'azione reale
+  // quando la conferma è già stata data.
+  const handleExit = () => {
+    fetch('/api/system/exit', { method: 'POST' }).catch(() => {});
+    // Il daemon backend termina (process.exit) dopo aver risposto. Tentare
+    // anche la chiusura della finestra/tab del browser: window.close()
+    // funziona solo se la pagina è stata aperta da script (kiosk-launch.sh
+    // la apre così), ma anche se il browser la ignora, il backend morto
+    // farà comunque cadere la pagina su un errore di connessione — l'esito
+    // percepito dall'utente è comunque "Dashboard chiusa".
+    setTimeout(() => { window.close(); }, 200);
+  };
+
+  const toggleTheme = () => {
+    setTheme(prev => {
+      const next = prev === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem('x-launcher-theme', next); } catch {}
+      return next;
+    });
+    play('select');
+  };
+
+  // Step 12f — colori e label per i livelli di log nella debug console
+  const LOG_LEVEL_META: Record<string, { color: string; border: string; label: string }> = {
+    debug:    { color: 'text-gray-500',    border: 'border-gray-600',   label: 'DBG'  },
+    info:     { color: 'text-green-400/70',border: 'border-green-500/30',label: 'INF' },
+    system:   { color: 'text-blue-400',    border: 'border-blue-500',   label: 'SYS'  },
+    warning:  { color: 'text-yellow-400',  border: 'border-yellow-400', label: 'WRN'  },
+    error:    { color: 'text-red-400',     border: 'border-red-500',    label: 'ERR'  },
+    auth:     { color: 'text-purple-400',  border: 'border-purple-400', label: 'AUTH' },
+    download: { color: 'text-cyan-400',    border: 'border-cyan-500',   label: 'DL'   },
+    launch:   { color: 'text-emerald-400', border: 'border-emerald-500',label: 'RUN'  },
+  };
+  const ALL_LOG_LEVELS = Object.keys(LOG_LEVEL_META);
+
+  const toggleLogFilter = (level: string) => {
+    setLogFilter(prev => {
+      const next = new Set(prev);
+      if (next.has(level)) next.delete(level); else next.add(level);
+      return next;
+    });
+  };
+
+  const filteredLogs = useMemo(() => {
+    const base = logFilter.size === 0 ? logs : logs.filter(l => logFilter.has(l.type));
+    return base;
+  }, [logs, logFilter]);
+
+  const handleCopyLogs = () => {
+    const text = filteredLogs.map(l => `[${l.timestamp}] [${l.type.toUpperCase()}] ${l.message}`).join('\n');
+    navigator.clipboard.writeText(text).catch(() => {});
+  };
+
+  const handleDownloadLogs = () => {
+    const text = filteredLogs.map(l => `[${l.timestamp}] [${l.type.toUpperCase()}] ${l.message}`).join('\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `x-launcher-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.log`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className={cn(
+      "w-full h-full font-sans flex flex-col overflow-hidden select-none transition-colors duration-500 relative",
+      theme === 'dark' ? "bg-[#0b0c0f] text-gray-100" : "bg-gray-100 text-gray-900",
+      cursorHidden && "cursor-hidden-global"
+    )}>
+      {/* Header */}
+      <header className={cn(
+        "h-16 flex items-center px-8 shrink-0 z-30 shadow-lg border-b transition-colors",
+        theme === 'dark' ? "bg-[#161920] border-white/10" : "bg-white border-gray-200"
+      )}>
+        <Focusable group="header-logo" id="header-logo" onEnter={() => setViewState('quick-menu')}>
+          {(isFocused) => (
+            <div className={cn(
+              "flex items-center gap-2 mr-12 transition-transform",
+              isFocused && "scale-110"
+            )}>
+              <div className="w-10 h-10 bg-blue-600 rounded-sm flex items-center justify-center font-black italic text-white shadow-lg shadow-blue-600/20">X</div>
+              <span className={cn(
+                "text-2xl font-black tracking-tighter italic",
+                theme === 'dark' ? "text-blue-400" : "text-blue-600"
+              )}>LAUNCHER</span>
+            </div>
+          )}
+        </Focusable>
+        
+        <nav className="flex gap-8 text-sm font-bold tracking-widest uppercase">
+          <Focusable group="store-bar" id="store-all" onEnter={() => { setActiveStore('All'); play('select'); }}>
+            {(isFocused) => (
+              <button className={cn(
+                "pb-1 border-b-2 transition-all",
+                activeStore === 'All' ? "text-blue-500 border-blue-500" : "opacity-50 border-transparent",
+                isFocused && "scale-110 opacity-100 border-blue-400"
+              )}>
+                All Games
+              </button>
+            )}
+          </Focusable>
+          {visibleStores.map(store => (
+            <Focusable group="store-bar" key={store.id} id={`store-${store.id}`} onEnter={() => { setActiveStore(store.id); play('select'); }}>
+              {(isFocused) => (
+                <button className={cn(
+                  "pb-1 border-b-2 transition-all",
+                  activeStore === store.id ? "text-blue-500 border-blue-500" : "opacity-50 border-transparent",
+                  isFocused && "scale-110 opacity-100 border-blue-400"
+                )}>
+                  {store.name}
+                </button>
+              )}
+            </Focusable>
+          ))}
+        </nav>
+
+        <div className="ml-auto flex items-center gap-6">
+          <div className="flex flex-col items-end gap-0.5">
+            <span className="text-[10px] font-bold text-blue-500 uppercase tracking-tighter">
+              {isGamescope ? "Gamescope Standalone" : (hostname || '—')}
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] opacity-50 uppercase tracking-widest">
+                {isGamescope ? "Wayland Native" : (
+                  // v0.99.38 — legato allo stato reale della Dashboard invece
+                  // del testo fisso "HTPC Mode". 'kiosk' e 'window' sono le
+                  // due modalità attualmente funzionanti (fullscreen
+                  // borderless / finestra). 'borderless' è lo slot già
+                  // esistente ma non ancora completo per la futura Console
+                  // Mode (sessione dedicata X11 con desktop env spento in
+                  // background, da implementare a parte) — qui mostra già
+                  // l'etichetta definitiva anche se il comportamento reale
+                  // dietro non è ancora quello finale.
+                  displayMode === 'window' ? 'Windowed' :
+                  displayMode === 'borderless' ? 'Console Mode' :
+                  'Full Screen'
+                )}
+              </span>
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+            </div>
+          </div>
+          <div className="relative">
+            {/* Icona avatar: puramente decorativa, mostra solo l'avatar
+                corrente. L'accesso alla libreria avatar passa esclusivamente
+                dal menu X-Launcher (voce "Avatar"), non più da qui — elimina
+                sia la ridondanza del doppio handler (Focusable.onEnter e
+                button.onClick facevano lo stesso identico toggle) sia
+                l'ambiguità ai bordi della griglia libreria per lo scoring
+                assiale generico. */}
+            <div
+              className={cn(
+                "w-10 h-10 rounded-full transition-all flex items-center justify-center overflow-hidden ring-2",
+                theme === 'dark'
+                  ? "border border-white/20 ring-white/10"
+                  : "border border-black/20 ring-black/10"
+              )}
+            >
+              {avatarImage
+                ? <img
+                    src={avatarImage}
+                    className="w-full h-full object-cover"
+                    alt="avatar"
+                    onError={() => {
+                      setAvatarImage(null);
+                      try { localStorage.removeItem('x-launcher-avatar'); } catch {}
+                    }}
+                  />
+                : <User size={18} className="opacity-70" />}
+            </div>
+
+            {/* Profile menu spostato nell'header della libreria avatar */}
+          </div>
+        </div>
+      </header>
+
+      {/* Avatar Library — si sovrappone alla main grid solo quando attiva */}
+      <AnimatePresence>
+        {showAvatarLibrary && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className={cn(
+              "absolute inset-0 z-[80] flex flex-col pt-[80px] pl-[80px] pr-[80px] pb-[64px]",
+              theme === 'dark' ? "bg-[#0b0c0f]/98" : "bg-gray-100/98"
+            )}
+          >
+            {/* Header libreria */}
+            <div className="flex items-center justify-between mb-10 shrink-0">
+              <div className="flex items-center gap-4">
+                {/* Avatar corrente */}
+                <div className="w-14 h-14 rounded-full border-2 border-blue-500/40 overflow-hidden flex items-center justify-center bg-white/5 shrink-0">
+                  {avatarImage
+                    ? <img src={avatarImage} className="w-full h-full object-cover" alt="avatar" />
+                    : <User size={26} className="opacity-40" />}
+                </div>
+                <div>
+                  <h2 className="text-2xl font-black italic tracking-tighter uppercase">Avatar Library</h2>
+                  <p className={cn("text-[10px] font-mono mt-0.5 select-all", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                    {avatarDir} · jpg · png · webp
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {/* Rimuovi avatar */}
+                {avatarImage && (
+                  <Focusable group="avatar-library" id="avatar-remove" onEnter={() => {
+                    setAvatarImage(null);
+                    try { localStorage.removeItem('x-launcher-avatar'); } catch {}
+                    play('back');
+                  }}>
+                    {(isFocused) => (
+                      <button
+                        className={cn(
+                          "flex items-center gap-2 px-4 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
+                          isFocused
+                            ? "bg-red-600 border-red-600 text-white scale-105"
+                            : theme === 'dark' ? "border-white/10 text-white/50 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 text-gray-500 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                        )}
+                      >
+                        <Trash2 size={13} />
+                        <span className="hidden md:inline">Rimuovi</span>
+                      </button>
+                    )}
+                  </Focusable>
+                )}
+                {/* Account settings shortcut */}
+                <Focusable group="avatar-library" id="avatar-account" onEnter={() => {
+                  setShowAvatarLibrary(false);
+                  setShowSettings(true);
+                  setActiveGroup('settings');
+                  setActiveSettingsTab('accounts');
+                  play('select');
+                  setTimeout(() => setFocusedId('settings-tab-accounts'), 80);
+                }}>
+                  {(isFocused) => (
+                    <button
+                      className={cn(
+                        "flex items-center gap-2 px-4 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
+                        isFocused
+                          ? "bg-blue-600 border-blue-600 text-white scale-105"
+                          : theme === 'dark' ? "border-white/10 text-white/50 hover:bg-blue-600 hover:border-blue-600 hover:text-white" : "border-gray-300 text-gray-500 hover:bg-blue-600 hover:border-blue-600 hover:text-white"
+                      )}
+                    >
+                      <Settings size={13} />
+                      <span className="hidden md:inline">Account</span>
+                    </button>
+                  )}
+                </Focusable>
+                {/* Ricarica */}
+                <Focusable group="avatar-library" id="avatar-reload" onEnter={loadAvatarFiles}>
+                  {(isFocused) => (
+                    <button
+                      className={cn(
+                        "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
+                        isFocused
+                          ? "bg-blue-600 border-blue-600 text-white scale-110"
+                          : theme === 'dark' ? "border-white/10 hover:bg-blue-600 hover:border-blue-600 hover:text-white" : "border-gray-300 hover:bg-blue-600 hover:border-blue-600 hover:text-white"
+                      )}
+                      title="Ricarica"
+                    >
+                      <RotateCcw size={16} />
+                    </button>
+                  )}
+                </Focusable>
+                {/* Chiudi */}
+                <Focusable group="avatar-library" id="avatar-close" fallbackPriority={-1} onEnter={() => { setShowAvatarLibrary(false); setActiveGroup('quick-menu'); setFocusedId('opt-avatar'); play('back'); }}>
+                  {(isFocused) => (
+                    <button
+                      className={cn(
+                        "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
+                        isFocused
+                          ? "bg-red-600 border-red-600 text-white scale-110"
+                          : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                      )}
+                    >
+                      <X size={18} />
+                    </button>
+                  )}
+                </Focusable>
+              </div>
+            </div>
+
+            {/* Griglia immagini */}
+            {avatarFiles.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center opacity-30">
+                <User size={64} className="mb-6" />
+                <h3 className="text-xl font-black italic uppercase tracking-widest">Cartella vuota</h3>
+                <p className="text-sm font-medium mt-2 text-center max-w-xs">
+                  Aggiungi immagini .jpg .png .webp in<br />
+                  <code className="font-mono text-xs">~/.local/share/x-launcher/avatars/</code>
+                </p>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto overflow-x-visible custom-scrollbar">
+                <div className="grid grid-cols-7 gap-5 px-2 pb-4 pt-2">
+                  {avatarFiles.map((file, idx) => (
+                    <Focusable
+                      key={file.filename}
+                      id={`avatar-${idx}`}
+                      group="avatar-library"
+                      onEnter={() => {
+                        // A applica l'avatar scelto ma NON chiude la libreria:
+                        // secondo specifica, solo B o il pulsante rosso X
+                        // chiudono — questo permette di provare più avatar
+                        // in sequenza prima di confermare e tornare al menu.
+                        setAvatarImage(file.url);
+                        try { localStorage.setItem('x-launcher-avatar', file.url); } catch {}
+                        play('select');
+                      }}
+                    >
+                      {(isFocused) => (
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setAvatarImage(file.url);
+                            try { localStorage.setItem('x-launcher-avatar', file.url); } catch {}
+                            setShowAvatarLibrary(false);
+                            setActiveGroup(null);
+                            play('select');
+                          }}
+                          className={cn(
+                            "relative aspect-square rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 border-[4px]",
+                            avatarImage === file.url
+                              ? "border-blue-500 scale-[1.06] shadow-[0_12px_32px_rgba(37,99,235,0.5)] z-10"
+                              : isFocused
+                                ? "border-white scale-[1.06] shadow-[0_12px_32px_rgba(255,255,255,0.2)] z-10"
+                                : "border-red-500/60 opacity-75 hover:opacity-100 hover:border-red-400"
+                          )}
+                        >
+                          <img
+                            src={file.url}
+                            alt={file.filename}
+                            className="w-full h-full object-cover"
+                          />
+                          {avatarImage === file.url && (
+                            <div className="absolute inset-0 bg-blue-600/20 flex items-end p-2">
+                              <span className="text-[8px] font-black uppercase tracking-widest text-white bg-blue-600 px-1.5 py-0.5 rounded-full shadow-lg">● Attivo</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </Focusable>
+                  ))}
+                </div>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Main Content */}
+      <main className="flex flex-1 overflow-hidden relative">
+        {/* Background Ambient Blur */}
+        {selectedGame && (
+          <AnimatePresence>
+            <motion.div 
+              key={selectedGame.id}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.15 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1 }}
+              className="absolute inset-0 blur-[120px] pointer-events-none"
+              style={{ 
+                backgroundImage: `url(${selectedGame.previewImage})`,
+                backgroundSize: 'cover',
+                backgroundPosition: 'center'
+              }}
+            />
+          </AnimatePresence>
+        )}
+
+        {/* Library Grid */}
+        <section className="flex-[3] p-12 overflow-y-auto custom-scrollbar relative z-10">
+          <div className="flex flex-col mb-10 px-2 transition-all">
+            <div className="flex justify-between items-end mb-6">
+              <h2 className="text-4xl font-extralight italic tracking-tight uppercase">
+                {activeStore === 'All' ? 'Collection' : `${activeStore}`}
+              </h2>
+              <div className="flex items-center gap-4">
+                <span className="text-[10px] font-mono opacity-40 uppercase tracking-[0.3em] font-black">{games.length} Titles Synced</span>
+                <div className="h-4 w-[1px] bg-blue-500/20" />
+                {/* FIX v0.99.4 — la lente non è più un Focusable: non deve
+                    essere selezionabile/attivabile da D-pad/stick/A del
+                    controller, solo cliccabile dal mouse. Da controller,
+                    la ricerca si apre con il tasto Y (toggleSearch, con
+                    Virtual Keyboard); dal mouse, openSearchWithPhysicalInput
+                    porta il focus diretto sul campo di testo reale, senza
+                    sovrapporre la VK — l'utente può già digitare con la
+                    propria tastiera fisica. */}
+                <div
+                  onClick={openSearchWithPhysicalInput}
+                  className={cn(
+                    "p-2 rounded-full transition-all cursor-pointer",
+                    showSearch ? "bg-blue-600 text-white" : "hover:bg-white/5"
+                  )}
+                >
+                  <Search size={18} />
+                </div>
+              </div>
+            </div>
+
+            <AnimatePresence>
+              {showSearch && (
+                <motion.div 
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="space-y-4 overflow-hidden"
+                >
+                  <div className="flex gap-4">
+                    <div className="flex-1 relative group">
+                       <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 opacity-30" />
+                       <input 
+                         ref={searchInputRef}
+                         type="text" 
+                         value={searchQuery}
+                         onChange={(e) => setSearchQuery(e.target.value)}
+                         placeholder={activeStore === 'All' ? "Search across all libraries..." : `Search in ${activeStore}...`}
+className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 transition-all", theme === 'dark' ? "bg-white/5 border border-white/10" : "bg-white border border-gray-400 text-gray-900")}
+                       />
+                       <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+                          {searchQuery && (
+                            <button onClick={() => setSearchQuery('')} className="p-2 opacity-30 hover:opacity-100 hover:text-red-500 transition-all">
+                              <X size={14} />
+                            </button>
+                          )}
+                          {/* FIX v0.99.10: btn-keyboard non è più un
+                              Focusable — risolve alla radice un bug più
+                              serio del fallbackPriority=-1 introdotto in
+                              v0.99.7. Con la libreria filtrata a zero
+                              risultati, l'icona tastiera resta l'UNICO
+                              elemento nel pool 'dashboard': pickBestFallback
+                              la seleziona comunque (è l'unico candidato),
+                              e quel focus veniva "ereditato" cambiando
+                              libreria con L1/R1 mentre la ricerca resta
+                              attiva — se la nuova libreria aveva risultati,
+                              muovere lo stick verso il basso atterrava sulla
+                              colonna più a destra della prima riga (il
+                              vicino direzionale più prossimo all'icona,
+                              posizionata sopra la griglia), non sulla prima
+                              card a sinistra come dovrebbe.
+                              Causa di fondo: l'icona non dovrebbe essere
+                              raggiungibile da controller in primo luogo —
+                              Y apre già la ricerca da controller (v0.99.4),
+                              quindi questo pulsante serve solo a chi ha
+                              aperto la ricerca dal mouse e vuole forzare la
+                              VK in un secondo momento. Stesso trattamento
+                              già dato alla lente in v0.99.4: cliccabile solo
+                              dal mouse, mai parte del pool di navigazione
+                              del controller — nessun pool mai "vuoto salvo
+                              l'icona", nessun focus da ereditare. */}
+                          <div
+                            onClick={() => setShowKeyboard(true)}
+                            className="p-2 rounded-lg transition-all cursor-pointer opacity-30 hover:opacity-100 bg-white/10"
+                          >
+                            <Keyboard size={14} />
+                          </div>
+                       </div>
+                    </div>
+                    <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
+                       <button 
+                         onClick={() => { setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); play('select'); }}
+                         className="px-4 py-2 hover:bg-white/5 rounded-lg flex items-center gap-2 text-[10px] font-black uppercase italic tracking-widest"
+                       >
+                         {sortOrder === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
+                         {sortOrder}
+                       </button>
+                       <select 
+                         value={sortBy}
+                         onChange={(e) => setSortBy(e.target.value as any)}
+  className={cn("text-[10px] font-black uppercase italic tracking-widest px-4 py-2 outline-none cursor-pointer rounded-lg", theme === 'dark' ? "bg-[#1a1d27] text-white border border-white/10" : "bg-gray-100 text-gray-900 border border-gray-300")}
+                       >
+                         <option value="title">By Title</option>
+                         <option value="playTime">By Play Time</option>
+                         <option value="rating">By Rating</option>
+                         <option value="installDate">By Install Date</option>
+                       </select>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {/* Toggle solo installati */}
+                    <button
+                      onClick={() => setOnlyInstalled(!onlyInstalled)}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all border",
+                        onlyInstalled
+                          ? "bg-blue-600 border-blue-600 text-white"
+                          : "bg-white/5 border-white/10 opacity-50 hover:opacity-100"
+                      )}
+                    >
+                      <Download size={9} />
+                      Installati
+                    </button>
+                    <div className="w-px h-6 bg-white/10 self-center mx-1" />
+                    {/* Genres — derivati dai giochi reali */}
+                    {(() => {
+                      const genres = [...new Set(games.flatMap(g => g.genres ?? []))].slice(0, 8);
+                      if (genres.length === 0) return null;
+                      return (
+                        <div className="flex items-center gap-2 mr-4">
+                          <span className="text-[8px] font-black uppercase tracking-[0.2em] opacity-40 italic">Genres</span>
+                          <div className="flex flex-wrap gap-1">
+                            {genres.map(genre => (
+                              <button
+                                key={genre}
+                                onClick={() => setSelectedGenre(selectedGenre === genre ? '' : genre)}
+                                className={cn(
+                                  "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
+                                  selectedGenre === genre ? "bg-blue-600 text-white" : "bg-white/5 opacity-50 hover:opacity-100"
+                                )}
+                              >
+                                {genre}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {/* Categories — derivate dai giochi reali */}
+                    {(() => {
+                      const cats = [...new Set(games.flatMap(g => g.categories ?? []))].slice(0, 5);
+                      if (cats.length === 0) return null;
+                      return (
+                        <div className="flex items-center gap-2">
+                          <span className="text-[8px] font-black uppercase tracking-[0.2em] opacity-40 italic">Categories</span>
+                          <div className="flex flex-wrap gap-1">
+                            {cats.map(cat => (
+                              <button
+                                key={cat}
+                                onClick={() => setSelectedCategory(selectedCategory === cat ? '' : cat)}
+                                className={cn(
+                                  "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
+                                  selectedCategory === cat ? "bg-blue-600 text-white" : "bg-white/5 opacity-50 hover:opacity-100"
+                                )}
+                              >
+                                {cat}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  <div className="h-[1px] bg-white/5 w-full my-6" />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+          
+          <div className="grid grid-cols-4 gap-10">
+            {filteredVisibleGames.length === 0 ? (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="col-span-4 py-20 flex flex-col items-center justify-center opacity-30"
+              >
+                <Search size={64} className="mb-6" />
+                <h3 className="text-2xl font-black italic uppercase tracking-widest">No matching titles found</h3>
+                <p className="text-sm font-medium mt-2">Try adjusting your filters or search keywords</p>
+                <button 
+                  onClick={() => { setSearchQuery(''); setSelectedGenre(''); setSelectedCategory(''); setOnlyInstalled(activeStore === 'All'); }}
+                  className="mt-8 px-8 py-3 bg-white/10 rounded-xl text-xs font-black uppercase italic tracking-widest hover:bg-white/20 transition-all pointer-events-auto"
+                >
+                  Clear All Filters
+                </button>
+              </motion.div>
+            ) : (
+              filteredVisibleGames.map((game) => (
+                <Focusable 
+                  key={game.id} 
+                  id={`game-${game.id}`} 
+                  group="dashboard"
+                  disableHoverFocus={true}
+                  onEnter={() => {
+                    setSelectedGameId(game.id);
+                    play('select');
+                  }}
+                >
+                  {(isFocused) => {
+                    return (
+                      <motion.div
+                        layout
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.9 }}
+                        onMouseEnter={() => {
+                          // Hover sempre libero — aggiorna la sidebar
+                          setSelectedGameId(game.id);
+                        }}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setSelectedGameId(game.id);
+                          play('select');
+                          handlePlay(game.id);
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          // FIX v0.99.4: prima apriva l'overlay con
+                          // setShowGameOptions(true) diretto, senza passare
+                          // da openGameOptions — quindi senza isolare lo
+                          // scope (setActiveGroup) né impostare un focus
+                          // iniziale corretto. Risultato: con l'overlay
+                          // aperto da click destro, stick/D-pad del
+                          // controller continuavano a interagire con la
+                          // dashboard sottostante invece che con l'overlay
+                          // (stesso problema già risolto per Manage
+                          // Accounts). openGameOptions ora gestisce tutto
+                          // in un solo punto, qualunque sia l'origine
+                          // dell'apertura (tastiera/controller o mouse).
+                          openGameOptions(game.id);
+                        }}
+                        className={cn(
+                          "group relative aspect-[3/4] rounded-2xl overflow-hidden cursor-pointer transition-all duration-300",
+                          "border-[6px]",
+                          (isFocused || selectedGameId === game.id) && game.isInstalled
+                            ? "border-blue-500 scale-[1.05] shadow-[0_20px_50px_rgba(37,99,235,0.4)] z-20"
+                            : (isFocused || selectedGameId === game.id) && !game.isInstalled
+                              ? "border-red-500 scale-[1.05] shadow-[0_20px_50px_rgba(239,68,68,0.4)] z-20"
+                              : "border-transparent opacity-70"
+                        )}
+                      >
+                        <img src={game.coverImage} className="absolute inset-0 w-full h-full object-cover" alt={game.title} />
+                        {game.verified && (
+                          <div
+                            className="absolute top-2 right-2 z-10 bg-black/60 rounded-full p-1 backdrop-blur-sm"
+                            title={`Verificato${game.verificationMethod ? ` (${game.verificationMethod})` : ''}`}
+                          >
+                            <CheckCircle2 size={16} className="text-green-400" />
+                          </div>
+                        )}
+                        <div className={cn(
+                          "absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent flex flex-col justify-end p-6 transition-opacity",
+                          isFocused ? "opacity-100" : "opacity-0"
+                        )}>
+                          {/* Badge plugin disabilitato — solo per giochi installati con DRM */}
+                          {(() => {
+                            const ps = pluginStateMap.get(game.store as string);
+                            const blocked = ps && !ps.enabled && !ps.drmFree && game.isInstalled;
+                            return blocked ? (
+                              <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-yellow-400 italic">
+                                Plugin disattivato
+                              </p>
+                            ) : (
+                              <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-blue-400 italic">
+                                {game.status}
+                              </p>
+                            );
+                          })()}
+                          <h3 className="text-xl font-black leading-tight uppercase tracking-tighter italic">{game.title}</h3>
+                        </div>
+                      </motion.div>
+                    );
+                  }}
+                </Focusable>
+              ))
+            )}
+          </div>
+        </section>
+
+        {/* Sidebar — info principali */}
+        {/* v0.99.36 — fix glitch visivo: transform (translateZ) forza un
+            layer di compositing GPU stabile e indipendente per l'aside.
+            Senza questo, il motion.div interno (che anima x/opacity ad
+            ogni cambio gioco) crea/distrugge il proprio layer ad ogni
+            mount, e Chromium in alcuni casi ridisegna per un frame il
+            backdrop-filter dell'ancestor mostrando il colore piatto
+            sotto invece che lo sfondo sfocato — visto come un rettangolo
+            che lampeggia nello spazio vuoto sotto il contenuto animato. */}
+        <aside
+          style={{ transform: 'translateZ(0)' }}
+          className={cn(
+          "w-[400px] h-full backdrop-blur-3xl border-l p-10 flex flex-col z-20 shadow-[-20px_0_60px_rgba(0,0,0,0.5)] transition-colors duration-500",
+          theme === 'dark' ? "bg-[#12141a]/90 border-white/5" : "bg-white/90 border-gray-200"
+        )}>
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            {selectedGame ? (
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={selectedGame.id}
+                  initial={{ x: 50, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  exit={{ x: -20, opacity: 0 }}
+                  transition={{ type: 'spring', damping: 20 }}
+                  className="flex flex-col gap-6 min-h-0"
+                >
+                  {/* Cover / Trailer */}
+                  <div className="relative w-full aspect-video rounded-2xl border border-white/10 overflow-hidden shadow-2xl group shrink-0">
+                    {showTrailer && selectedGame.trailerUrl ? (
+                    <div className="relative w-full h-full">
+                      <iframe src={`${selectedGame.trailerUrl}?autoplay=1`} className="w-full h-full border-0" allow="autoplay; encrypted-media" allowFullScreen />
+                      <button onClick={() => setShowTrailer(false)} className="absolute top-3 right-3 w-8 h-8 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-red-600 transition-all">
+                        <X size={16} />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <img src={selectedGame.previewImage} className="w-full h-full object-cover" alt="Preview" />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent flex items-end p-4">
+                        {/* v0.99.37 — "Installed/Not Installed" non ha senso
+                            per la card Big Picture: non è un titolo
+                            installabile, è sempre disponibile se Steam è
+                            presente sul sistema. Etichetta dedicata al
+                            posto del badge di stato installazione. */}
+                        {selectedGame.isBigPictureLauncher ? (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest bg-[#66c0f4] text-[#0b1118]">
+                            Steam Client
+                          </span>
+                        ) : (
+                          <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest", selectedGame.isInstalled ? "bg-blue-600" : "bg-red-600")}>
+                            {selectedGame.isInstalled ? "Installed" : "Not Installed"}
+                          </span>
+                        )}
+                      </div>
+                      {selectedGame.trailerUrl && (
+                        <button onClick={() => setShowTrailer(true)} className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all">
+                          <div className="w-14 h-14 rounded-full bg-black/50 backdrop-blur-md border border-white/10 flex items-center justify-center hover:bg-white hover:text-black transition-all">
+                            <Play size={24} fill="currentColor" />
+                          </div>
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Titolo */}
+                <h1 className="text-4xl font-black uppercase tracking-tighter leading-none italic [text-wrap:balance] shrink-0">{selectedGame.title}</h1>
+
+                {/* Info rapide */}
+                <div className="flex flex-wrap gap-3 items-center shrink-0">
+                  {selectedGame.rating && <span className="text-[10px] font-black uppercase text-green-500 tracking-widest italic">Rating {selectedGame.rating}%</span>}
+                  {selectedGame.hltbHours && <span className="text-[10px] font-black uppercase text-blue-400 tracking-widest italic border-l border-white/10 pl-3">HLTB {selectedGame.hltbHours.main}h</span>}
+                  <span className="text-[10px] font-black uppercase text-white/40 tracking-widest italic border-l border-white/10 pl-3">{selectedGame.store}</span>
+                  <span className="text-[10px] font-black uppercase text-white/40 tracking-widest italic border-l border-white/10 pl-3">{selectedGame.runner}</span>
+                </div>
+
+                {/* Generi e tag */}
+                <div className="flex flex-wrap gap-2 shrink-0">
+                  {selectedGame.genres?.map(g => (
+                    <span key={g} className="px-3 py-1 bg-purple-500/10 border border-purple-500/20 rounded-full text-[10px] font-black uppercase tracking-widest text-purple-400">{g}</span>
+                  ))}
+                  {selectedGame.tags.slice(0, 3).map(tag => (
+                    <span key={tag} className="px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-full text-[10px] font-black uppercase tracking-widest text-blue-400">{tag}</span>
+                  ))}
+                </div>
+
+                {/* Ore di gioco — reali dal DB */}
+                <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/5 shrink-0">
+                  <Clock size={14} className="text-blue-400 shrink-0" />
+                  <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Playtime</span>
+                  <span className="ml-auto text-sm font-black italic">
+                    {selectedGame.playTimeHours > 0
+                      ? `${selectedGame.playTimeHours.toFixed(1)}h`
+                      : <span className="opacity-30 text-xs font-normal">—</span>}
+                  </span>
+                </div>
+
+                {/* Achievements — nascosto: non ancora implementato */}
+                {/* {selectedGame.achievements && ( ... )} */}
+
+                {/* Descrizione — v1.0.0: prima l'auto-scroll riguardava
+                    l'intera colonna (immagine, badge, titolo, tag, ecc.
+                    tutti insieme) quando il contenuto eccedeva lo spazio.
+                    Ora è vincolata a un'altezza massima propria che non
+                    eccede mai lo spazio della colonna, e solo il testo AL
+                    SUO INTERNO scorre quando supera quella dimensione —
+                    tutto il resto (immagine, badge, titolo, piattaforma/
+                    runner, tag, playtime) resta fisso, mai coinvolto nello
+                    scroll. Il ref di auto-scroll si sposta qui, sull'unico
+                    contenitore che ora può eccedere la propria dimensione. */}
+                {/* v1.0.0 — DIAGNOSTICA TEMPORANEA (round 2): position
+                    fixed, fuori dal flusso della colonna — la volta
+                    scorsa l'elemento diagnostico viveva DENTRO il flusso
+                    e potrebbe aver influenzato il layout che stavamo
+                    misurando. Qui non puo' avere alcun effetto sulla
+                    dimensione del box sotto osservazione. */}
+                
+                {selectedGame.description && (
+                  <div
+                    ref={descriptionScrollRefCallback}
+                    className={cn(
+                      "overflow-y-auto overflow-x-hidden custom-scrollbar p-4 bg-blue-500/5 border border-blue-500/10 rounded-xl",
+                      // v1.0.0 — fix definitivo, non più una soglia fissa
+                      // per "console aperta/chiusa": flex-1 min-h-0 lascia
+                      // che sia il browser a calcolare quanto spazio resta
+                      // DAVVERO disponibile nella colonna, dato tutto il
+                      // resto (titolo/tag/playtime sopra, che possono
+                      // occupare più o meno righe a seconda della
+                      // lunghezza, e la console di debug sotto, che è
+                      // shrink-0 e prende la sua parte per prima). Un
+                      // titolo lunghissimo o una console aperta riducono
+                      // automaticamente lo spazio di questo box, mai il
+                      // contrario — niente più bisogno di conoscere lo
+                      // stato della console qui dentro. max-h resta solo
+                      // come tetto massimo per schermi molto alti con
+                      // poco altro sopra, non più come unica misura.
+                      "flex-1 min-h-0 max-h-[400px]"
+                    )}
+                  >
+                    <p className="text-xs opacity-70 leading-relaxed font-medium italic">{selectedGame.description}</p>
+                  </div>
+                )}
+                </motion.div>
+              </AnimatePresence>
+            ) : isFetchingLibrary && games.length === 0 ? (
+              // v0.99.38 — stato di caricamento vero e proprio, distinto dal
+              // benvenuto: solo quando la libreria non ha ancora risposto
+              // affatto (primo fetch, games ancora vuoto). Se games.length
+              // > 0 ma selectedGame è undefined, la libreria C'È già — è
+              // semplicemente che l'utente non ha ancora selezionato nulla,
+              // quindi va mostrato il benvenuto, non "sta caricando".
+              <div className="flex flex-col items-center justify-center h-full opacity-30 text-center px-6">
+                <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mb-4" />
+                <p className="text-sm font-black uppercase tracking-widest">Caricamento libreria…</p>
+              </div>
+            ) : (
+              // v0.99.38 — pannello di benvenuto vero e proprio (prima era
+              // un placeholder minimale "Nessun gioco selezionato" nato solo
+              // per evitare il crash da accesso a selectedGame.id senza
+              // guardia — funzionale ma poco accogliente). Mostrato al
+              // primo caricamento prima di qualunque selezione, e ogni volta
+              // che la selezione torna genuinamente vuota (es. libreria
+              // filtrata svuotata da una ricerca).
+              <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                <div className="w-16 h-16 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center mb-5">
+                  <Sparkles size={28} className="text-blue-400" />
+                </div>
+                <p className="text-lg font-black italic uppercase tracking-tight mb-1">
+                  {hostname ? `Bentornato, ${hostname}` : 'Bentornato'}
+                </p>
+                <p className="text-xs opacity-50 font-medium leading-relaxed max-w-[240px] mb-6">
+                  Seleziona un gioco dalla libreria per vederne i dettagli, oppure premi Play per avviarlo direttamente.
+                </p>
+                {games.length > 0 && (
+                  <div className="flex items-center gap-4 text-[10px] font-bold uppercase tracking-widest opacity-40">
+                    <span className="flex items-center gap-1.5">
+                      <LayoutGrid size={12} />
+                      {games.length} {games.length === 1 ? 'titolo' : 'titoli'}
+                    </span>
+                    {games.some((g: any) => g.verified) && (
+                      <span className="flex items-center gap-1.5">
+                        <CheckCircle2 size={12} className="text-green-400" />
+                        {games.filter((g: any) => g.verified).length} verificati
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Debug Console — Step 12f */}
+          <AnimatePresence>
+            {showDebugConsole && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 260, opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="mt-6 pt-6 border-t border-white/5 overflow-hidden shrink-0 flex flex-col"
+              >
+                {/* Header toolbar */}
+                <div className="flex items-center gap-2 mb-2 px-1 flex-wrap">
+                  {/* Titolo */}
+                  <Terminal size={12} className="text-blue-500 shrink-0" />
+                  <span className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.3em] font-mono italic shrink-0">
+                    Daemon Log
+                  </span>
+
+                  {/* Filtri livello */}
+                  <div className="flex items-center gap-1 ml-1 flex-wrap">
+                    {ALL_LOG_LEVELS.map(lvl => {
+                      const meta = LOG_LEVEL_META[lvl];
+                      const active = logFilter.has(lvl);
+                      return (
+                        <button
+                          key={lvl}
+                          onClick={() => toggleLogFilter(lvl)}
+                          title={`Filtra ${lvl}`}
+                          className={cn(
+                            "px-1.5 py-0.5 rounded text-[8px] font-black font-mono uppercase border transition-all",
+                            active
+                              ? `${meta.color} ${meta.border} bg-white/5`
+                              : "text-gray-600 border-gray-700 hover:border-gray-500"
+                          )}
+                        >
+                          {meta.label}
+                        </button>
+                      );
+                    })}
+                    {logFilter.size > 0 && (
+                      <button
+                        onClick={() => setLogFilter(new Set())}
+                        title="Rimuovi filtri"
+                        className="px-1.5 py-0.5 rounded text-[8px] font-black font-mono uppercase border text-gray-600 border-gray-700 hover:border-red-500 hover:text-red-400 transition-all"
+                      >
+                        ✕ ALL
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Spacer */}
+                  <div className="flex-1" />
+
+                  {/* Azioni */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => setPauseScroll(p => !p)}
+                      title={pauseScroll ? "Riprendi auto-scroll" : "Pausa auto-scroll"}
+                      className={cn(
+                        "flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border transition-all",
+                        pauseScroll
+                          ? "text-yellow-400 border-yellow-500/50 bg-yellow-500/10"
+                          : "text-gray-600 border-gray-700 hover:border-gray-500 hover:text-gray-400"
+                      )}
+                    >
+                      <Pause size={9} />
+                      {pauseScroll ? "PAUSED" : "LIVE"}
+                    </button>
+                    <button
+                      onClick={handleCopyLogs}
+                      title="Copia log negli appunti"
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border text-gray-600 border-gray-700 hover:border-gray-500 hover:text-gray-400 transition-all"
+                    >
+                      <Copy size={9} />
+                    </button>
+                    <button
+                      onClick={handleDownloadLogs}
+                      title="Scarica log come file"
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border text-gray-600 border-gray-700 hover:border-blue-400 hover:text-blue-400 transition-all"
+                    >
+                      <FileDown size={9} />
+                    </button>
+                  </div>
+
+                  {/* Live indicator */}
+                  <div className={cn(
+                    "w-2 h-2 rounded-full shrink-0",
+                    pauseScroll ? "bg-yellow-500" : "bg-blue-500 animate-pulse"
+                  )} />
+                </div>
+
+                {/* Log body */}
+                <div
+                  ref={logScrollRef}
+                  className={cn(
+                    "rounded-xl p-3 font-mono text-[9px] flex-1 border overflow-y-auto shadow-inner scroll-smooth",
+                    theme === 'dark' ? "bg-black/80 border-white/5" : "bg-white border-black/5"
+                  )}
+                >
+                  {filteredLogs.length === 0 ? (
+                    <span className="text-gray-700 italic">Nessun log{logFilter.size > 0 ? ' per il filtro selezionato' : ''}.</span>
+                  ) : (
+                    <div className="space-y-1">
+                      {filteredLogs.map((log, i) => {
+                        const meta = LOG_LEVEL_META[log.type] ?? LOG_LEVEL_META['info'];
+                        return (
+                          <div key={i} className={cn("flex gap-2 border-l-2 pl-2", meta.color, meta.border)}>
+                            <span className="opacity-30 shrink-0 font-bold whitespace-nowrap">[{log.timestamp}]</span>
+                            <span className={cn(
+                              "shrink-0 font-black uppercase text-[8px] w-7 pt-px",
+                              meta.color
+                            )}>{meta.label}</span>
+                            <span className="break-all opacity-90">{log.message}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer: conteggio */}
+                <div className="flex items-center justify-between px-1 mt-1">
+                  <span className="text-[8px] text-gray-700 font-mono">
+                    {filteredLogs.length} voci{logFilter.size > 0 ? ` · filtro attivo (${logFilter.size})` : ''}
+                  </span>
+                  <span className="text-[8px] text-gray-700 font-mono">
+                    {logs.length} totali
+                  </span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </aside>
+
+        <AnimatePresence>
+          {showDownloads && (
+            <motion.div
+              initial={{ x: 400 }}
+              animate={{ x: 0 }}
+              exit={{ x: 400 }}
+              className={cn(
+                "absolute top-0 right-0 bottom-0 w-96 z-50 p-10 flex flex-col shadow-2xl border-l",
+                theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
+              )}
+            >
+              <div className="flex items-center justify-between mb-10">
+                 <div className="flex items-center gap-3">
+                   <Download size={20} className="text-blue-500" />
+                   <h2 className="text-2xl font-black italic tracking-tighter uppercase">Deployment Manager</h2>
+                 </div>
+                 <Focusable group="downloads" id="downloads-close" fallbackPriority={-1} onEnter={() => { setShowDownloads(false); setActiveGroup(null); setFocusedId('footer-downloads'); }}>
+                   {(isFocused) => (
+                     <div className={cn(
+                       "w-8 h-8 rounded-full border flex items-center justify-center transition-all",
+                       isFocused && "scale-110 bg-red-600 border-red-600 text-white"
+                     )}>
+                       <X size={16} />
+                     </div>
+                   )}
+                 </Focusable>
+              </div>
+
+              <div className="space-y-6 overflow-y-auto custom-scrollbar flex-1 pr-2">
+
+                {/* Dialog di conferma install/uninstall */}
+                {pendingAction && (
+                  <div className="p-5 rounded-2xl border-2 border-blue-500/40 bg-blue-500/5">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-blue-400 mb-2">
+                      {pendingAction.type === 'install' ? 'Conferma installazione' : 'Conferma disinstallazione'}
+                    </p>
+                    <p className="text-sm font-black italic uppercase tracking-tighter mb-5">
+                      {pendingAction.gameTitle}
+                    </p>
+                    <p className="text-xs opacity-50 mb-6">
+                      {pendingAction.type === 'install'
+                        ? 'Il gioco verrà scaricato e installato. Assicurati di avere abbastanza spazio su disco.'
+                        : 'Tutti i file del gioco verranno rimossi dal disco. Questa operazione non è reversibile.'}
+                    </p>
+                    <div className="flex gap-3">
+                      <Focusable group="downloads" id="pending-confirm" onEnter={async () => {
+                        const action = pendingAction;
+                        setPendingAction(null);
+                        if (action.type === 'install') {
+                          play('launch');
+                          // v0.99.35 — bug confermato: winetricksVerbs (stato
+                          // React) viene popolato SOLO quando si apre
+                          // l'overlay opzioni per un gioco specifico (vedi
+                          // useEffect su showGameOptions/selectedGame). Se
+                          // l'installazione parte da handlePlay — lancio
+                          // diretto dalla card, senza passare dall'overlay
+                          // per QUESTO gioco in questa sessione — lo stato
+                          // resta quello dell'ultimo gioco aperto
+                          // nell'overlay (o i default, se nessuno) invece
+                          // dei verbs realmente salvati per action.gameId.
+                          // Si rilegge sempre dal DB qui, al momento della
+                          // conferma effettiva, per il gameId corretto —
+                          // stessa fonte (GET /api/games/:id/compat) e
+                          // stesso fallback ai default già usati
+                          // dall'overlay, così i due percorsi (card diretta
+                          // vs overlay) restano garantiti coerenti.
+                          let verbsToSend: string[] = DEFAULT_WINE_VERBS;
+                          let disableSyncToSend = false;
+                          let useKnownFixesToSend = false;
+                          try {
+                            const compatRes = await fetch(`/api/games/${action.gameId}/compat`);
+                            const profile = compatRes.ok ? await compatRes.json() : {};
+                            if (Array.isArray(profile?.winetricksVerbs)) {
+                              verbsToSend = profile.winetricksVerbs;
+                            }
+                            disableSyncToSend = !!profile?.disableWineSync;
+                            useKnownFixesToSend = !!profile?.useKnownFixes;
+                          } catch {
+                            // fetch falsa — procede con i default, non blocca l'installazione
+                          }
+                          try {
+                            const res = await fetch('/api/downloads/start', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                gameId: action.gameId, winetricksVerbs: verbsToSend,
+                                disableWineSync: disableSyncToSend, useKnownFixes: useKnownFixesToSend,
+                                // v1.1.18 — presente solo se l'utente aveva
+                                // davvero spento lo switch "solo
+                                // installazione" per almeno una variabile;
+                                // undefined altrimenti (nessuna differenza
+                                // rispetto a prima di questa modifica).
+                                installOnlyEnv: action.installOnlyEnv,
+                              }),
+                            });
+                            const data = await res.json().catch(() => ({}));
+                            // v0.99.36 — Step 2 (lock prefix): il backend ora
+                            // può rifiutare esplicitamente l'avvio (es. il
+                            // gioco è già in esecuzione) invece di limitarsi
+                            // a ignorare la richiesta — l'utente deve saperlo,
+                            // stesso trattamento già riservato al ramo uninstall.
+                            if (!res.ok || data?.success === false) {
+                              pushNotification({
+                                type:   'error',
+                                title:  'Installazione non avviata',
+                                body:   data?.message ?? 'Errore sconosciuto',
+                                gameId: action.gameId,
+                                gameTitle: action.gameTitle,
+                                source: 'system',
+                              });
+                            }
+                          } catch (err) {
+                            pushNotification({
+                              type:   'error',
+                              title:  'Installazione non avviata',
+                              body:   String(err),
+                              gameId: action.gameId,
+                              gameTitle: action.gameTitle,
+                              source: 'system',
+                            });
+                          }
+                        } else {
+                          play('launch');
+                          // v0.99.35 — la risposta NON va più ignorata: se
+                          // il backend rifiuta (es. nessun file da
+                          // rimuovere — caso raro ora che la pulizia
+                          // copre anche installazioni incomplete, vedi
+                          // gameManager.ts), l'utente deve saperlo invece
+                          // di vedere il pannello chiudersi come se fosse
+                          // andato tutto bene su un'operazione che in
+                          // realtà non ha fatto nulla.
+                          try {
+                            const res = await fetch(`/api/games/${action.gameId}/uninstall`, { method: 'DELETE' });
+                            const data = await res.json().catch(() => ({}));
+                            if (!res.ok || data?.success === false) {
+                              pushNotification({
+                                type:   'error',
+                                title:  'Disinstallazione non riuscita',
+                                body:   data?.message ?? 'Errore sconosciuto',
+                                gameId: action.gameId,
+                                gameTitle: action.gameTitle,
+                                source: 'system',
+                              });
+                            }
+                          } catch (err) {
+                            pushNotification({
+                              type:   'error',
+                              title:  'Disinstallazione non riuscita',
+                              body:   String(err),
+                              gameId: action.gameId,
+                              gameTitle: action.gameTitle,
+                              source: 'system',
+                            });
+                          }
+                        }
+                      }}>
+                        {(isFocused) => (
+                          <button className={cn(
+                            "flex-1 py-3 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all",
+                            pendingAction.type === 'install'
+                              ? isFocused ? "bg-blue-500 text-white scale-105" : "bg-blue-600 hover:bg-blue-500 text-white"
+                              : isFocused ? "bg-red-500 text-white scale-105" : "bg-red-600 hover:bg-red-500 text-white"
+                          )}>
+                            {pendingAction.type === 'install' ? '⬇ Installa' : '🗑 Disinstalla'}
+                          </button>
+                        )}
+                      </Focusable>
+                      <Focusable group="downloads" id="pending-cancel" onEnter={() => setPendingAction(null)}>
+                        {(isFocused) => (
+                          <button className={cn(
+                            "flex-1 py-3 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all",
+                            isFocused ? "bg-white/25 scale-105" : "bg-white/10 hover:bg-white/20"
+                          )}>Annulla</button>
+                        )}
+                      </Focusable>
+                    </div>
+                  </div>
+                )}
+
+                {downloads.filter((t: any) => !hiddenCompletedIds.has(t.gameId)).length === 0 && !pendingAction ? (
+                  <div className="h-full flex flex-col items-center justify-center opacity-20 text-center">
+                    <Download size={48} className="mb-4" />
+                    <p className="font-black italic uppercase tracking-widest text-xs">No active transfers</p>
+                  </div>
+                ) : (
+                  downloads.filter((t: any) => !hiddenCompletedIds.has(t.gameId)).map(task => (
+                    <div key={task.gameId} className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                      <div className="flex justify-between items-start mb-4">
+                        <div>
+                           <span className="text-[10px] font-black italic text-blue-500 uppercase tracking-widest block mb-1">
+                             {task.phaseLabel || (task.status === 'downloading' ? 'Download in corso...' : task.status.toUpperCase())}
+                           </span>
+                           <h4 className="text-sm font-black italic uppercase tracking-tighter">{task.gameTitle}</h4>
+                        </div>
+                        <span className="text-xs font-black italic text-blue-400">{task.speed}</span>
+                      </div>
+                      
+                      <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden mb-3">
+                        <motion.div 
+                          className="h-full bg-blue-500"
+                          initial={{ width: 0 }}
+                          animate={{ width: `${task.progress}%` }}
+                        />
+                      </div>
+                      
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold opacity-40 uppercase tracking-widest italic">{task.progress.toFixed(0)}% Complete</span>
+                        <div className="flex gap-2">
+                          {confirmCancelDownloadId === task.gameId ? (
+                            <>
+                              <Focusable
+                                group="downloads"
+                                id={`dl-cancel-confirm-${task.gameId}`}
+                                onEnter={() => {
+                                  setConfirmCancelDownloadId(null);
+                                  fetch('/api/downloads/cancel', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ id: task.gameId }),
+                                  });
+                                }}
+                              >
+                                {(isFocused) => (
+                                  <button className={cn(
+                                    "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
+                                    isFocused ? "bg-red-600 text-white" : "bg-red-600/60 text-white"
+                                  )}>
+                                    Conferma
+                                  </button>
+                                )}
+                              </Focusable>
+                              <Focusable
+                                group="downloads"
+                                id={`dl-cancel-back-${task.gameId}`}
+                                onEnter={() => setConfirmCancelDownloadId(null)}
+                              >
+                                {(isFocused) => (
+                                  <button className={cn(
+                                    "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
+                                    isFocused ? "bg-white/25 text-white" : "bg-white/10 opacity-60"
+                                  )}>
+                                    Indietro
+                                  </button>
+                                )}
+                              </Focusable>
+                            </>
+                          ) : (
+                            <>
+                              <Focusable 
+                                group="downloads"
+                                id={`dl-pause-${task.gameId}`} 
+                                onEnter={() => fetch(task.status === 'paused' ? '/api/downloads/resume' : '/api/downloads/pause', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ id: task.gameId })
+                                })}
+                              >
+                                {(isFocused) => (
+                                  <button className={cn(
+                                    "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
+                                    isFocused ? "bg-blue-600 text-white" : "bg-white/10 opacity-60"
+                                  )}>
+                                    {task.status === 'paused' ? 'Resume' : 'Pause'}
+                                  </button>
+                                )}
+                              </Focusable>
+                              {/* v0.99.38 — annulla davvero il download: elimina
+                                  processo, task E i file parziali già scaricati/
+                                  estratti su disco (vedi downloadManager.ts/
+                                  cancelTask). Prima esisteva solo pausa/ripresa,
+                                  nessun modo di abbandonare del tutto
+                                  un'installazione che non si vuole più
+                                  completare. */}
+                              <Focusable
+                                group="downloads"
+                                id={`dl-cancel-${task.gameId}`}
+                                onEnter={() => setConfirmCancelDownloadId(task.gameId)}
+                              >
+                                {(isFocused) => (
+                                  <button className={cn(
+                                    "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
+                                    isFocused ? "bg-red-600 text-white" : "bg-white/10 opacity-60"
+                                  )}>
+                                    Cancel
+                                  </button>
+                                )}
+                              </Focusable>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="mt-10 p-6 rounded-2xl bg-blue-500/5 border border-blue-500/10 flex items-center gap-4">
+                <Activity size={20} className="text-blue-500 shrink-0" />
+                <div className="flex flex-col">
+                  <span className="text-[9px] font-black opacity-30 uppercase tracking-widest leading-none mb-1">Peer Hash Cache</span>
+                  <span className="text-xs font-black italic">SHA-256 Checksum Verification Active</span>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ── Gamepad activation hint ── */}
+        {connectedDevices.length > 0 && (
+          <div
+            id="gamepad-hint"
+            className={cn(
+              "absolute bottom-20 left-1/2 -translate-x-1/2 z-40 px-6 py-3 rounded-2xl",
+              "bg-black/80 text-white text-[10px] font-black uppercase tracking-widest",
+              "transition-opacity duration-1000 pointer-events-none"
+            )}
+            style={{ opacity: 0, animation: 'fadeInOut 4s ease forwards' }}
+          >
+            🎮 Premi un tasto sul controller per attivare l&apos;input
+          </div>
+        )}
+
+        {/* ── Centro Notifiche ── */}
+        <AnimatePresence>
+          {showNotifications && (
+            <motion.div
+              initial={{ x: 400 }}
+              animate={{ x: 0 }}
+              exit={{ x: 400 }}
+              className={cn(
+                "absolute top-0 right-0 bottom-0 w-96 z-50 p-10 flex flex-col shadow-2xl border-l",
+                theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
+              )}
+            >
+              <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-3">
+                  {unreadCount > 0 ? <BellDot size={20} className="text-blue-400" /> : <Bell size={20} className="text-blue-400" />}
+                  <h2 className="text-2xl font-black italic tracking-tighter uppercase">Notifiche</h2>
+                  {unreadCount > 0 && (
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-blue-600 text-white">{unreadCount}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3">
+                  {notifications.some(n => n.status === 'dismissed' || n.status === 'resolved' || n.status === 'failed') && (
+                    <Focusable group="notifications" id="notifications-clear" onEnter={() => setNotifications(prev => prev.filter(n => n.status === 'pending' || n.status === 'applied'))}>
+                      {(isFocused) => (
+                        <button
+                          className={cn(
+                            "text-[10px] font-black uppercase tracking-widest transition-opacity",
+                            isFocused ? "opacity-100 text-red-400" : "opacity-30 hover:opacity-80"
+                          )}
+                        >↺ Pulisci storico</button>
+                      )}
+                    </Focusable>
+                  )}
+                  <Focusable group="notifications" id="notifications-close" fallbackPriority={-1} onEnter={() => { setShowNotifications(false); setActiveGroup(null); setFocusedId('footer-notifications'); }}>
+                    {(isFocused) => (
+                      <div className={cn(
+                        "w-8 h-8 rounded-full border flex items-center justify-center transition-all",
+                        isFocused && "scale-110 bg-red-600 border-red-600 text-white"
+                      )}><X size={16} /></div>
+                    )}
+                  </Focusable>
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pr-2 space-y-3">
+                {notifications.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center opacity-20 text-center gap-4">
+                    <Bell size={48} />
+                    <p className="font-black italic uppercase tracking-widest text-xs">Nessuna notifica</p>
+                  </div>
+                ) : (
+                  notifications.map(notif => {
+                    const isDone = notif.status === 'resolved' || notif.status === 'failed' || notif.status === 'dismissed';
+                    const cfgMap: Record<string, { icon: React.ReactNode; accent: string; badge: string }> = {
+                      'info':          { icon: <Info size={14} />,          accent: 'border-blue-500/30 bg-blue-500/5',     badge: 'bg-blue-600' },
+                      'success':       { icon: <CheckCircle2 size={14} />,  accent: 'border-green-500/30 bg-green-500/5',   badge: 'bg-green-600' },
+                      'warning':       { icon: <AlertTriangle size={14} />, accent: 'border-yellow-500/30 bg-yellow-500/5', badge: 'bg-yellow-500' },
+                      'error':         { icon: <XCircle size={14} />,       accent: 'border-red-500/30 bg-red-500/5',       badge: 'bg-red-600' },
+                      'ai-suggestion': { icon: <Sparkles size={14} />,      accent: 'border-purple-500/30 bg-purple-500/5', badge: 'bg-purple-600' },
+                      'kb-suggestion': { icon: <BookOpen size={14} />,      accent: 'border-gray-500/30 bg-gray-500/5',     badge: 'bg-gray-600' },
+                    };
+                    const cfg = cfgMap[notif.type] ?? cfgMap['info'];
+                    return (
+                      <div key={notif.id} className={cn("rounded-2xl border p-4 transition-all", cfg.accent, isDone && "opacity-40")}>
+                        <div className="flex items-start gap-3 mb-2">
+                          <div className={cn("mt-0.5 p-1.5 rounded-lg shrink-0 text-white", cfg.badge)}>{cfg.icon}</div>
+                          <div className="flex-1 min-w-0">
+                            <ScrollOnceTitle text={notif.title} className="text-sm font-black uppercase tracking-tight leading-tight" />
+                            <p className={cn("text-[10px] font-mono mt-0.5", theme === 'dark' ? "opacity-30" : "text-gray-400")}>
+                              {new Date(notif.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              {notif.gameTitle && ` · ${notif.gameTitle}`}
+                              {notif.status === 'applied' && ' · in attesa di conferma'}
+                              {notif.status === 'resolved' && ' · ✅ risolto'}
+                              {notif.status === 'failed' && ' · ❌ non risolto'}
+                            </p>
+                          </div>
+                          {!isDone && (
+                            <Focusable group="notifications" id={`notif-dismiss-${notif.id}`} onEnter={() => dismissNotification(notif.id)}>
+                              {(isFocused) => (
+                                <button className={cn(
+                                  "shrink-0 rounded-full transition-all",
+                                  isFocused ? "opacity-100 bg-white/15 p-0.5" : "opacity-20"
+                                )}><X size={12} /></button>
+                              )}
+                            </Focusable>
+                          )}
+                        </div>
+                        <p className="text-[13px] leading-relaxed opacity-70 mb-3">{notif.body}</p>
+                        {notif.rawLog && (
+                          <div className="mb-3">
+                            <Focusable group="notifications" id={`notif-log-${notif.id}`} onEnter={() => setExpandedNotifId(prev => prev === notif.id ? null : notif.id)}>
+                              {(isFocused) => (
+                                <button className={cn(
+                                  "flex items-center gap-1 text-[10px] font-black uppercase tracking-widest transition-opacity",
+                                  isFocused ? "opacity-100" : "opacity-40"
+                                )}>
+                                  <ChevronDown size={10} className={cn("transition-transform", expandedNotifId === notif.id && "rotate-180")} />
+                                  Log tecnico
+                                </button>
+                              )}
+                            </Focusable>
+                            {expandedNotifId === notif.id && (
+                              <pre className={cn("mt-2 p-3 rounded-xl text-[10px] font-mono leading-relaxed overflow-x-auto max-h-32", theme === 'dark' ? "bg-black/40 text-white/50" : "bg-gray-100 text-gray-600")}>{notif.rawLog}</pre>
+                            )}
+                          </div>
+                        )}
+                        {!isDone && (
+                          <div className="flex gap-2">
+                            {notif.status === 'applied' ? (
+                              <>
+                                <Focusable group="notifications" id={`notif-ok-${notif.id}`} onEnter={() => resolveNotification(notif.id, true)}>
+                                  {(isFocused) => (
+                                    <button className={cn(
+                                      "flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all",
+                                      isFocused ? "bg-green-500 scale-[1.03]" : "bg-green-600"
+                                    )}>✅ Ha funzionato</button>
+                                  )}
+                                </Focusable>
+                                <Focusable group="notifications" id={`notif-ko-${notif.id}`} onEnter={() => resolveNotification(notif.id, false)}>
+                                  {(isFocused) => (
+                                    <button className={cn(
+                                      "flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all",
+                                      isFocused ? "bg-red-600 scale-[1.03]" : "bg-red-700/60"
+                                    )}>❌ Non ha funzionato</button>
+                                  )}
+                                </Focusable>
+                              </>
+                            ) : (
+                              <>
+                                {notif.primaryAction && (
+                                  <Focusable
+                                    group="notifications"
+                                    id={`notif-primary-${notif.id}`}
+                                    onEnter={() => {
+                                      if (notif.primaryAction?.handler === 'open_section') {
+                                        const section = notif.primaryAction.params?.section;
+                                        if (section === 'accounts' || section === 'plugins') {
+                                          setShowNotifications(false);
+                                          setShowSettings(true);
+                                          setActiveSettingsTab(section);
+                                        }
+                                      }
+                                      setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, status: 'applied' } : n));
+                                    }}
+                                  >
+                                    {(isFocused) => (
+                                      <button className={cn(
+                                        "flex-1 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-white transition-all",
+                                        isFocused ? "bg-blue-500 scale-[1.03]" : "bg-blue-600"
+                                      )}>{notif.primaryAction.label}</button>
+                                    )}
+                                  </Focusable>
+                                )}
+                                <Focusable group="notifications" id={`notif-secondary-${notif.id}`} onEnter={() => dismissNotification(notif.id)}>
+                                  {(isFocused) => (
+                                    <button className={cn(
+                                      "flex-1 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all",
+                                      isFocused ? "bg-white/25" : "bg-white/10"
+                                    )}>{notif.secondaryAction?.label ?? 'Chiudi'}</button>
+                                  )}
+                                </Focusable>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Quick Menu Overlay */}
+        <AnimatePresence>
+          {viewState === 'quick-menu' && (
+            <motion.div
+              initial={{ x: -400 }}
+              animate={{ x: 0 }}
+              exit={{ x: -400 }}
+              className={cn(
+                "absolute top-0 left-0 bottom-0 w-96 z-50 p-12 flex flex-col shadow-2xl border-r",
+                theme === 'dark' ? "bg-[#0b0c0f] border-white/10" : "bg-white border-gray-200"
+              )}
+            >
+              <div className="flex items-center justify-between mb-16">
+                 <div className="flex items-center gap-3">
+                   <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
+                     <Settings size={20} className="text-white" />
+                   </div>
+                   <h2 className="text-3xl font-black italic tracking-tighter uppercase">Settings</h2>
+                 </div>
+                 <Focusable group="quick-menu" id="quick-menu-close" fallbackPriority={-1} onEnter={() => { setViewState('library'); setActiveGroup(null); }}>
+                   {(isFocused) => (
+                     <div className={cn(
+                       "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
+                       isFocused && "scale-110 bg-red-600 border-red-600 text-white"
+                     )}>
+                       <X size={20} />
+                     </div>
+                   )}
+                 </Focusable>
+              </div>
+
+              <div className="space-y-4">
+                <OptionItem group="quick-menu" id="opt-accounts" icon={Gamepad2} label="Manage Accounts" onClick={() => { setShowSettings(true); setActiveGroup('settings'); setActiveSettingsTab('accounts'); setFocusedId(null); setTimeout(() => setFocusedId('settings-tab-accounts'), 80); }} />
+                <OptionItem group="quick-menu" id="opt-avatar" icon={User} label="Avatar" onClick={() => { setShowAvatarLibrary(true); setActiveGroup('avatar-library'); setTimeout(() => setFocusedId('avatar-0'), 80); }} />
+                <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label="Gamescope Mode" value={isGamescope ? "On" : "Off"} onClick={() => { setIsGamescope(!isGamescope); play('select'); }} />
+                <OptionItem group="quick-menu" id="opt-theme" icon={theme === 'dark' ? Sun : Moon} label="Toggle Theme" value={theme} onClick={toggleTheme} />
+                {dedicatedSession ? (
+                  <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label="Console Mode" value="Torna al Desktop" onClick={switchToDesktop} />
+                ) : (
+                  <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label="Display Mode" value={displayMode === 'window' ? 'Windowed' : displayMode === 'borderless' ? 'Console Mode' : 'Full Screen'} onClick={cycleDisplayMode} />
+                )}
+                <OptionItem
+                  group="quick-menu"
+                  id="opt-exit"
+                  icon={Power}
+                  label="Exit"
+                  value={pendingExit ? "Confirm A" : ""}
+                  onClick={() => {
+                    if (pendingExit) {
+                      setPendingExit(false);
+                      handleExit();
+                    } else {
+                      setPendingExit(true);
+                    }
+                  }}
+                />
+                {/* Audio UI, Input Profile, System Runner — non ancora implementati, nascosti */}
+              </div>
+
+              <div className="mt-auto opacity-30 italic text-[10px] font-bold tracking-[0.4em] uppercase">
+                 X-Launcher Core {appVersion}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+
+      {/* Settings Overlay */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className={cn("absolute inset-0 z-[100] backdrop-blur-3xl flex items-center justify-center p-20", theme === 'dark' ? "bg-black/95" : "bg-white/80")}
+          >
+            <div className={cn(
+              // v1.1.7 — stesso bug strutturale già risolto in v1.1.5
+              // per l'overlay Game Options: vh fa riferimento al viewport
+              // REALE del browser, non al canvas virtuale 1920×1080 di
+              // ScalingContainer.tsx. Qui era persino più severo — h-[80vh]
+              // è un'altezza FISSA (non un tetto massimo): a 2560×1440
+              // forzava 1152px reali dentro un contenitore di soli 1080px
+              // di layout, eccedendo sempre, indipendentemente dal
+              // contenuto della tab attiva. Percentuale invece di vh: si
+              // risolve contro il contenitore reale, corretto a qualunque
+              // risoluzione.
+              "w-full max-w-5xl rounded-3xl overflow-hidden flex flex-col shadow-2xl h-[80%]",
+              theme === 'dark' ? "bg-[#12141a] border border-white/10" : "bg-white border border-gray-200"
+            )}>
+              <div className={cn("p-10 border-b flex justify-between items-center", theme === 'dark' ? "border-white/5" : "border-gray-200")}>
+                <div className="flex items-center gap-6">
+                  <div className={cn("flex p-1 rounded-2xl", theme === 'dark' ? "bg-white/5" : "bg-gray-100")}>
+                    <Focusable group="settings-tabs" id="settings-tab-accounts" onEnter={() => {
+                      setActiveSettingsTab('accounts');
+                      const target = getFirstFocusableForSettingsTabRef.current('accounts');
+                      setTimeout(() => setFocusedId(target ?? 'settings-tab-accounts'), 50);
+                    }}>
+                      {(isFocused) => (
+                        <button className={cn(
+                          "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
+                          activeSettingsTab === 'accounts' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                        )}>Store Accounts</button>
+                      )}
+                    </Focusable>
+                    <Focusable group="settings-tabs" id="settings-tab-engine" onEnter={() => {
+                      setActiveSettingsTab('engine');
+                      const target = getFirstFocusableForSettingsTabRef.current('engine');
+                      setTimeout(() => setFocusedId(target ?? 'settings-tab-engine'), 50);
+                    }}>
+                      {(isFocused) => (
+                        <button className={cn(
+                          "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
+                          activeSettingsTab === 'engine' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                        )}>System</button>
+                      )}
+                    </Focusable>
+                    <Focusable group="settings-tabs" id="settings-tab-plugins" onEnter={() => {
+                      setActiveSettingsTab('plugins');
+                      const target = getFirstFocusableForSettingsTabRef.current('plugins');
+                      setTimeout(() => setFocusedId(target ?? 'settings-tab-plugins'), 50);
+                    }}>
+                      {(isFocused) => (
+                        <button className={cn(
+                          "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
+                          activeSettingsTab === 'plugins' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                        )}>Plugins</button>
+                      )}
+                    </Focusable>
+                    <Focusable group="settings-tabs" id="settings-tab-input" onEnter={() => {
+                      setActiveSettingsTab('input');
+                      const target = getFirstFocusableForSettingsTabRef.current('input');
+                      setTimeout(() => setFocusedId(target ?? 'settings-tab-input'), 50);
+                    }}>
+                      {(isFocused) => (
+                        <button className={cn(
+                          "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
+                          activeSettingsTab === 'input' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                        )}>Input</button>
+                      )}
+                    </Focusable>
+                    {/* v0.99.90 — Step 15d: tab visibile solo se Ollama è
+                        raggiungibile (verificato al boot e ad ogni apertura
+                        di Impostazioni) — "per non appesantire la
+                        navigazione di elementi inutili" quando Ollama non
+                        è nemmeno installato/in esecuzione. */}
+                    {ollamaAvailable && (
+                      <Focusable group="settings-tabs" id="settings-tab-ai-models" onEnter={() => {
+                        setActiveSettingsTab('ai-models');
+                        const target = getFirstFocusableForSettingsTabRef.current('ai-models');
+                        setTimeout(() => setFocusedId(target ?? 'settings-tab-ai-models'), 50);
+                      }}>
+                        {(isFocused) => (
+                          <button className={cn(
+                            "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
+                            activeSettingsTab === 'ai-models' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                          )}>AI Advisor</button>
+                        )}
+                      </Focusable>
+                    )}
+                  </div>
+                </div>
+                {(() => {
+                  // v1.1.8 — stesso bug già risolto in v1.1.3 per l'overlay
+                  // Game Options: il pulsante di chiusura (condiviso da
+                  // tutte le tab di questo modal) non aveva mai un
+                  // neighbors.down esplicito. Qui serve dipendente dalla
+                  // tab attiva, non un id fisso. Calcolato solo per le tab
+                  // di cui il primo elemento è determinabile con certezza
+                  // senza dipendere da stato per-riga (es. connessione
+                  // store) — 'accounts' resta non coperta, invariata.
+                  let firstTabContentId: string | undefined;
+                  if (activeSettingsTab === 'engine') {
+                    firstTabContentId = availableRunners.length > 0
+                      ? `runner-uninstall-${(availableRunners[0] as any).id || availableRunners[0]}`
+                      : 'runners-refresh';
+                  } else if (activeSettingsTab === 'plugins') {
+                    firstTabContentId = pluginRegistry.length > 0 ? `plugin-toggle-${pluginRegistry[0].id}` : undefined;
+                  } else if (activeSettingsTab === 'input') {
+                    firstTabContentId = inputPlugins.length > 0 ? `input-plugin-toggle-${inputPlugins[0].id}` : undefined;
+                  } else if (activeSettingsTab === 'ai-models') {
+                    firstTabContentId = 'ai-budget-input';
+                  }
+                  return (
+                <Focusable
+                  group="settings"
+                  id="close-settings"
+                  fallbackPriority={-1}
+                  neighbors={{ down: firstTabContentId }}
+                  onEnter={() => { setShowSettings(false); setActiveGroup('quick-menu'); setFocusedId('opt-accounts'); }}
+                >
+                  {(isFocused) => (
+                    <button className={cn(
+                      "w-12 h-12 rounded-full flex items-center justify-center transition-all",
+                      isFocused ? "bg-red-600 text-white scale-110" : theme === 'dark' ? "bg-white/5" : "bg-gray-100"
+                    )}>
+                      <X size={24} />
+                    </button>
+                  )}
+                </Focusable>
+                  );
+                })()}
+              </div>
+
+              {/* v1.1.7 — min-h-0 necessario: senza, un figlio flex con
+                  overflow-y-auto non si comprime mai sotto l'altezza del
+                  proprio contenuto (stesso fix di v1.1.4). */}
+              <div ref={settingsBodyRef} className="flex-1 min-h-0 overflow-y-auto p-12 custom-scrollbar">
+                {activeSettingsTab === 'accounts' ? (
+                  /* ── Store Accounts tab ── */
+                  <div className="grid grid-cols-2 gap-8">
+                    {stores.filter(s => {
+                      const ps = pluginStateMap.get(s.id);
+                      return !ps || ps.enabled;
+                    }).map(store => {
+                      const isWaiting = authPolling === store.id;
+                      const msg       = authMessage[store.id];
+                      const url       = authUrl[store.id];
+                      const noLogin   = ['Amazon Games', 'Battle.net', 'Classic Console'].includes(store.id);
+                      // Steam ha login (rileva il client locale) ma nessun
+                      // vero concetto di logout — non è un account OAuth.
+                      // Il backend già risponde success:false di default per
+                      // i plugin che non sovrascrivono logout(), questo è
+                      // solo per evitare di mostrare un controllo che
+                      // fallirebbe sempre.
+                      const noLogout  = store.id === 'Steam';
+                      const isRowFocused = focusedId === `store-connect-${store.id}` || focusedId === `store-cancel-${store.id}` || focusedId === `store-unlink-${store.id}`;
+                      // Conteggi reali derivati da allGamesForAccountCounts
+                      // (sempre non filtrato — vedi v1.1.20), distinti da
+                      // gameCount (backend, logica composita store+plugin):
+                      // synced = tutti i titoli noti per questo store,
+                      // installed = quanti di quelli sono effettivamente
+                      // presenti su disco.
+                      const storeGames    = allGamesForAccountCounts.filter(g => g.store === store.id);
+                      const syncedCount   = storeGames.length;
+                      const installedCount = storeGames.filter(g => g.isInstalled).length;
+                      return (
+                        <div key={store.id} className={cn(
+                          "p-8 rounded-3xl border flex flex-col transition-all",
+                          isRowFocused
+                            ? "ring-2 ring-blue-400 border-blue-400 scale-[1.005]"
+                            : store.isConnected
+                              ? "bg-green-500/5 border-green-500/20"
+                              : isWaiting
+                                ? "bg-blue-500/5 border-blue-500/30"
+                                : theme === 'dark'
+                                  ? "bg-white/5 border-white/5 hover:bg-white/[0.07]"
+                                  : "bg-gray-50 border-gray-200 hover:bg-gray-100"
+                        )}>
+                          {/* Header */}
+                          <div className="flex justify-between items-start mb-6">
+                            <div className="flex items-center gap-4">
+                              <div className={cn(
+                                "w-12 h-12 rounded-2xl flex items-center justify-center shadow-2xl",
+                                store.isConnected ? "bg-green-600 shadow-green-500/20"
+                                  : isWaiting    ? "bg-blue-600 shadow-blue-500/20"
+                                  : theme === 'dark' ? "bg-white/10" : "bg-gray-200"
+                              )}>
+                                <Gamepad2 size={20} />
+                              </div>
+                              <div>
+                                <h4 className="text-lg font-black italic uppercase tracking-tighter">{store.name}</h4>
+                                <span className={cn(
+                                  "text-[10px] font-black uppercase tracking-widest italic",
+                                  store.isConnected ? "text-green-400"
+                                    : isWaiting    ? "text-blue-400"
+                                    : "text-red-400"
+                                )}>
+                                  {store.isConnected ? `Session Active · Synced: ${syncedCount} · Installed: ${installedCount}`
+                                    : isWaiting    ? "In attesa del browser..."
+                                    : "Disconnected"}
+                                </span>
+                              </div>
+                            </div>
+                            {store.isConnected && (
+                              <div className="px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full text-[9px] font-black text-green-400 uppercase tracking-widest italic">
+                                Synced
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Spinner polling */}
+                          {isWaiting && (
+                            <div className="flex items-center gap-3 mb-4 px-3 py-3 bg-blue-500/10 rounded-xl border border-blue-500/20">
+                              <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                              <span className="text-[10px] text-blue-300 font-mono">In attesa del completamento da terminale…</span>
+                            </div>
+                          )}
+
+                          {/* Messaggio stato */}
+                          {msg && (
+                            <p className={cn(
+                              "text-[10px] mb-4 font-mono leading-relaxed px-1",
+                              msg.startsWith('✅') ? "text-green-400"
+                                : msg.startsWith('❌') || msg.startsWith('⏱') ? "text-red-400"
+                                : "text-white/60"
+                            )}>
+                              {msg}
+                            </p>
+                          )}
+
+                          {/* Action button */}
+                          <div className="mt-auto">
+                            {noLogin ? (
+                              <div className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center opacity-40 cursor-default", theme === 'dark' ? "bg-white/5" : "bg-gray-100")}>
+                                No login required
+                              </div>
+                            ) : store.isConnected ? (
+                              noLogout ? (
+                                <div className="w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center bg-green-500/10 text-green-400 border border-green-500/20">
+                                  ✓ Linked Account
+                                </div>
+                              ) : (
+                                <Focusable
+                                  group="settings"
+                                  id={`store-unlink-${store.id}`}
+                                  onEnter={() => {
+                                    if (pendingUnlink === store.id) {
+                                      // Seconda pressione: esegue la disconnessione
+                                      setPendingUnlink(null);
+                                      handleLogout(store.id);
+                                    } else {
+                                      // Prima pressione: passa allo stato di conferma
+                                      setPendingUnlink(store.id);
+                                      play('select');
+                                    }
+                                  }}
+                                >
+                                  {(isFocused) => (
+                                    <button className={cn(
+                                      "w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all border",
+                                      pendingUnlink === store.id
+                                        ? "bg-red-600 text-white border-red-600 animate-pulse"
+                                        : isFocused
+                                          ? "bg-green-500/20 text-green-300 border-green-400"
+                                          : "bg-green-500/10 text-green-400 border-green-500/20"
+                                    )}>
+                                      {pendingUnlink === store.id ? 'Confermi disconnessione? Premi A' : '✓ Linked Account'}
+                                    </button>
+                                  )}
+                                </Focusable>
+                              )
+                            ) : isWaiting ? (
+                              <Focusable group="settings" id={`store-cancel-${store.id}`} onEnter={() => { setAuthPolling(null); setAuthMessage(prev => ({ ...prev, [store.id]: '' })); }}>
+                                {(isFocused) => (
+                                  <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
+                                    isFocused ? "bg-red-600 text-white" : theme === 'dark' ? "bg-white/5" : "bg-gray-100 text-gray-800"
+                                  )}>Annulla</button>
+                                )}
+                              </Focusable>
+                            ) : (
+                              <Focusable group="settings" id={`store-connect-${store.id}`} onEnter={() => handleLogin(store.id)}>
+                                {(isFocused) => (
+                                  <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
+                                    isFocused ? "bg-blue-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                  )}>Connect Store</button>
+                                )}
+                              </Focusable>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : activeSettingsTab === 'engine' ? (
+                  /* ── System tab ── */
+                  (() => {
+                    // v1.1.7 — calcolato una sola volta qui, riusato sia
+                    // dalla lista Runner installabili (confine di uscita)
+                    // sia da Tool di sistema (confine di ingresso in
+                    // risalita) — prima duplicato, e la copia usata per
+                    // "up" da Tool di sistema semplicemente non esisteva,
+                    // causando lo stesso bug asimmetrico visto sopra ma
+                    // sul lato opposto (risalita invece di discesa).
+                    let lastInstallableFocusableIdx = -1;
+                    installableRunners.forEach((r: any, i: number) => {
+                      const alreadyInst = r.installed || availableRunners.some((a: any) => a.id === r.id);
+                      if (!alreadyInst) lastInstallableFocusableIdx = i;
+                    });
+                    const lastInstallableFocusableId = lastInstallableFocusableIdx !== -1
+                      ? `runner-install-${installableRunners[lastInstallableFocusableIdx].id}`
+                      : undefined;
+                    // Fallback se nessun runner installabile ha un vero
+                    // Focusable (lista vuota o tutti già installati):
+                    // risale invece all'ultima riga di Runner installati.
+                    const systemToolsUpNeighbor = lastInstallableFocusableId
+                      ?? (availableRunners.length > 0 ? `runner-uninstall-${availableRunners[availableRunners.length - 1].id}` : undefined);
+
+                    return (
+                  <div className="space-y-10">
+
+                    {/* Runner installati */}
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Runner installati</h3>
+                      <div className="space-y-2">
+                        {availableRunners.length === 0 && (
+                          <p className="text-xs opacity-40 italic">Nessun runner Proton trovato in ~/.local/share/Steam/</p>
+                        )}
+                        {availableRunners.map((r: any, idx: number) => {
+                          const isPendingConfirm = pendingRunnerAction?.id === r.id && pendingRunnerAction.action === 'uninstall';
+                          const isUninstalling   = runnerUninstalling === r.id;
+                          const uninstallLog     = runnerUninstallProgress[r.id];
+                          const isRowFocused     = focusedId === `runner-uninstall-${r.id}`;
+                          // L'ultima riga della lista deve poter scendere
+                          // direttamente al pulsante Aggiorna della sezione
+                          // successiva: lo scoring geometrico normale lo
+                          // salta sempre, essendo piccolo e defilato a
+                          // destra nell'header sottostante.
+                          const isLastInstalled = idx === availableRunners.length - 1;
+                          return (
+                            <div key={r.id} className={cn(
+                              "rounded-xl overflow-hidden transition-all",
+                              isRowFocused ? "ring-2 ring-blue-400" : "",
+                              theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                            )}>
+                              <div className="flex items-center gap-3 px-4 py-3">
+                                <Cpu size={14} className="text-blue-400 shrink-0" />
+                                <span className="text-xs font-black uppercase tracking-tighter flex-1">{r.id}</span>
+                                <span className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{r.version}</span>
+                                <Focusable
+                                  group="settings"
+                                  id={`runner-uninstall-${r.id}`}
+                                  neighbors={isLastInstalled ? { down: 'runners-refresh' } : undefined}
+                                  onEnter={() => {
+                                    if (isUninstalling) return;
+                                    if (isPendingConfirm) {
+                                      setPendingRunnerAction(null);
+                                      handleUninstallRunner(r.id);
+                                    } else {
+                                      setPendingRunnerAction({ id: r.id, action: 'uninstall' });
+                                      play('select');
+                                    }
+                                  }}
+                                >
+                                  {(isFocused) => (
+                                    <button
+                                      disabled={isUninstalling}
+                                      className={cn(
+                                        "relative overflow-hidden px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border min-w-[84px] text-center transition-all",
+                                        isUninstalling
+                                          ? "border-red-500/30 text-white/80"
+                                          : isPendingConfirm
+                                            ? "bg-red-600 border-red-600 text-white animate-pulse"
+                                            : isFocused
+                                              ? "bg-green-500/20 border-green-400 text-green-300"
+                                              : "bg-green-500/10 border-green-500/20 text-green-400"
+                                      )}
+                                    >
+                                      {/* Barra indeterminata, riempie da dx verso sx durante la disinstallazione */}
+                                      {isUninstalling && (
+                                        <span className="absolute inset-y-0 bg-red-500/40 animate-[runnerProgressRtl_1.2s_ease-in-out_infinite]" />
+                                      )}
+                                      <span className="relative z-10">
+                                        {isUninstalling ? 'removing…' : isPendingConfirm ? 'Confirm A' : 'installed'}
+                                      </span>
+                                    </button>
+                                  )}
+                                </Focusable>
+                              </div>
+                              {uninstallLog && uninstallLog.length > 0 && (
+                                <div className="px-4 pb-3 space-y-0.5">
+                                  {uninstallLog.map((line, i) => (
+                                    <p key={i} className={cn("text-[9px] font-mono leading-relaxed", theme === 'dark' ? "text-white/40" : "text-gray-500")}>{line}</p>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Runner installabili */}
+                    <div>
+                      <div className="flex items-center gap-3 mb-3">
+                        <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30">Runner installabili</h3>
+                        <Focusable
+                          group="settings"
+                          id="runners-refresh"
+                          neighbors={{
+                            down: installableRunners[0] ? `runner-install-${installableRunners[0].id}` : undefined,
+                            up:   availableRunners.length > 0 ? `runner-uninstall-${availableRunners[availableRunners.length - 1].id}` : undefined,
+                          }}
+                          onEnter={() => {
+                            fetch('/api/runners/installable').then(r => r.json()).then(setInstallableRunners).catch(() => {});
+                            play('select');
+                          }}
+                        >
+                          {(isFocused) => (
+                            <button
+                              className={cn(
+                                "ml-auto text-[9px] font-black uppercase tracking-widest transition-all px-2 py-1 rounded-lg",
+                                isFocused
+                                  ? "bg-red-600/20 text-red-400"
+                                  : theme === 'dark' ? "text-white/30 hover:bg-red-600/20 hover:text-red-400" : "text-gray-400 hover:bg-red-600/20 hover:text-red-400"
+                              )}
+                            >
+                              ↻ Aggiorna
+                            </button>
+                          )}
+                        </Focusable>
+                      </div>
+
+                      {/* Banner protonup / Lutris */}
+                      {(() => {
+                        const hasProtonup = !!systemTools['protonup'];
+                        const hasLutris   = !!systemTools['lutris'];
+                        if (hasProtonup && hasLutris) return (
+                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-green-500/5 border border-green-500/20">
+                            <div className="w-2 h-2 rounded-full bg-green-500 shrink-0" />
+                            <div>
+                              <p className="text-[10px] font-black text-green-400">ProtonUp-Qt e Lutris rilevati</p>
+                              <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                                I runner verranno installati via <span className={cn(theme === 'dark' ? "text-white/60" : "text-gray-600")}>protonup</span> · Lutris disponibile per gestione avanzata
+                              </p>
+                            </div>
+                          </div>
+                        );
+                        if (hasProtonup) return (
+                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
+                            <div className="w-2 h-2 rounded-full bg-blue-400 shrink-0" />
+                            <div>
+                              <p className={cn("text-[10px] font-black", theme === 'dark' ? "text-blue-300" : "text-blue-600")}>ProtonUp-Qt rilevato</p>
+                              <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                                Runner installati via <span className="text-white/60">protonup</span> ·{' '}
+                                Lutris non trovato —{' '}
+                                <code className="text-yellow-400/80">yay -S lutris</code> per gestione avanzata
+                              </p>
+                            </div>
+                          </div>
+                        );
+                        if (hasLutris) return (
+                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
+                            <div className="w-2 h-2 rounded-full bg-blue-400 shrink-0" />
+                            <div>
+                              <p className="text-[10px] font-black text-blue-300">Lutris rilevato · ProtonUp-Qt non trovato</p>
+                              <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                                Download runner via GitHub Releases (fallback) ·{' '}
+                                <code className="text-yellow-400/80">yay -S protonup-qt</code> per gestione ottimale
+                              </p>
+                            </div>
+                          </div>
+                        );
+                        // nessuno dei due
+                        return (
+                          <div className="flex gap-3 mb-4 px-4 py-3 rounded-xl bg-yellow-500/5 border border-yellow-500/30">
+                            <div className="w-2 h-2 rounded-full bg-yellow-400 shrink-0 mt-1" />
+                            <div className="space-y-2">
+                              <p className="text-[10px] font-black text-yellow-300">
+                                ProtonUp-Qt e Lutris non trovati
+                              </p>
+                              <p className={cn("text-[9px] font-mono leading-relaxed", theme === 'dark' ? "text-white/50" : "text-gray-600")}>
+                                X-Launcher userà GitHub Releases come fallback, ma l'installazione potrebbe essere più lenta.
+                                Per la gestione ottimale dei runner installa almeno uno dei due:
+                              </p>
+                              <div className="flex flex-col gap-1 mt-1">
+                                <div className="flex items-center gap-2">
+                                  <span className={cn("text-[8px] uppercase font-black w-16", theme === 'dark' ? "text-white/30" : "text-gray-500")}>ProtonUp</span>
+                                  <code className="text-[9px] font-mono text-green-400/80 bg-black/30 px-2 py-0.5 rounded">yay -S protonup-qt</code>
+                                  <span className="text-[8px] text-white/25 italic">— consigliato</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className={cn("text-[8px] uppercase font-black w-16", theme === 'dark' ? "text-white/30" : "text-gray-500")}>Lutris</span>
+                                  <code className="text-[9px] font-mono text-green-400/80 bg-black/30 px-2 py-0.5 rounded">yay -S lutris</code>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      <div className="space-y-2">
+                        {installableRunners.length === 0 && (
+                          <p className="text-xs opacity-40 italic">Caricamento versioni disponibili…</p>
+                        )}
+                        {installableRunners.map((r: any, idx: number) => {
+                          const isInst  = r.installed || availableRunners.some((a: any) => a.id === r.id);
+                          const isThisInstalling = runnerInstalling === r.id;
+                          const isPendingConfirm  = pendingRunnerAction?.id === r.id && pendingRunnerAction.action === 'install';
+                          const isRowFocused      = focusedId === `runner-install-${r.id}`;
+                          const progress = runnerInstallProgress[r.id];
+                          const isFirstInstallable = idx === 0;
+                          // v1.1.6 — mancava il confine simmetrico: il
+                          // ritorno (disk-usage-refresh → up →
+                          // system-tools-area) era già esplicito, ma
+                          // l'andata no — scendendo dall'ultima riga
+                          // installabile lo scoring geometrico saltava
+                          // per intero "Tool di sistema" (una card larga
+                          // e bassa) atterrando direttamente su
+                          // "disk-usage-refresh" più sotto.
+                          const isLastInstallable = idx === lastInstallableFocusableIdx;
+                          return (
+                            <div key={r.id} className={cn(
+                              "rounded-xl overflow-hidden transition-all",
+                              isRowFocused ? "ring-2 ring-blue-400" : "",
+                              "bg-white/5 border border-white/5"
+                            )}>
+                              <div className="flex items-center gap-3 px-4 py-3">
+                                <Package size={14} className={cn("shrink-0", isInst ? "text-green-400" : "text-white/30")} />
+                                <span className="text-xs font-black uppercase tracking-tighter flex-1">{r.id}</span>
+                                <span className={cn("text-[8px] font-mono px-2 py-0.5 rounded-full border", theme === 'dark' ? "text-white/30 bg-white/5 border-white/10" : "text-gray-500 bg-gray-100 border-gray-200")}>
+                                  via {r.source}
+                                </span>
+                                {isInst ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-green-500/10 border border-green-500/20 text-[8px] font-black text-green-400 uppercase">installed</span>
+                                ) : (
+                                  <Focusable
+                                    group="settings"
+                                    id={`runner-install-${r.id}`}
+                                    neighbors={{
+                                      up: isFirstInstallable ? 'runners-refresh' : undefined,
+                                      down: isLastInstallable ? 'system-tools-area' : undefined,
+                                    }}
+                                    onEnter={() => {
+                                      if (runnerInstalling) return;
+                                      if (isPendingConfirm) {
+                                        setPendingRunnerAction(null);
+                                        handleInstallRunner(r.id);
+                                      } else {
+                                        setPendingRunnerAction({ id: r.id, action: 'install' });
+                                        play('select');
+                                      }
+                                    }}
+                                  >
+                                    {(isFocused) => (
+                                      <button
+                                        disabled={!!runnerInstalling}
+                                        className={cn(
+                                          "relative overflow-hidden px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border min-w-[84px] text-center transition-all",
+                                          isThisInstalling
+                                            ? "border-blue-500/30 text-white/80"
+                                            : runnerInstalling
+                                              ? "opacity-30 cursor-not-allowed border-white/10"
+                                              : isPendingConfirm
+                                                ? "bg-blue-600 border-blue-600 text-white animate-pulse"
+                                                : isFocused
+                                                  ? "bg-blue-600 text-white border-blue-600"
+                                                  : "border-blue-500/40 text-blue-400 hover:bg-blue-600 hover:text-white hover:border-blue-600"
+                                        )}
+                                      >
+                                        {/* Barra indeterminata, riempie da sx verso dx durante l'installazione */}
+                                        {isThisInstalling && (
+                                          <span className="absolute inset-y-0 bg-blue-500/40 animate-[runnerProgressLtr_1.2s_ease-in-out_infinite]" />
+                                        )}
+                                        <span className="relative z-10">
+                                          {isThisInstalling ? 'installing…' : isPendingConfirm ? 'Confirm A' : 'Installa'}
+                                        </span>
+                                      </button>
+                                    )}
+                                  </Focusable>
+                                )}
+                              </div>
+                              {/* Progress log */}
+                              {progress && progress.length > 0 && (
+                                <div className="px-4 pb-3 space-y-0.5">
+                                  {progress.map((line, i) => (
+                                    <p key={i} className={cn("text-[9px] font-mono leading-relaxed", theme === 'dark' ? "text-white/40" : "text-gray-500")}>{line}</p>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Tool di sistema */}
+                    <Focusable
+                      group="settings"
+                      id="system-tools-area"
+                      // v1.1.7 — mancava questo confine: down esisteva da
+                      // sempre, ma non l'analogo up (risalendo da qui, lo
+                      // scoring geometrico atterrava su "runners-refresh"
+                      // invece che sull'ultima riga installabile).
+                      neighbors={{ down: 'disk-usage-refresh', up: systemToolsUpNeighbor }}
+                      onEnter={() => {}}
+                    >
+                      {(isFocused) => (
+                        <div className={cn(
+                          // v1.1.6 — Tool di sistema è un widget puramente
+                          // informativo (onEnter no-op, nessuna azione
+                          // possibile): il focus resta un normale stop di
+                          // navigazione per continuità su/giù, ma senza
+                          // anello blu — quel segnale visivo è riservato
+                          // a ciò che si può davvero attivare con A.
+                          "rounded-2xl transition-all p-1"
+                        )}>
+                          <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Tool di sistema</h3>
+                          <div className="grid grid-cols-3 gap-3">
+                            {([
+                              ['wine',      'Wine'],
+                              ['protonup',  'ProtonUp-Qt'],
+                              ['lutris',    'Lutris'],
+                              ['steam',     'Steam'],
+                              ['mangohud',  'MangoHud'],
+                              ['gamemode',  'GameMode'],
+                              ['gamescope', 'Gamescope'],
+                              ['retroarch', 'RetroArch'],
+                              ['scummvm',   'ScummVM'],
+                              ['dosbox',    'DOSBox'],
+                              ['fsr',       'FSR (Wine ≥7)'],
+                              ['eac',       'EAC Runtime'],
+                              ['battleye',  'BattlEye Runtime'],
+                            ] as [string, string][]).map(([key, label]) => {
+                              const val = systemTools[key];
+                              const ok  = val === true || (typeof val === 'string' && val.length > 0);
+                              return (
+                                <div key={key} className={cn(
+                                  "flex items-center gap-2 px-3 py-2.5 rounded-xl border text-[10px] font-black uppercase tracking-widest",
+                                  ok
+                                    ? theme === 'dark' ? "bg-white/5 border-white/10 text-white/80" : "bg-gray-50 border-gray-200 text-gray-700"
+                                    : theme === 'dark' ? "bg-white/[0.02] border-white/5 text-white/25" : "bg-gray-100/50 border-gray-100 text-gray-400"
+                                )}>
+                                  <div className={cn("w-2 h-2 rounded-full shrink-0", ok ? "bg-green-500" : "bg-white/15")} />
+                                  {label}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </Focusable>
+
+                    {/* Spazio disco */}
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30">Spazio disco</h3>
+                        <Focusable
+                          group="settings"
+                          id="disk-usage-refresh"
+                          neighbors={{ down: 'disk-usage-area', up: 'system-tools-area' }}
+                          onEnter={() => { setSystemTabLoaded(false); play('select'); }}
+                        >
+                          {(isFocused) => (
+                            <button className={cn(
+                              "text-[9px] font-black uppercase tracking-widest transition-opacity",
+                              isFocused ? "opacity-100 text-blue-400" : "opacity-30 hover:opacity-80"
+                            )}>↻ Aggiorna</button>
+                          )}
+                        </Focusable>
+                      </div>
+                      <Focusable
+                        group="settings"
+                        id="disk-usage-area"
+                        neighbors={{ up: 'disk-usage-refresh' }}
+                        onEnter={() => {}}
+                      >
+                        {(isFocused) => (
+                          // v1.1.6 — stesso trattamento di Tool di sistema:
+                          // widget informativo, focus senza anello blu.
+                          <div className="rounded-2xl transition-all p-1">
+                            {diskUsage ? (
+                              <div className="px-5 py-4 rounded-xl bg-white/5 border border-white/5 space-y-3">
+                                <div className="flex items-center gap-4">
+                                  <Monitor size={16} className="text-blue-400 shrink-0" />
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex justify-between items-baseline mb-1">
+                                      <p className="text-sm font-black">{diskUsage.freeHuman} liberi</p>
+                                      <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                                        {diskUsage.usedPercent}% usato · {diskUsage.totalHuman} totali
+                                      </p>
+                                    </div>
+                                    <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                                      <div
+                                        className={cn(
+                                          "h-full rounded-full transition-all",
+                                          // Soglie sullo spazio LIBERO rimanente, non su quello usato:
+                                          // verde quando c'è ancora ampio margine, giallo quando resta
+                                          // il 30% della capacità totale, rosso quando si scende al 10%.
+                                          diskUsage.usedPercent >= 90 ? "bg-red-500"
+                                            : diskUsage.usedPercent >= 70 ? "bg-yellow-500"
+                                            : "bg-green-500"
+                                        )}
+                                        style={{ width: `${diskUsage.usedPercent}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                                <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/25" : "text-gray-400")}>
+                                  ~/Games: {diskUsage.usedHuman !== '—' ? diskUsage.usedHuman : 'cartella non ancora creata'}
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="px-5 py-4 rounded-xl bg-white/5 border border-white/5">
+                                <p className="text-[10px] font-mono opacity-40">Lettura in corso...</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </Focusable>
+                    </div>
+                  </div>
+                    );
+                  })()
+                ) : activeSettingsTab === 'plugins' ? (
+                  /* ── Plugins tab ── */
+                  <div className="space-y-6">
+                    <p className={cn("text-[10px] font-mono mb-8", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                      Attiva o disattiva i plugin store. I giochi installati rimangono visibili anche con il plugin disattivato, ma quelli con DRM non potranno essere avviati.
+                    </p>
+                    {pluginLoadError ? (
+                      <div className="flex flex-col gap-3">
+                        <p className="text-xs text-red-400 font-mono">{pluginLoadError}</p>
+                        <button
+                          onClick={loadPluginRegistry}
+                          className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-white/20 hover:bg-white/10 transition-all"
+                        >↻ Riprova</button>
+                      </div>
+                    ) : pluginRegistry.length === 0 ? (
+                      <div className="flex flex-col gap-3">
+                        <p className="text-xs opacity-40 italic">Caricamento plugin...</p>
+                        <button
+                          onClick={loadPluginRegistry}
+                          className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-white/20 hover:bg-white/10 transition-all"
+                        >↻ Ricarica</button>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-5">
+                        {pluginRegistry.map(plugin => {
+                          const isRowFocused = focusedId === `plugin-toggle-${plugin.id}`;
+                          return (
+                          <div key={plugin.id} className={cn(
+                            "p-6 rounded-2xl border flex flex-col gap-4 transition-all",
+                            isRowFocused
+                              ? "ring-2 ring-blue-400 border-blue-400 scale-[1.01]"
+                              : plugin.enabled
+                                ? theme === 'dark' ? "bg-blue-600/10 border-blue-500/30" : "bg-blue-50 border-blue-200"
+                                : theme === 'dark' ? "bg-white/5 border-white/5"          : "bg-gray-50 border-gray-200"
+                          )}>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-sm font-black truncate">{plugin.name}</span>
+                                  {plugin.drmFree ? (
+                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 shrink-0">DRM-free</span>
+                                  ) : (
+                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 border border-yellow-500/20 shrink-0">DRM</span>
+                                  )}
+                                </div>
+                                <p className={cn("text-[10px] leading-relaxed", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                                  {plugin.description}
+                                </p>
+                                {plugin.requiredTool && (
+                                  <p className={cn("text-[9px] font-mono mt-1", theme === 'dark' ? "text-white/20" : "text-gray-400")}>
+                                    richiede: {plugin.requiredTool}
+                                  </p>
+                                )}
+                              </div>
+                              {/* Toggle switch */}
+                              <Focusable group="settings" id={`plugin-toggle-${plugin.id}`} onEnter={async () => {
+                                const next = !plugin.enabled;
+                                await fetch(`/api/plugins/${encodeURIComponent(plugin.id)}`, {
+                                  method: 'PATCH',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ enabled: next }),
+                                });
+                                setPluginRegistry(prev => prev.map(p =>
+                                  p.id === plugin.id ? { ...p, enabled: next } : p
+                                ));
+                                play('select');
+                              }}>
+                                {(isFocused) => (
+                                  <button
+                                    className={cn(
+                                      "relative w-12 h-6 rounded-full transition-all duration-300 shrink-0 border",
+                                      plugin.enabled
+                                        ? "bg-blue-600 border-blue-500"
+                                        : isFocused
+                                          ? "bg-white/20 border-white/40"
+                                          : theme === 'dark' ? "bg-white/10 border-white/20" : "bg-gray-200 border-gray-300"
+                                    )}
+                                  >
+                                    <span className={cn(
+                                      "absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all duration-300",
+                                      plugin.enabled ? "left-6" : "left-0.5"
+                                    )} />
+                                  </button>
+                                )}
+                              </Focusable>
+                            </div>
+                          </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : activeSettingsTab === 'input' ? (
+                  /* ── Input tab ── */
+                  <div className="space-y-10">
+                    {/* Dispositivi connessi */}
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Dispositivi connessi</h3>
+                      {connectedDevices.length === 0 ? (
+                        <div className={cn(
+                          "flex items-center gap-3 px-5 py-4 rounded-xl border text-sm opacity-50",
+                          theme === 'dark' ? "bg-white/5 border-white/5" : "bg-gray-50 border-gray-200"
+                        )}>
+                          <Gamepad size={16} />
+                          <span className="text-xs font-medium">Nessun controller rilevato</span>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {connectedDevices.map(dev => (
+                            <div key={dev.index} className={cn(
+                              "flex items-center gap-4 px-5 py-4 rounded-xl border",
+                              theme === 'dark' ? "bg-white/5 border-white/5" : "bg-gray-50 border-gray-200"
+                            )}>
+                              <Gamepad size={16} className="text-blue-400 shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-black truncate">{dev.id}</p>
+                                <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                                  Plugin assegnato: {dev.pluginId}
+                                  {dev.vendorId ? ` · VID: 0x${dev.vendorId.toString(16).padStart(4,'0').toUpperCase()}` : ''}
+                                </p>
+                              </div>
+                              <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
+                                connesso
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Plugin input */}
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Plugin input</h3>
+                      <div className="grid grid-cols-2 gap-4">
+                        {inputPlugins.map(plugin => {
+                          const isRowFocused = focusedId === `input-plugin-toggle-${plugin.id}`;
+                          return (
+                          <div key={plugin.id} className={cn(
+                            "p-5 rounded-2xl border flex items-center gap-4 transition-all",
+                            isRowFocused
+                              ? "ring-2 ring-blue-400 border-blue-400 scale-[1.01]"
+                              : plugin.enabled
+                                ? theme === 'dark' ? "bg-blue-600/10 border-blue-500/30" : "bg-blue-50 border-blue-200"
+                                : theme === 'dark' ? "bg-white/5 border-white/5"          : "bg-gray-50 border-gray-200"
+                          )}>
+                            <Gamepad size={18} className={plugin.enabled ? "text-blue-400" : "opacity-30"} />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-black">{plugin.name}</p>
+                              <p className={cn("text-[9px] mt-0.5 leading-relaxed", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                                {plugin.description}
+                              </p>
+                            </div>
+                            <Focusable group="settings" id={`input-plugin-toggle-${plugin.id}`} onEnter={() => {
+                              InputManager.setPluginEnabled(plugin.id, !plugin.enabled);
+                              setInputPlugins(InputManager.plugins.map(p => ({
+                                id: p.id, name: p.name, description: p.description,
+                                vendorIds: p.vendorIds, enabled: p.enabled,
+                              })));
+                              play('select');
+                            }}>
+                              {(isFocused) => (
+                                <button
+                                  className={cn(
+                                    "relative w-12 h-6 rounded-full transition-all duration-300 shrink-0 border",
+                                    plugin.enabled
+                                      ? "bg-blue-600 border-blue-500"
+                                      : isFocused
+                                        ? "bg-white/20 border-white/40"
+                                        : theme === 'dark' ? "bg-white/10 border-white/20" : "bg-gray-200 border-gray-300"
+                                  )}
+                                >
+                                  <span className={cn(
+                                    "absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all duration-300",
+                                    plugin.enabled ? "left-6" : "left-0.5"
+                                  )} />
+                                </button>
+                              )}
+                            </Focusable>
+                          </div>
+                          );
+                        })}
+                      </div>
+                      <p className={cn("text-[9px] font-mono mt-4 opacity-50", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                        Il plugin Generico è il fallback per controller non riconosciuti e non dovrebbe essere disabilitato.
+                      </p>
+                    </div>
+
+                    {/* Test input live */}
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Test controller</h3>
+                      {/* v1.1.8 — resa selezionabile su richiesta: quando
+                          ha il focus, il loop di polling principale
+                          (vedi useEffect più sopra) sospende ogni
+                          interpretazione normale degli input — altrimenti
+                          ogni pressione durante il test attiverebbe anche
+                          una funzione reale della Dashboard. Uscita
+                          garantita con pressione prolungata di B (~1s),
+                          l'unica eccezione gestita anche in modalità
+                          cattura. onEnter resta no-op: qui basta il
+                          focus, non serve un passo di conferma separato. */}
+                      <Focusable group="settings" id="gamepad-test-area" onEnter={() => {}}>
+                        {(isFocused) => (
+                          <GamepadTester
+                            state={gamepadState}
+                            connected={connectedDevices.length > 0}
+                            theme={theme}
+                            // v1.1.11 — false anche durante il breve
+                            // ritardo di uscita: il LED deve mostrarsi
+                            // verde subito al raggiungimento della soglia,
+                            // non solo dopo che il focus si è già spostato.
+                            captureActive={isFocused && !gamepadTestExiting}
+                            exitHoldProgress={gamepadTestExitProgress}
+                          />
+                        )}
+                      </Focusable>
+                    </div>
+                  </div>
+                ) : activeSettingsTab === 'ai-models' ? (
+                  /* ── AI Models tab (Ollama) — v0.99.90, Step 15d ──
+                     Stessa struttura della sezione "Runner installati" in
+                     System: elenco di ciò che è già presente sul disco,
+                     un pulsante per selezionare quale usare — nessuna
+                     installazione/download di modelli da qui (resta
+                     un'operazione da terminale, 'ollama pull'). */
+                  <div className="space-y-6">
+                    <div className={cn(
+                      "flex items-center gap-2 px-4 py-3 rounded-xl mb-6",
+                      theme === 'dark' ? "bg-purple-500/10 border border-purple-500/20" : "bg-purple-50 border border-purple-200"
+                    )}>
+                      <Sparkles size={14} className="text-purple-400 shrink-0" />
+                      <p className="text-[10px] font-black uppercase tracking-widest text-purple-400">Experimental</p>
+                      <p className={cn("text-[10px] font-mono ml-2", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                        L'AI Advisor è in fase di test — le risposte possono richiedere debug manuale.
+                      </p>
+                    </div>
+
+                    <p className={cn("text-[10px] font-mono mb-8", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                      Modelli Ollama già scaricati su questa macchina. Seleziona quale usare per l'AI Advisor quando la Knowledge Base locale non trova una soluzione nota — modelli più piccoli rispondono prima e pesano meno sulla GPU condivisa coi giochi, modelli più grandi possono dare risposte più accurate.
+                    </p>
+
+                    {/* v0.99.90 — Step 15d: contatore budget token, condiviso
+                        tra tutti i provider (non solo Ollama) — vive qui
+                        perché è l'unica tab AI esistente finora, non perché
+                        sia specifico di Ollama. */}
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Budget token mensile</h3>
+                      <div className={cn(
+                        "rounded-xl p-4",
+                        theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                      )}>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-mono">
+                            {aiUsage.totalTokens.toLocaleString('it-IT')} / {aiUsage.budget.toLocaleString('it-IT')} token questo mese
+                          </span>
+                          <span className={cn(
+                            "text-[9px] font-black uppercase tracking-widest",
+                            aiUsage.totalTokens >= aiUsage.budget ? "text-red-400" : aiUsage.totalTokens >= aiUsage.budget * 0.8 ? "text-orange-400" : "text-green-400"
+                          )}>
+                            {Math.min(100, Math.round((aiUsage.totalTokens / Math.max(aiUsage.budget, 1)) * 100))}%
+                          </span>
+                        </div>
+                        <div className={cn("w-full h-1.5 rounded-full overflow-hidden mb-4", theme === 'dark' ? "bg-white/10" : "bg-gray-200")}>
+                          <div
+                            className={cn(
+                              "h-full rounded-full transition-all",
+                              aiUsage.totalTokens >= aiUsage.budget ? "bg-red-500" : aiUsage.totalTokens >= aiUsage.budget * 0.8 ? "bg-orange-400" : "bg-green-500"
+                            )}
+                            style={{ width: `${Math.min(100, (aiUsage.totalTokens / Math.max(aiUsage.budget, 1)) * 100)}%` }}
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0">Imposta budget</span>
+                          <Focusable
+                            group="settings"
+                            id="ai-budget-input"
+                            neighbors={{ down: ollamaModels[0] ? `ollama-model-select-${ollamaModels[0].name}` : undefined }}
+                            onEnter={() => openKeyboardForField(
+                              'ai-budget-input',
+                              'Budget Token Mensile',
+                              String(aiUsage.budget),
+                              async (val) => {
+                                const n = parseInt(val, 10);
+                                if (!isNaN(n) && n >= 0) {
+                                  setAiUsage(u => ({ ...u, budget: n }));
+                                  setBudgetDraft(String(n));
+                                  await fetch('/api/ai/usage/budget', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ budget: n }),
+                                  }).catch(() => {});
+                                }
+                              },
+                              'settings'
+                            )}
+                          >
+                            {(isFocused) => (
+                              <input
+                                type="text"
+                                readOnly
+                                value={budgetDraft}
+                                className={cn(
+                                  "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
+                                  theme === 'dark' ? "bg-black/40" : "bg-white",
+                                  isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                )}
+                              />
+                            )}
+                          </Focusable>
+                          <span className="text-[9px] font-mono opacity-30 shrink-0">token/mese</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Modelli installati</h3>
+                      <div className="space-y-2">
+                        {ollamaModels.length === 0 && (
+                          <p className="text-xs opacity-40 italic">Nessun modello trovato — scaricane uno da terminale con 'ollama pull &lt;nome&gt;'.</p>
+                        )}
+                        {ollamaModels.map((m, idx) => {
+                          const isActive = activeOllamaModel === m.name && ollamaEnabled;
+                          const sizeGB = m.sizeBytes / (1024 ** 3);
+                          // Euristica solo sulla dimensione del modello — non
+                          // abbiamo un modo affidabile di leggere la VRAM
+                          // libera da qui, quindi resta un proxy approssimativo
+                          // del peso computazionale, non un'analisi hardware reale.
+                          const weightLabel = sizeGB < 2 ? 'Leggero' : sizeGB < 5 ? 'Medio' : sizeGB < 10 ? 'Pesante' : 'Molto pesante';
+                          const weightColor = sizeGB < 2 ? 'text-green-400' : sizeGB < 5 ? 'text-blue-400' : sizeGB < 10 ? 'text-orange-400' : 'text-red-400';
+                          // v0.99.90 — vicini espliciti su/giù invece di
+                          // affidarsi solo allo scoring geometrico: stesso
+                          // principio già applicato a VirtualKeyboard dopo
+                          // che una riga risultava irraggiungibile — con righe
+                          // di larghezza uniforme come queste lo scoring
+                          // dovrebbe già funzionare da solo, ma un percorso
+                          // esplicito costa poco e toglie ogni dubbio quando
+                          // i modelli diventeranno 2 o più.
+                          const prevId = idx === 0 ? 'ai-budget-input' : `ollama-model-select-${ollamaModels[idx - 1].name}`;
+                          const nextId = idx === ollamaModels.length - 1 ? undefined : `ollama-model-select-${ollamaModels[idx + 1].name}`;
+                          // v0.99.90 — stesso segnale visivo già usato per le
+                          // righe Runner in System: l'intera riga si
+                          // evidenzia con un anello quando è a fuoco col pad,
+                          // non solo il pulsante "seleziona" al suo interno —
+                          // mancava qui, avevo evidenziato solo il pulsante.
+                          const isRowFocused = focusedId === `ollama-model-select-${m.name}`;
+                          return (
+                            <div key={m.name} className={cn(
+                              "rounded-xl overflow-hidden transition-all px-4 py-3 flex items-center gap-3",
+                              isRowFocused ? "ring-2 ring-purple-400" : isActive ? "ring-1 ring-purple-400/50" : "",
+                              theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                            )}>
+                              <Sparkles size={14} className="text-purple-400 shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <span className="text-xs font-black uppercase tracking-tighter block truncate">{m.name}</span>
+                                <span className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                                  {sizeGB.toFixed(1)} GB{m.parameterSize ? ` · ${m.parameterSize}` : ''}{m.quantization ? ` · ${m.quantization}` : ''}
+                                </span>
+                              </div>
+                              <span className={cn("text-[9px] font-black uppercase tracking-widest shrink-0", weightColor)}>{weightLabel}</span>
+                              <Focusable
+                                group="settings"
+                                id={`ollama-model-select-${m.name}`}
+                                neighbors={{ up: prevId, down: nextId }}
+                                onEnter={() => {
+                                  // v0.99.90 — vero toggle, non sola selezione:
+                                  // premere A sulla riga già attiva (questo
+                                  // modello, con Ollama acceso) lo spegne;
+                                  // premere A su un'altra riga la seleziona
+                                  // come modello attivo e accende Ollama —
+                                  // stesso comportamento dei provider cloud
+                                  // e dei runner, per coerenza.
+                                  const turningOff = isActive;
+                                  const nextEnabled = !turningOff;
+                                  setOllamaEnabled(nextEnabled);
+                                  if (!turningOff) setActiveOllamaModel(m.name);
+                                  fetch('/api/ai/providers/ollama', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ enabled: nextEnabled, model: m.name, priority: 0 }),
+                                  }).catch(() => {});
+                                  play('select');
+                                }}
+                              >
+                                {(isFocused) => (
+                                  <button className={cn(
+                                    "px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border min-w-[84px] text-center transition-all shrink-0",
+                                    isActive
+                                      ? "bg-purple-600 border-purple-600 text-white"
+                                      : isFocused
+                                        ? "bg-purple-500/20 border-purple-400 text-purple-300"
+                                        : "bg-white/5 border-white/10 opacity-60"
+                                  )}>
+                                    {isActive ? 'attivo' : 'seleziona'}
+                                  </button>
+                                )}
+                              </Focusable>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* v0.99.90 — Step 15d: provider cloud. Nessun
+                        download/pull qui (a differenza di Ollama, non
+                        c'entra — sono API remote), solo enable + API key
+                        + test connessione. */}
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Provider cloud</h3>
+                      <div className="space-y-3">
+                        {CLOUD_PROVIDERS.map((cp, idx) => {
+                          const state = cloudProviderState[cp.id] ?? { enabled: false, hasStoredKey: false, apiKeyDraft: '', testing: false, testResult: null };
+                          // v1.1.14 — due bug reali qui, non uno:
+                          // 1) questa variabile si chiamava "prevRowToggle"
+                          //    ma puntava al CAMPO api key del provider
+                          //    precedente (`cloud-provider-key-…`), non al
+                          //    suo toggle — risalendo da un toggle non si
+                          //    tornava mai al toggle sopra, ma al suo campo
+                          //    (a volte nemmeno montato, se quel provider
+                          //    non era enabled).
+                          // 2) il toggle non aveva MAI un neighbor down
+                          //    esplicito verso la propria riga: scendendo
+                          //    da un toggle, lo scoring geometrico saltava
+                          //    l'intera riga (campo/test/rimuovi) e
+                          //    atterrava direttamente sul toggle del
+                          //    provider successivo — da cui il sintomo
+                          //    "posso solo attivare/disattivare il
+                          //    servizio", risolvibile solo scendendo al
+                          //    provider dopo e tornando su per sbaglio.
+                          const toggleUpNeighbor = idx === 0
+                            ? (ollamaModels[ollamaModels.length - 1] ? `ollama-model-select-${ollamaModels[ollamaModels.length - 1].name}` : 'ai-budget-input')
+                            : `cloud-provider-toggle-${CLOUD_PROVIDERS[idx - 1].id}`;
+                          const nextProvider = CLOUD_PROVIDERS[idx + 1];
+                          const toggleDownNeighbor = state.enabled
+                            ? `cloud-provider-key-${cp.id}`
+                            : (nextProvider ? `cloud-provider-toggle-${nextProvider.id}` : undefined);
+                          // v0.99.90 — stesso segnale di riga a fuoco già
+                          // usato per Ollama/Runner/Plugin: il rettangolo
+                          // viola indica la riga selezionata E premere A
+                          // attiva/disattiva — non serve più cercare un
+                          // pulsante separato all'interno della card.
+                          const isRowFocused = focusedId === `cloud-provider-toggle-${cp.id}`;
+                          return (
+                            <div key={cp.id} className={cn(
+                              "rounded-xl p-4 transition-all",
+                              isRowFocused
+                                ? "ring-2 ring-purple-400"
+                                : state.enabled ? "ring-1 ring-purple-400/50" : "",
+                              theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                            )}>
+                              <div className="flex items-center gap-3 mb-1">
+                                <Sparkles size={14} className="text-purple-400 shrink-0" />
+                                <span className="text-xs font-black uppercase tracking-tighter flex-1">{cp.name}</span>
+                                <span className={cn(
+                                  "text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full shrink-0",
+                                  cp.requiresPaidAccount ? "bg-orange-500/10 text-orange-400" : "bg-green-500/10 text-green-400"
+                                )}>
+                                  {cp.requiresPaidAccount ? 'A pagamento' : 'Gratuito/economico'}
+                                </span>
+                                <Focusable
+                                  group="settings"
+                                  id={`cloud-provider-toggle-${cp.id}`}
+                                  neighbors={{ up: toggleUpNeighbor, down: toggleDownNeighbor }}
+                                  onEnter={() => {
+                                    const nextEnabled = !state.enabled;
+                                    setCloudProviderState(prev => ({ ...prev, [cp.id]: { ...state, enabled: nextEnabled } }));
+                                    saveCloudProvider(cp.id, { enabled: nextEnabled });
+                                    play('select');
+                                  }}
+                                >
+                                  {(isFocused) => (
+                                    <button className={cn(
+                                      "px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border min-w-[70px] text-center transition-all shrink-0",
+                                      state.enabled
+                                        ? "bg-purple-600 border-purple-600 text-white"
+                                        : isFocused
+                                          ? "bg-purple-500/20 border-purple-400 text-purple-300"
+                                          : "bg-white/5 border-white/10 opacity-60"
+                                    )}>
+                                      {state.enabled ? 'attivo' : 'disattivo'}
+                                    </button>
+                                  )}
+                                </Focusable>
+                              </div>
+                              <p className={cn("text-[9px] font-mono leading-relaxed mb-3", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{cp.note}</p>
+
+                              {state.enabled && (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0">API Key</span>
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-provider-key-${cp.id}`}
+                                    // v1.1.13 — prima scoring geometrico
+                                    // puro fra campo/test/rimuovi: nessun
+                                    // neighbors esplicito su una riga di
+                                    // 2-3 elementi ravvicinati, la stessa
+                                    // categoria di bug già vista e risolta
+                                    // per le righe env-var. sequentialChain
+                                    // orizzontale rende la navigazione
+                                    // sx/dx deterministica per ordine
+                                    // visivo invece che per punteggio.
+                                    sequentialChain={`cloud-provider-row-${cp.id}`}
+                                    chainAxis="horizontal"
+                                    onEnter={() => openKeyboardForField(
+                                      `cloud-provider-key-${cp.id}`,
+                                      `${cp.name} — API Key`,
+                                      state.apiKeyDraft,
+                                      (val) => {
+                                        setCloudProviderState(prev => ({ ...prev, [cp.id]: { ...prev[cp.id], apiKeyDraft: val, hasStoredKey: val ? true : prev[cp.id]?.hasStoredKey } }));
+                                        if (val) saveCloudProvider(cp.id, { apiKey: val });
+                                      },
+                                      'settings'
+                                    )}
+                                  >
+                                    {(isFocused) => (
+                                      <input
+                                        type="text"
+                                        readOnly
+                                        value={state.apiKeyDraft ? '•'.repeat(Math.min(state.apiKeyDraft.length, 24)) : (state.hasStoredKey ? '•••••••• (salvata)' : '')}
+                                        placeholder="Incolla/digita l'API key…"
+                                        className={cn(
+                                          "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
+                                          theme === 'dark' ? "bg-black/40" : "bg-white",
+                                          isFocused ? "border-2 border-blue-500" : state.hasStoredKey || state.apiKeyDraft
+                                            ? "border border-green-500/40" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                        )}
+                                      />
+                                    )}
+                                  </Focusable>
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-provider-test-${cp.id}`}
+                                    sequentialChain={`cloud-provider-row-${cp.id}`}
+                                    chainAxis="horizontal"
+                                    onEnter={() => { if (!state.testing) testCloudProvider(cp.id); }}
+                                  >
+                                    {(isFocused) => (
+                                      <button className={cn(
+                                        "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border shrink-0 transition-all",
+                                        isFocused ? "bg-blue-500/20 border-blue-400 text-blue-300" : "bg-white/5 border-white/10 opacity-70"
+                                      )}>
+                                        {state.testing ? 'test…' : 'Testa connessione'}
+                                      </button>
+                                    )}
+                                  </Focusable>
+                                  {(state.hasStoredKey || state.apiKeyDraft) && (
+                                    <Focusable
+                                      group="settings"
+                                      id={`cloud-provider-remove-${cp.id}`}
+                                      sequentialChain={`cloud-provider-row-${cp.id}`}
+                                      chainAxis="horizontal"
+                                      // v1.1.12 — nuovo: prima non c'era
+                                      // modo di tornare a "nessuna key"
+                                      // senza sovrascriverla con una nuova.
+                                      onEnter={() => removeCloudProviderKey(cp.id)}
+                                    >
+                                      {(isFocused) => (
+                                        <button className={cn(
+                                          "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border shrink-0 transition-all",
+                                          isFocused ? "bg-red-500/20 border-red-400 text-red-300" : "bg-white/5 border-white/10 text-red-400/70 opacity-70"
+                                        )}>
+                                          Rimuovi key
+                                        </button>
+                                      )}
+                                    </Focusable>
+                                  )}
+                                </div>
+                              )}
+                              {state.testResult && (
+                                <p className={cn("text-[9px] font-mono mt-2", state.testResult.success ? "text-green-400" : "text-red-400")}>
+                                  {state.testResult.success ? '✓ ' : '✗ '}{state.testResult.message}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Game Options Overlay — aperto con click destro o tasto X controller */}
+      <AnimatePresence>
+        {showGameOptions && selectedGame && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[150] flex items-center justify-center bg-black/70 backdrop-blur-md"
+            onClick={(e) => { if (e.target === e.currentTarget) { setShowGameOptions(false); play('back'); } }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className={cn(
+                // v1.1.5 — FIX RADICE del taglio sopra/sotto: vh NON è
+                // relativo al canvas virtuale 1920×1080 di
+                // ScalingContainer.tsx, ma al viewport REALE del browser.
+                // A 2560×1440 (scala 1.333×) "85vh" valeva 85% di 1440px
+                // reali = 1224px — dentro un contenitore (il backdrop,
+                // fixed inset-0) alto solo 1080px di layout, perché
+                // ScalingContainer usa transform: scale(), che rende
+                // quell'ancestor il containing block per i discendenti
+                // fixed (per specifica CSS) SENZA cambiare come vh viene
+                // risolto. Risultato: il modal eccedeva il proprio
+                // contenitore già in fase di layout, prima ancora di
+                // essere scalato/ingrandito visivamente — un bug
+                // strutturale del canvas virtuale, non di flexbox (il fix
+                // min-h-0 di v1.1.4 restava comunque corretto, semplicemente
+                // non era la causa di QUESTO sintomo).
+                // Percentuale invece di vh: si risolve rispetto al
+                // contenitore reale (1080px di layout), indipendentemente
+                // dal fattore di scala — corretto a qualunque risoluzione.
+                "w-[700px] max-h-[85%] flex flex-col rounded-3xl border shadow-2xl overflow-hidden",
+                theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
+              )}
+            >
+              {/* Header — fuori dall'area di scroll: titolo, copertina e
+                  pulsante di chiusura restano sempre completamente
+                  visibili, indipendentemente da quante sezioni compaiono
+                  nel corpo sottostante. */}
+              <div className="shrink-0 px-10 pt-10 pb-2">
+              <div className="flex items-start justify-between mb-8">
+                <div className="flex gap-6 items-center">
+                  <img src={selectedGame.coverImage} className="w-16 h-20 rounded-xl object-cover shadow-lg" alt={selectedGame.title} />
+                  <div>
+                    <h2 className="text-3xl font-black uppercase tracking-tighter italic leading-none mb-2">{selectedGame.title}</h2>
+                    <div className="flex gap-2 flex-wrap items-center">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-blue-400">{selectedGame.store}</span>
+                      <span className={cn("text-[10px] font-black uppercase tracking-widest", theme === 'dark' ? "text-white/30" : "text-gray-400")}>·</span>
+                      <span className={cn("text-[10px] font-black uppercase tracking-widest", theme === 'dark' ? "text-white/50" : selectedGame.runner === 'Wine-Lutris' ? "text-yellow-600" : "text-gray-600")}>{selectedGame.runner}</span>
+                      {runnerVersion && runnerVersion !== selectedGame.runner && (
+                        <span className={cn("text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border", theme === 'dark' ? "text-white/30 bg-white/5 border-white/10" : "text-gray-500 bg-gray-100 border-gray-200")}>
+                          v{runnerVersion}
+                        </span>
+                      )}
+                      <span className={cn(
+                        "text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border",
+                        selectedGame.isInstalled
+                          ? "text-green-400 bg-green-400/10 border-green-400/20"
+                          : "text-yellow-400 bg-yellow-400/10 border-yellow-400/20"
+                      )}>
+                        {selectedGame.isInstalled ? '✓ installato' : '⬇ non installato'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <Focusable
+                  group="game-options"
+                  id="game-options-close"
+                  fallbackPriority={-1}
+                  // v1.1.3 — ingresso deterministico nel corpo dell'overlay
+                  // invece di ricadere sullo scoring geometrico, che per
+                  // un elemento in alto a destra favoriva sempre la
+                  // colonna destra di Compatibility Layer, scavalcando
+                  // Runner Bridge e i core RetroArch.
+                  neighbors={{ down: overlayNavAnchors.firstOverlayContentId }}
+                  onEnter={() => { closeGameOptions(); play('back'); }}
+                >
+                  {(isFocused) => (
+                    <button
+                      className={cn("w-10 h-10 rounded-full border flex items-center justify-center transition-all",
+                        isFocused ? "bg-red-600 border-red-600 text-white" : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                      )}
+                    ><X size={18} /></button>
+                  )}
+                </Focusable>
+              </div>
+              </div>
+              {/* Corpo — unica area che scrolla. Il modal intero (sopra)
+                  non supera mai 85vh grazie a overflow-hidden + flex-col;
+                  qui invece flex-1 + overflow-y-auto assorbe qualunque
+                  quantità di sezioni senza mai spingere l'header fuori
+                  dallo schermo. */}
+              {/* Corpo — unica area che scrolla. Il modal intero (sopra)
+                  non supera mai 85vh grazie a overflow-hidden + flex-col;
+                  qui invece flex-1 + overflow-y-auto assorbe qualunque
+                  quantità di sezioni senza mai spingere l'header fuori
+                  dallo schermo.
+                  v1.1.4 — FIX: mancava min-h-0. Senza, un figlio flex con
+                  overflow-y-auto NON si comprime mai sotto l'altezza del
+                  proprio contenuto (default CSS: min-height: auto per i
+                  flex item) — il corpo cresceva quanto voleva, l'unico
+                  limite reale diventava l'overflow-hidden ESTERNO, che
+                  tagliava il risultato invece di farlo scorrere. Risultato
+                  visibile: il taglio sopra/sotto restava, anzi peggiorava,
+                  perché ora l'header fisso sottraeva altezza utile senza
+                  che il corpo guadagnasse davvero uno scroll funzionante. */}
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-10 pb-10">
+              <div className="space-y-6">
+                {/* Runner — v1.0.0: nascosta per i giochi Classic Console.
+                    Proton/Wine-Lutris non c'entrano nulla con RetroArch/
+                    DOSBox/ScummVM, mostrarli qui serve solo a confondere
+                    l'utente su cosa stia effettivamente per cambiare. */}
+                {selectedGame.store !== 'Classic Console' && (
+                <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                  <div className="flex items-center gap-3 mb-4">
+                    <Cpu size={16} className="text-blue-400" />
+                    <span className="text-[10px] font-black uppercase tracking-widest">Runner Bridge</span>
+                    {runnerVersion && (
+                      <span className={cn(
+                        "ml-auto text-[9px] font-mono px-2 py-0.5 rounded-full border",
+                        theme === 'dark'
+                          ? selectedGame?.runner === 'Wine-Lutris'
+                            ? "text-yellow-400 bg-yellow-400/10 border-yellow-400/20"
+                            : "text-white/40 bg-white/5 border-white/10"
+                          : selectedGame?.runner === 'Wine-Lutris'
+                            ? "text-yellow-600 bg-yellow-100 border-yellow-300"
+                            : "text-gray-600 bg-gray-100 border-gray-200"
+                      )}>
+                        {selectedGame?.runner} · {runnerVersion}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Runner installati — selezionabili immediatamente */}
+                  {/* Runner installati — switch per-gioco persistente.
+                      Selezionare un runner lo attiva per questo gioco e
+                      lo persiste nel DB. Deselezionare (premere di nuovo
+                      lo switch attivo) riporta al runner di default
+                      (Wine-Lutris) mantenendo tutta la configurazione
+                      (winetricksVerbs, compat profile, prefix) invariata.
+                      v0.99.35 — redesign da pulsanti a switch per
+                      chiarire visivamente stato attivo/non attivo. */}
+                  {availableRunners.length > 0 && (
+                    <div className="space-y-2 mb-4">
+                      {(() => {
+                        // v1.0.0 — fix navigazione: prima Runner Bridge,
+                        // Compatibility Layer/Core ed Executable Path si
+                        // affidavano solo allo scoring geometrico per
+                        // passare da una sezione all'altra — con Wine-Lutris
+                        // mai mostrato come switch (è il default implicito),
+                        // la sezione Runner Bridge può risultare visivamente
+                        // vuota per giochi che non hanno altri runner
+                        // installati, sfasando lo scoring in modo diverso a
+                        // seconda della direzione di navigazione. Calcoliamo
+                        // qui l'elenco reale (senza il default nascosto) per
+                        // sapere con certezza qual è l'ULTIMO elemento e
+                        // agganciarlo esplicitamente a ciò che segue.
+                        const nonDefaultRunners = availableRunners.filter((r: any) => (r.id || r) !== 'Wine-Lutris');
+                        return nonDefaultRunners.map((r: any, idx: number) => {
+                        const runnerId    = r.id || r;
+                        const isActive    = selectedGame?.runner === runnerId;
+                        const isLastRunnerRow = idx === nonDefaultRunners.length - 1;
+                        return (
+                          <Focusable
+                            key={runnerId}
+                            group="game-options"
+                            id={`game-runner-${runnerId}`}
+                            // v1.1.2 — lista verticale pura: catena
+                            // sequenziale al posto dello scoring geometrico
+                            // per la navigazione INTERNA (riga per riga).
+                            // Il confine di uscita (ultima riga → sezione
+                            // successiva) resta un neighbor esplicito,
+                            // invariato — la catena copre solo l'interno.
+                            sequentialChain="game-options-runner-bridge"
+                            neighbors={isLastRunnerRow ? { down: overlayNavAnchors.firstMiddleId } : undefined}
+                            onEnter={async () => {
+                              // Toggle: se già attivo → torna a Wine-Lutris (default)
+                              // altrimenti → attiva questo runner
+                              const newRunner = isActive ? 'Wine-Lutris' : runnerId;
+                              setGames(prev => prev.map(g =>
+                                g.id === selectedGame!.id ? { ...g, runner: newRunner as any } : g
+                              ));
+                              if (!isActive) setRunnerVersion(r.version ?? runnerId);
+                              else setRunnerVersion('');
+                              await fetch(`/api/games/${selectedGame!.id}/config`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ runner: newRunner }),
+                              });
+                              play('select');
+                            }}
+                          >
+                            {(isFocused) => (
+                              <div className={cn(
+                                "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all border",
+                                isFocused
+                                  ? "border-blue-400 bg-blue-500/10"
+                                  : theme === 'dark'
+                                    ? "border-white/10 bg-white/5"
+                                    : "border-gray-200 bg-gray-50"
+                              )}>
+                                {/* Info runner */}
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-[11px] font-black uppercase tracking-widest truncate">
+                                    {runnerId}
+                                  </p>
+                                  {r.version && r.version !== runnerId && (
+                                    <p className="text-[9px] font-mono opacity-40 mt-0.5">v{r.version}</p>
+                                  )}
+                                </div>
+                                {/* Badge "attivo" quando è il runner corrente */}
+                                {isActive && (
+                                  <span className="text-[9px] font-black uppercase tracking-widest text-blue-400 shrink-0">
+                                    Attivo
+                                  </span>
+                                )}
+                                {/* Switch */}
+                                <div className={cn(
+                                  "w-10 h-5 rounded-full transition-all relative shrink-0",
+                                  isActive
+                                    ? "bg-blue-500"
+                                    : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                                )}>
+                                  <div className={cn(
+                                    "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all",
+                                    isActive ? "left-[22px]" : "left-0.5"
+                                  )} />
+                                </div>
+                              </div>
+                            )}
+                          </Focusable>
+                        );
+                        });
+                      })()}
+                    </div>
+                  )}
+
+                  {/* v0.99.35 — sezione "Runner installabili" rimossa da qui:
+                      duplicava esattamente la stessa funzione già presente
+                      nella tab Sistema → Runner. L'overlay del gioco mostra
+                      ora solo i runner GIÀ installati (selezione per-gioco,
+                      blocco sopra) — per installarne uno nuovo si usa la
+                      tab Sistema, unica fonte per quell'azione. */}
+
+                  {availableRunners.length === 0 && (
+                    <p className="text-xs opacity-40 italic">Nessun runner trovato. Apri System → Runner per installarne uno.</p>
+                  )}
+                </div>
+                )}
+
+                {/* Sezione adattiva: RetroArch per ROM, Compat Layer per altri, niente per DOS/ScummVM */}
+                {selectedGame.runner === 'RetroArch' ? (
+                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                    <div className="flex items-center gap-3 mb-4">
+                      <Activity size={16} className="text-blue-400" />
+                      <span className="text-[10px] font-black uppercase tracking-widest">RetroArch Core</span>
+                      {retroarchAvailable === false && (
+                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-red-400">Non installato</span>
+                      )}
+                      {retroarchAvailable === true && (
+                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-green-400">Disponibile</span>
+                      )}
+                    </div>
+                    {retroarchAvailable === false ? (
+                      <div className="space-y-3">
+                        <p className="text-xs opacity-60 leading-relaxed">RetroArch non è installato. Installalo per avviare le ROM.</p>
+                        <code className={cn("block text-[10px] font-mono p-3 rounded-xl text-green-400", theme === 'dark' ? "bg-black/40 border border-white/5" : "bg-gray-800 border border-gray-600")}>
+                          sudo pacman -S retroarch
+                        </code>
+                      </div>
+                    ) : retroarchCores.length > 0 ? (
+                      // v1.0.0 — da chip selezionabili a switch persistenti,
+                      // stesso linguaggio visivo di "Runner Bridge": ogni
+                      // core compatibile con QUESTO sistema (già filtrato
+                      // dal backend, vedi effetto che popola retroarchCores)
+                      // ha il proprio switch. Il core di DEFAULT del
+                      // sistema non mostra uno switch — esattamente come
+                      // Wine-Lutris in Runner Bridge — è sempre disponibile
+                      // e viene ripristinato automaticamente disattivando
+                      // un altro core. Attivarne uno nuovo disattiva
+                      // implicitamente l'eventuale altro già attivo (un
+                      // solo core alla volta, ovviamente).
+                      <div className="space-y-2">
+                        {retroarchCores.map((core) => {
+                          const isDefault = core.name === retroarchDefaultCore;
+                          if (isDefault) return null;
+                          const isActive = selectedGame.libretroCore
+                            ? selectedGame.libretroCore.split('/').pop()?.replace('_libretro.so', '') === core.name
+                            : false;
+                          // v1.0.0 — collega esplicitamente il primo core
+                          // non-default a Runner Bridge (sopra) e l'ultimo
+                          // a Executable Path (sotto) — stesso principio
+                          // già usato per Compatibility Layer, vedi
+                          // overlayNavAnchors.
+                          const nonDefaultCores = retroarchCores.filter(c => c.name !== retroarchDefaultCore);
+                          const isFirstNonDefault = core.name === nonDefaultCores[0]?.name;
+                          const isLastNonDefault  = core.name === nonDefaultCores[nonDefaultCores.length - 1]?.name;
+                          const coreNeighbors: { up?: string; down?: string } = {};
+                          if (isFirstNonDefault) coreNeighbors.up = overlayNavAnchors.lastRunnerBridgeId;
+                          if (isLastNonDefault) coreNeighbors.down = 'field-executablePath';
+                          return (
+                            <Focusable
+                              key={core.path}
+                              group="game-options"
+                              id={`core-${core.name}`}
+                              // v1.1.2 — stessa migrazione di Runner Bridge:
+                              // lista verticale pura, catena sequenziale
+                              // per la navigazione interna. I confini
+                              // (primo → Runner Bridge, ultimo →
+                              // Executable Path) restano neighbor
+                              // espliciti, invariati.
+                              sequentialChain="game-options-retroarch-cores"
+                              neighbors={coreNeighbors}
+                              onEnter={async () => {
+                                // Toggle: se già attivo → torna al core di
+                                // default del sistema, altrimenti → attiva
+                                // questo core (sovrascrive un'eventuale
+                                // altro override già attivo).
+                                const newCore = isActive ? retroarchDefaultCore : core.name;
+                                const newCorePath = isActive
+                                  ? (retroarchCores.find(c => c.name === retroarchDefaultCore)?.path ?? core.path)
+                                  : core.path;
+                                const res = await fetch(`/api/games/${selectedGame.id}/retroarch`, {
+                                  method: 'PATCH',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ libretroCore: isActive ? retroarchDefaultCore + '_libretro.so' : core.path })
+                                });
+                                if (res.ok) {
+                                  setGames(prev => prev.map(g =>
+                                    g.id === selectedGame.id
+                                      ? { ...g, libretroCore: isActive ? retroarchDefaultCore + '_libretro.so' : core.path }
+                                      : g
+                                  ));
+                                }
+                                play('select');
+                              }}
+                            >
+                              {(isFocused) => (
+                                <div className={cn(
+                                  "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all border",
+                                  isFocused
+                                    ? "border-blue-400 bg-blue-500/10"
+                                    : theme === 'dark'
+                                      ? "border-white/10 bg-white/5"
+                                      : "border-gray-200 bg-gray-50"
+                                )}>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-[11px] font-black uppercase tracking-widest truncate">{core.name}</p>
+                                  </div>
+                                  {isActive && (
+                                    <span className="text-[9px] font-black uppercase tracking-widest text-blue-400 shrink-0">Attivo</span>
+                                  )}
+                                  <div className={cn(
+                                    "w-10 h-5 rounded-full transition-all relative shrink-0",
+                                    isActive ? "bg-blue-500" : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                                  )}>
+                                    <div className={cn(
+                                      "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all",
+                                      isActive ? "left-[22px]" : "left-0.5"
+                                    )} />
+                                  </div>
+                                </div>
+                              )}
+                            </Focusable>
+                          );
+                        })}
+                        {retroarchDefaultCore && (
+                          <p className="text-[9px] font-mono opacity-30 pt-1">
+                            Default per questo sistema: {retroarchDefaultCore}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs opacity-60">Nessun core compatibile trovato per questo sistema.</p>
+                    )}
+                  </div>
+                ) : selectedGame.store !== 'Classic Console' ? (
+                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                    <div className="flex items-center gap-3 mb-4">
+                      <Activity size={16} className="text-blue-400" />
+                      <span className="text-[10px] font-black uppercase tracking-widest">Compatibility Layer</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      {([
+                        { key: 'fsr',      label: 'AMD FSR',       desc: 'WINE_FULLSCREEN_FSR=1', sysKey: 'fsr'      },
+                        { key: 'gameMode', label: 'GameMode',      desc: 'gamemoderun wrapper',   sysKey: 'gamemode' },
+                        { key: 'mangohud', label: 'MangoHud',      desc: 'overlay FPS/GPU',       sysKey: 'mangohud' },
+                        { key: 'eac',      label: 'EasyAntiCheat', desc: 'EAC runtime',           sysKey: 'eac'      },
+                        { key: 'battleye', label: 'BattlEye',      desc: 'BE runtime',            sysKey: 'battleye' },
+                      ] as const).map(({ key, label, desc, sysKey }, idx, arr) => {
+                        const enabled   = (localCompatProfile as any)[key] ?? false;
+                        const available = !!systemTools[sysKey];
+                        // v1.0.0 — collega esplicitamente il primo elemento
+                        // a Runner Bridge (sopra) e l'ultimo a Executable
+                        // Path (sotto) — vedi overlayNavAnchors.
+                        const compatNeighbors: { up?: string; down?: string } = {};
+                        if (idx === 0) compatNeighbors.up = overlayNavAnchors.lastRunnerBridgeId;
+                        if (idx === arr.length - 1) compatNeighbors.down = 'field-executablePath';
+                        return (
+                          <Focusable
+                            key={key}
+                            group="game-options"
+                            id={`compat-${key}`}
+                            neighbors={compatNeighbors}
+                            onEnter={async () => {
+                              const next = !enabled;
+                              setLocalCompatProfile(prev => ({ ...prev, [key]: next }));
+                              const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
+                              const current = compatRes.ok ? await compatRes.json() : {};
+                              await fetch(`/api/games/${selectedGame.id}/compat`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ ...current, [key]: next })
+                              });
+                              play('select');
+                            }}
+                          >
+                            {(isFocused) => (
+                              <button
+                                className={cn(
+                                  // v1.0.0 — min-h fisso: prima l'altezza di
+                                  // ogni riquadro dipendeva dalla lunghezza
+                                  // della propria descrizione (desc), righe
+                                  // diverse finivano con altezze diverse —
+                                  // ora tutti i riquadri hanno la stessa
+                                  // dimensione indipendentemente dal testo.
+                                  // Griglia a 2 colonne semplice, senza
+                                  // stiramento dell'ultima voce se dispari
+                                  // (confermato: preferita cosi, con lo
+                                  // spazio vuoto accanto — vedi screenshot
+                                  // di riferimento). Nuove voci future
+                                  // (DXVK, VKD3D, ecc.) si aggiungono
+                                  // semplicemente all'array sopra, la
+                                  // griglia cresce da sola su righe/colonne
+                                  // successive senza altro codice da toccare.
+                                  "w-full min-h-[76px] flex items-center justify-between px-4 py-3 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all border",
+                                  enabled
+                                    ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                                    : isFocused
+                                      ? theme === 'dark' ? "bg-white/10 border-white/30" : "bg-gray-200 border-gray-400 text-gray-800"
+                                      : theme === 'dark' ? "bg-white/5 border-white/10" : "bg-gray-100 border-gray-200 text-gray-700",
+                                  !available && "opacity-50"
+                                )}
+                              >
+                                <div className="flex flex-col items-start gap-0.5">
+                                  <div className="flex items-center gap-2">
+                                    <span>{label}</span>
+                                    <span className={cn(
+                                      "text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-full border",
+                                      available
+                                        ? "text-green-400 bg-green-400/10 border-green-400/20"
+                                        : "text-red-400 bg-red-400/10 border-red-400/20"
+                                    )}>
+                                      {available ? '✓' : '✗'}
+                                    </span>
+                                  </div>
+                                  <span className="text-[8px] font-mono opacity-30 normal-case">{desc}</span>
+                                </div>
+                                <div className={cn("w-8 h-4 rounded-full transition-all relative shrink-0", enabled ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
+                                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", enabled ? "left-4" : "left-0.5")} />
+                                </div>
+                              </button>
+                            )}
+                          </Focusable>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                    <p className="text-xs opacity-40 italic">Nessuna opzione di compatibilità aggiuntiva per questo runner.</p>
+                  </div>
+                )}
+
+                {/* Step 4 — Game Config completo */}
+                <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                  <div className="flex items-center gap-3 mb-5">
+                    <Monitor size={16} className="text-blue-400" />
+                    <span className="text-[10px] font-black uppercase tracking-widest">Game Config</span>
+                  </div>
+                  <div className="space-y-3">
+                    <label className="block">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Executable Path</span>
+                        {localGameConfig.executablePath && (
+                          <span className="text-[9px] font-black uppercase tracking-widest text-green-400 bg-green-400/10 border border-green-400/20 px-1.5 py-0.5 rounded-full">
+                            ✓ configurato
+                          </span>
+                        )}
+                        {!localGameConfig.executablePath && (selectedGame.store === 'Epic Games' || selectedGame.store === 'GOG Galaxy') && selectedGame.isInstalled && (
+                          <span className="text-[9px] font-black uppercase tracking-widest text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 px-1.5 py-0.5 rounded-full">
+                            ⚠ richiesto per avviare
+                          </span>
+                        )}
+                      </div>
+                      <Focusable
+                        group="game-options"
+                        id="field-executablePath"
+                        neighbors={{ up: overlayNavAnchors.lastMiddleId ?? overlayNavAnchors.lastRunnerBridgeId }}
+                        onEnter={() => openKeyboardForField(
+                          'field-executablePath',
+                          'Executable Path',
+                          localGameConfig.executablePath ?? '',
+                          async (val) => {
+                            setLocalGameConfig(prev => ({ ...prev, executablePath: val }));
+                            await fetch(`/api/games/${selectedGame.id}/config`, {
+                              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ executablePath: val || null })
+                            });
+                            setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, executablePath: val || undefined } : g));
+                          }
+                        )}
+                      >
+                        {(isFocused) => (
+                          <input
+                            ref={executablePathRef}
+                            type="text"
+                            readOnly
+                            value={localGameConfig.executablePath ?? ''}
+                            placeholder="/home/archdaniel/Games/Epic/.../Game.exe"
+                            className={cn(
+                              "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
+                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              isFocused
+                                ? "border-2 border-blue-500"
+                                : localGameConfig.executablePath
+                                  ? "border border-green-500/40"
+                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                            )}
+                          />
+                        )}
+                      </Focusable>
+                    </label>
+                    {/* v0.99.38 — campo mancante: il dato (launchArgs) esiste
+                        già nel DB ed è già letto al lancio
+                        (gameManager.ts/shellSplitArgs), ma non aveva mai
+                        avuto un input nell'overlay — solo raggiungibile via
+                        PATCH diretto all'API. Stesso pattern di
+                        Executable Path sopra. */}
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">Launch Arguments</span>
+                      <Focusable
+                        group="game-options"
+                        id="field-launchArgs"
+                        onEnter={() => openKeyboardForField(
+                          'field-launchArgs',
+                          'Launch Arguments',
+                          localGameConfig.launchArgs ?? '',
+                          async (val) => {
+                            setLocalGameConfig(prev => ({ ...prev, launchArgs: val }));
+                            await fetch(`/api/games/${selectedGame.id}/config`, {
+                              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ launchArgs: val || null })
+                            });
+                            setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, launchArgs: val || undefined } : g));
+                          }
+                        )}
+                      >
+                        {(isFocused) => (
+                          <input
+                            type="text"
+                            readOnly
+                            value={localGameConfig.launchArgs ?? ''}
+                            placeholder="-dx9 -windowed"
+                            className={cn(
+                              "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
+                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              isFocused
+                                ? "border-2 border-blue-500"
+                                : localGameConfig.launchArgs
+                                  ? "border border-green-500/40"
+                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                            )}
+                          />
+                        )}
+                      </Focusable>
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">Steam App ID</span>
+                      <Focusable
+                        group="game-options"
+                        id="field-steamAppId"
+                        onEnter={() => openKeyboardForField(
+                          'field-steamAppId',
+                          'Steam App ID',
+                          localGameConfig.steamAppId ?? '',
+                          async (val) => {
+                            setLocalGameConfig(prev => ({ ...prev, steamAppId: val }));
+                            await fetch(`/api/games/${selectedGame.id}/config`, {
+                              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ steamAppId: val || null })
+                            });
+                            setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, steamAppId: val || undefined } : g));
+                          }
+                        )}
+                      >
+                        {(isFocused) => (
+                          <input
+                            type="text"
+                            readOnly
+                            value={localGameConfig.steamAppId ?? ''}
+                            placeholder="es. 292030"
+                            className={cn(
+                              "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
+                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                            )}
+                          />
+                        )}
+                      </Focusable>
+                    </label>
+                    {selectedGame.runner === 'DOSBox' && (
+                      <label className="block">
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">DOSBox Config (.conf)</span>
+                        <Focusable
+                          group="game-options"
+                          id="field-dosboxConf"
+                          onEnter={() => openKeyboardForField(
+                            'field-dosboxConf',
+                            'DOSBox Config (.conf)',
+                            localGameConfig.dosboxConf ?? '',
+                            async (val) => {
+                              setLocalGameConfig(prev => ({ ...prev, dosboxConf: val }));
+                              await fetch(`/api/games/${selectedGame.id}/config`, {
+                                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ dosboxConf: val || null })
+                              });
+                              setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, dosboxConf: val || undefined } : g));
+                            }
+                          )}
+                        >
+                          {(isFocused) => (
+                            <input
+                              type="text"
+                              readOnly
+                              value={localGameConfig.dosboxConf ?? ''}
+                              placeholder="/path/to/game.conf"
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
+                                theme === 'dark' ? "bg-black/40" : "bg-white",
+                                isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                              )}
+                            />
+                          )}
+                        </Focusable>
+                      </label>
+                    )}
+                    {selectedGame.runner === 'ScummVM' && (
+                      <label className="block">
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">ScummVM Game ID</span>
+                        <Focusable
+                          group="game-options"
+                          id="field-scummvmId"
+                          onEnter={() => openKeyboardForField(
+                            'field-scummvmId',
+                            'ScummVM Game ID',
+                            localGameConfig.scummvmId ?? '',
+                            async (val) => {
+                              setLocalGameConfig(prev => ({ ...prev, scummvmId: val }));
+                              await fetch(`/api/games/${selectedGame.id}/config`, {
+                                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ scummvmId: val || null })
+                              });
+                              setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, scummvmId: val || undefined } : g));
+                            }
+                          )}
+                        >
+                          {(isFocused) => (
+                            <input
+                              type="text"
+                              readOnly
+                              value={localGameConfig.scummvmId ?? ''}
+                              placeholder="es. monkey, loom, tentacle"
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
+                                theme === 'dark' ? "bg-black/40" : "bg-white",
+                                isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                              )}
+                            />
+                          )}
+                        </Focusable>
+                      </label>
+                    )}
+                    {selectedGame.runner === 'RetroArch' && (
+                      <label className="block">
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">Libretro Core Path (manuale)</span>
+                        <Focusable
+                          group="game-options"
+                          id="field-libretroCore"
+                          onEnter={() => openKeyboardForField(
+                            'field-libretroCore',
+                            'Libretro Core Path',
+                            localGameConfig.libretroCore ?? '',
+                            async (val) => {
+                              setLocalGameConfig(prev => ({ ...prev, libretroCore: val }));
+                              await fetch(`/api/games/${selectedGame.id}/retroarch`, {
+                                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ libretroCore: val || null })
+                              });
+                              setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, libretroCore: val || undefined } : g));
+                            }
+                          )}
+                        >
+                          {(isFocused) => (
+                            <input
+                              type="text"
+                              readOnly
+                              value={localGameConfig.libretroCore ?? ''}
+                              placeholder="~/.config/retroarch/cores/snes9x_libretro.so"
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
+                                theme === 'dark' ? "bg-black/40" : "bg-white",
+                                isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                              )}
+                            />
+                          )}
+                        </Focusable>
+                      </label>
+                    )}
+                  </div>
+                </div>
+
+                {/* Step 10 — Winetricks dipendenze (solo GOG e Epic) */}
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games') && (
+                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                    <div className="flex items-center gap-3 mb-4">
+                      <Package size={16} className="text-blue-400" />
+                      <span className="text-[10px] font-black uppercase tracking-widest">Dipendenze Wine</span>
+                      <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">salvate per questo gioco</span>
+                    </div>
+                    <div className="space-y-1">
+                      {[...DEFAULT_WINE_VERBS, ...OPTIONAL_WINE_VERBS].map((verb, verbIdx, verbsArr) => {
+                        const isChecked = winetricksVerbs.includes(verb);
+                        const isLastVerb = verbIdx === verbsArr.length - 1;
+                        const toggleVerb = async () => {
+                          const next = isChecked
+                            ? winetricksVerbs.filter(v => v !== verb)
+                            : [...winetricksVerbs, verb];
+                          setWinetricksVerbs(next);
+                          const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
+                          const current = compatRes.ok ? await compatRes.json() : {};
+                          await fetch(`/api/games/${selectedGame.id}/compat`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ...current, winetricksVerbs: next }),
+                          });
+                          play('select');
+                        };
+                        return (
+                          <Focusable
+                            key={verb}
+                            group="game-options"
+                            id={`verb-${verb}`}
+                            onEnter={toggleVerb}
+                            // v1.1.0 — ingresso deterministico nella catena
+                            // env-var: l'ultimo verb collega esplicitamente
+                            // alla prima riga (envvar-0, che esiste sempre —
+                            // customEnvText parte da '' → split('\n') dà
+                            // comunque un elemento). Un solo link di
+                            // confine, non uno per riga: l'interno della
+                            // catena si muove da solo (sequentialChain).
+                            neighbors={isLastVerb ? { down: 'envvar-0' } : undefined}
+                          >
+                            {(isFocused) => (
+                              <div className={cn(
+                                "flex items-center gap-3 px-3 py-2 rounded-xl cursor-pointer transition-all border",
+                                isFocused
+                                  ? "bg-blue-600/20 border-blue-500/60"
+                                  : "border-transparent hover:bg-white/5"
+                              )}>
+                                {/* Checkbox visivo */}
+                                <div className={cn(
+                                  "w-4 h-4 rounded border-2 flex items-center justify-center transition-all shrink-0",
+                                  isChecked
+                                    ? "bg-blue-600 border-blue-500"
+                                    : isFocused
+                                      ? "border-blue-400"
+                                      : "border-white/20"
+                                )}>
+                                  {isChecked && <div className="w-2 h-2 rounded-sm bg-white" />}
+                                </div>
+                                <span className="text-xs font-mono flex-1">{verb}</span>
+                                {DEFAULT_WINE_VERBS.includes(verb) && (
+                                  <span className="text-[9px] opacity-30 uppercase tracking-widest">consigliato</span>
+                                )}
+                                {verb === 'dotnet48' && (
+                                  <span className="text-[9px] text-yellow-400/60 uppercase tracking-widest">lento · solo se richiesto</span>
+                                )}
+                              </div>
+                            )}
+                          </Focusable>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 4 — Custom Environment Variables.
+                    v1.1.0 — nascosta per Classic Console: una ROM funziona
+                    o non funziona con l'emulatore/core scelto, non ha
+                    variabili d'ambiente da passare (a differenza di
+                    Wine/Proton, dove sono spesso necessarie per singoli
+                    titoli problematici) — mostrarla qui confondeva soltanto,
+                    stesso trattamento già dato a Runner Bridge. */}
+                {selectedGame.store !== 'Classic Console' && (
+                <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                  <div className="flex items-center gap-3 mb-4">
+                    <Terminal size={16} className="text-blue-400" />
+                    <span className="text-[10px] font-black uppercase tracking-widest">Custom Env Variables</span>
+                    <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">KEY=VALUE per riga</span>
+                  </div>
+
+                  {/* v1.1.0 — un solo campo editabile per riga (prima KEY e
+                      VALUE erano due Focusable separati, raggiungibili solo
+                      con sx/dx e sempre passando per "Aggiungi variabile"
+                      scendendo dai verbs: lo scoring geometrico su righe
+                      con 3 elementi affiancati non si comportava in modo
+                      prevedibile). Un campo solo = editing più semplice
+                      (si apre la tastiera già con "KEY=VALUE" precompilato)
+                      e navigazione verticale diretta riga per riga tramite
+                      sequentialChain, senza detour. */}
+                  <div className="space-y-2">
+                    {customEnvText.split('\n').map((line, idx) => {
+                      const eq = line.indexOf('=');
+                      const k = eq > 0 ? line.slice(0, eq) : line;
+                      const v = eq > 0 ? line.slice(eq + 1) : '';
+                      const display = line.trim() ? line : '';
+                      // v1.1.18 — default true (persistente) se il KEY
+                      // corrente non è ancora nella mappa: comportamento
+                      // di sempre finché l'utente non spegne esplicitamente
+                      // lo switch per QUESTA variabile.
+                      const isPersistent = customEnvPersistentFlags[k.trim()] !== false;
+
+                      const commitLines = async (lines: string[], flagsOverride?: Record<string, boolean>) => {
+                        const next = lines.join('\n');
+                        setCustomEnvText(next);
+                        // v1.1.19 — FIX BUG REALE: prima questa funzione
+                        // leggeva sempre customEnvPersistentFlags dalla
+                        // closure di QUESTO render — corretto per la
+                        // digitazione (un semplice ri-render fra un tasto
+                        // e l'altro), ma sbagliato quando il chiamante era
+                        // il toggle di persistenza stesso: quel bottone
+                        // aggiornava lo stato (setCustomEnvPersistentFlags)
+                        // E richiamava commitLines nello stesso istante,
+                        // ma la commitLines richiamata era comunque quella
+                        // catturata PRIMA dell'aggiornamento — quindi
+                        // ri-scriveva la variabile con la persistenza
+                        // VECCHIA (opposta a quella appena impostata).
+                        // Sintomo reale osservato: spegnendo lo switch, la
+                        // variabile restava comunque salvata nel profilo,
+                        // e riapparivo al riavvio come "prima riga di
+                        // default" perché era l'unica voce in
+                        // profile.customEnv. Il chiamante ora può passare
+                        // la mappa aggiornata esplicitamente invece di
+                        // affidarsi al timing di React.
+                        const flags = flagsOverride ?? customEnvPersistentFlags;
+                        const customEnv: Record<string,string> = {};
+                        lines.forEach(l => {
+                          const i = l.indexOf('=');
+                          if (i > 0) {
+                            const kk = l.slice(0, i).trim();
+                            const vv = l.slice(i + 1).trim();
+                            const persistent = flags[kk] !== false;
+                            if (kk && persistent) customEnv[kk] = vv;
+                          }
+                        });
+                        const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
+                        const currentCompat = compatRes.ok ? await compatRes.json() : {};
+                        await fetch(`/api/games/${selectedGame.id}/compat`, {
+                          method: 'PATCH',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ ...currentCompat, customEnv })
+                        });
+                      };
+
+                      return (
+                        <div key={idx} className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <Focusable
+                            group="game-options"
+                            id={`envvar-${idx}`}
+                            className="flex-1"
+                            sequentialChain="game-options-envvars"
+                            // v1.1.18 — catena laterale estesa di uno
+                            // step: campo → switch persistenza → elimina
+                            // (prima campo → elimina soltanto). Confine
+                            // esplicito ad ogni passo, stessa logica già
+                            // stabilita per questa riga — non lasciamo
+                            // che lo scoring geometrico decida fra tre
+                            // elementi ravvicinati.
+                            neighbors={{ right: `envvar-persist-${idx}` }}
+                            onEnter={() => openKeyboardForField(
+                              `envvar-${idx}`,
+                              `Variabile #${idx + 1} — KEY=VALUE`,
+                              line,
+                              (newLine) => {
+                                const oldKey = k.trim();
+                                const newEq = newLine.indexOf('=');
+                                const newKey = (newEq > 0 ? newLine.slice(0, newEq) : newLine).trim();
+                                // v1.1.18 — migrazione del flag se il KEY
+                                // cambia: senza, rinominare una variabile
+                                // "solo installazione" la farebbe tornare
+                                // persistente per errore (il nuovo KEY non
+                                // sarebbe ancora nella mappa).
+                                // v1.1.19 — stesso fix del toggle qui sopra:
+                                // calcolo la mappa migrata in modo sincrono
+                                // e la passo esplicitamente a commitLines,
+                                // invece di richiamarla senza argomenti
+                                // (che avrebbe letto la mappa VECCHIA,
+                                // senza la migrazione, riportando la
+                                // variabile a persistente per lo stesso
+                                // identico motivo del bug del toggle).
+                                let flagsForCommit = customEnvPersistentFlags;
+                                if (newKey && newKey !== oldKey && oldKey in customEnvPersistentFlags) {
+                                  flagsForCommit = { ...customEnvPersistentFlags };
+                                  flagsForCommit[newKey] = flagsForCommit[oldKey];
+                                  delete flagsForCommit[oldKey];
+                                  setCustomEnvPersistentFlags(flagsForCommit);
+                                }
+                                const lines = customEnvText.split('\n');
+                                lines[idx] = newLine;
+                                commitLines(lines, flagsForCommit);
+                              }
+                            )}
+                          >
+                            {(isFocused) => (
+                              <div className={cn(
+                                "px-3 py-2 rounded-lg text-xs font-mono cursor-pointer transition-all border truncate",
+                                isFocused ? "border-blue-500 bg-blue-500/10" : "border-white/10 bg-black/30",
+                                !display && "opacity-30 italic"
+                              )}>
+                                {display || 'KEY=VALUE'}
+                              </div>
+                            )}
+                          </Focusable>
+                          <Focusable
+                            group="game-options"
+                            id={`envvar-persist-${idx}`}
+                            // v1.1.18 — interruttore di persistenza, stesso
+                            // stile pill già usato per plugin/runner
+                            // (ATTIVO/DISATTIVO). Acceso di default =
+                            // comportamento di sempre (scritto nel profilo,
+                            // letto al lancio). Spento = solo per la
+                            // prossima installazione, mai scritto nel
+                            // profilo persistente.
+                            neighbors={{ left: `envvar-${idx}`, right: `envvar-del-${idx}` }}
+                            onEnter={() => {
+                              const key = k.trim();
+                              if (!key) return; // riga senza KEY: niente da alternare
+                              // v1.1.19 — calcolo la mappa aggiornata QUI,
+                              // sincrono, e la passo esplicitamente a
+                              // commitLines invece di affidarmi al fatto
+                              // che React abbia già applicato
+                              // setCustomEnvPersistentFlags prima che
+                              // commitLines venga invocata — non lo fa in
+                              // tempo, è esattamente il bug appena corretto.
+                              const updatedFlags = { ...customEnvPersistentFlags, [key]: !isPersistent };
+                              setCustomEnvPersistentFlags(updatedFlags);
+                              commitLines(customEnvText.split('\n'), updatedFlags);
+                              play('select');
+                            }}
+                          >
+                            {(isFocused) => (
+                              <div className={cn(
+                                "px-2.5 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all border shrink-0 whitespace-nowrap",
+                                isPersistent
+                                  ? (isFocused ? "border-blue-400 bg-blue-500/20 text-blue-300" : "border-white/10 bg-white/5 text-blue-300/70")
+                                  : (isFocused ? "border-amber-400 bg-amber-500/20 text-amber-300" : "border-amber-500/30 bg-amber-500/5 text-amber-400/80")
+                              )}>
+                                {isPersistent ? 'Persistente' : 'Solo install.'}
+                              </div>
+                            )}
+                          </Focusable>
+                          <Focusable
+                            group="game-options"
+                            id={`envvar-del-${idx}`}
+                            // v1.1.0 — non fa parte della catena: è
+                            // un'azione laterale, raggiungibile con dx dal
+                            // campo della riga, non con giù/su (altrimenti
+                            // ricompariva lo stesso problema — ogni riga
+                            // interromperebbe la discesa verticale).
+                            neighbors={{ left: `envvar-persist-${idx}` }}
+                            onEnter={() => {
+                              const lines = customEnvText.split('\n').filter((_, i) => i !== idx);
+                              commitLines(lines.length ? lines : ['']);
+                              play('back');
+                            }}
+                          >
+                            {(isFocused) => (
+                              <div className={cn(
+                                "w-8 h-8 rounded-lg flex items-center justify-center transition-all shrink-0",
+                                isFocused ? "bg-red-600 text-white" : "bg-white/5 text-white/40"
+                              )}>
+                                <X size={14} />
+                              </div>
+                            )}
+                          </Focusable>
+                        </div>
+                        {/* v1.1.18 — caption esplicita richiesta: non
+                            fidarsi del solo colore/testo del pill per
+                            comunicare una differenza di comportamento così
+                            importante (una variabile persa per sempre dopo
+                            l'installazione se non ci si fa caso). */}
+                        <p className={cn(
+                          "text-[9px] pl-1",
+                          isPersistent ? "text-white/25" : "text-amber-400/70"
+                        )}>
+                          {isPersistent
+                            ? 'Salvata: verrà applicata anche a ogni lancio futuro del gioco.'
+                            : 'Non salvata: verrà applicata solo alla prossima installazione, poi dimenticata.'}
+                        </p>
+                        </div>
+                      );
+                    })}
+
+                    <Focusable
+                      group="game-options"
+                      id="envvar-add"
+                      sequentialChain="game-options-envvars"
+                      onEnter={() => {
+                        const lines = customEnvText.split('\n');
+                        lines.push('');
+                        setCustomEnvText(lines.join('\n'));
+                        play('select');
+                        setTimeout(() => setFocusedId(`envvar-${lines.length - 1}`), 50);
+                      }}
+                    >
+                      {(isFocused) => (
+                        <div className={cn(
+                          "flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border border-dashed",
+                          isFocused ? "border-blue-500 bg-blue-500/10 text-blue-400" : "border-white/10 text-white/30"
+                        )}>
+                          + Aggiungi variabile
+                        </div>
+                      )}
+                    </Focusable>
+                  </div>
+                </div>
+                )}
+
+                {/* v0.99.35 — Switch "Disabilita sync NT veloce", solo
+                    GOG/Epic e solo quando il gioco non è ancora
+                    installato (riguarda esclusivamente la fase di
+                    creazione prefix/dipendenze, non il lancio). */}
+                {!selectedGame.isInstalled && (selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games') && (
+                  <Focusable
+                    group="game-options"
+                    id="toggle-disable-wine-sync"
+                    onEnter={async () => {
+                      const next = !disableWineSync;
+                      setDisableWineSync(next);
+                      const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
+                      const current = compatRes.ok ? await compatRes.json() : {};
+                      await fetch(`/api/games/${selectedGame.id}/compat`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ...current, disableWineSync: next }),
+                      });
+                      play('select');
+                    }}
+                  >
+                    {(isFocused) => (
+                      <div className={cn(
+                        "p-4 rounded-2xl mb-3 transition-all",
+                        isFocused ? "border-2 border-blue-500 bg-blue-500/5" : theme === 'dark' ? "border border-white/10 bg-white/5" : "border border-gray-200 bg-gray-50"
+                      )}>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[11px] font-black uppercase tracking-widest">
+                            Disabilita sync NT veloce
+                          </span>
+                          <div className={cn(
+                            "w-11 h-6 rounded-full transition-all relative shrink-0",
+                            disableWineSync ? "bg-blue-500" : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                          )}>
+                            <div className={cn(
+                              "absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all",
+                              disableWineSync ? "left-[22px]" : "left-0.5"
+                            )} />
+                          </div>
+                        </div>
+                        <p className="text-[10px] opacity-50 mt-2 leading-relaxed">
+                          Attiva solo se l'installazione si blocca durante la creazione
+                          dell'ambiente Wine senza un motivo apparente. Rallenta
+                          leggermente la sincronizzazione interna di Wine, ma evita
+                          un blocco noto su alcuni sistemi durante questa fase.
+                        </p>
+                      </div>
+                    )}
+                  </Focusable>
+                )}
+
+                {/* v0.99.35 — Switch "Usa Known Fixes (Heroic)".
+                    v0.99.38 — esteso a GOG: il backend ora risolve l'ID
+                    numerico GOG richiesto dal repository (vedi
+                    downloadManager.ts/fetchGogNumericId) — la
+                    restrizione "solo Epic" qui era rimasta dal periodo in
+                    cui GOG non era ancora supportato, andava rimossa
+                    insieme al resto o il toggle sarebbe stato scritto nel
+                    backend ma mai visibile/attivabile per GOG dall'overlay.
+                    Visibile solo quando il gioco non è ancora installato,
+                    per entrambi gli store. */}
+                {!selectedGame.isInstalled && (selectedGame.store === 'Epic Games' || selectedGame.store === 'GOG Galaxy') && (
+                  <Focusable
+                    group="game-options"
+                    id="toggle-use-known-fixes"
+                    onEnter={async () => {
+                      const next = !useKnownFixes;
+                      setUseKnownFixes(next);
+                      const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
+                      const current = compatRes.ok ? await compatRes.json() : {};
+                      await fetch(`/api/games/${selectedGame.id}/compat`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ...current, useKnownFixes: next }),
+                      });
+                      play('select');
+                    }}
+                  >
+                    {(isFocused) => (
+                      <div className={cn(
+                        "p-4 rounded-2xl mb-3 transition-all",
+                        isFocused ? "border-2 border-blue-500 bg-blue-500/5" : theme === 'dark' ? "border border-white/10 bg-white/5" : "border border-gray-200 bg-gray-50"
+                      )}>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[11px] font-black uppercase tracking-widest">
+                            Usa Known Fixes (Heroic)
+                          </span>
+                          <div className={cn(
+                            "w-11 h-6 rounded-full transition-all relative shrink-0",
+                            useKnownFixes ? "bg-blue-500" : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                          )}>
+                            <div className={cn(
+                              "absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all",
+                              useKnownFixes ? "left-[22px]" : "left-0.5"
+                            )} />
+                          </div>
+                        </div>
+                        <p className="text-[10px] opacity-50 mt-2 leading-relaxed">
+                          Cerca dipendenze note per questo gioco nel database
+                          pubblico di Heroic Games Launcher prima dell'installazione.
+                          Se trovate, sostituiscono i verb configurati qui sotto.
+                          Se il gioco non è coperto, riceverai una notifica e
+                          verranno usati i verb di default.
+                        </p>
+                      </div>
+                    )}
+                  </Focusable>
+                )}
+
+                {/* Launch button nell'overlay */}
+                {selectedGame.isInstalled ? (
+                  <Focusable group="game-options" id="game-options-uninstall" onEnter={() => {
+                    setPendingAction({ type: 'uninstall', gameId: selectedGame.id, gameTitle: selectedGame.title });
+                    setShowGameOptions(false);
+                    setShowDownloads(true);
+                    setActiveGroup('downloads');
+                    play('select');
+                    setTimeout(() => setFocusedId('pending-confirm'), 80);
+                  }}>
+                    {(isFocused) => (
+                      <button className={cn(
+                        "w-full py-5 rounded-2xl font-black text-xl italic transition-all flex items-center justify-center gap-3 shadow-2xl",
+                        isFocused ? "bg-red-500 text-white scale-[1.02]" : "bg-red-700/80 hover:bg-red-600 text-white"
+                      )}>
+                        <Trash2 size={24} /> DISINSTALLA
+                      </button>
+                    )}
+                  </Focusable>
+                ) : (
+                  <Focusable group="game-options" id="game-options-install" onEnter={() => {
+                    // v1.1.18 — snapshot catturato QUI, non alla conferma:
+                    // queste righe non hanno una copia nel DB da cui
+                    // ri-leggere in modo sicuro (per costruzione — è
+                    // proprio il punto dello switch spento). L'unica
+                    // finestra affidabile per leggerle è adesso, mentre lo
+                    // stato di questa sessione dell'overlay è ancora quello
+                    // giusto per selectedGame.
+                    const installOnlyEnv: Record<string, string> = {};
+                    customEnvText.split('\n').forEach(l => {
+                      const i = l.indexOf('=');
+                      if (i > 0) {
+                        const kk = l.slice(0, i).trim();
+                        const vv = l.slice(i + 1).trim();
+                        const persistent = customEnvPersistentFlags[kk] !== false;
+                        if (kk && !persistent) installOnlyEnv[kk] = vv;
+                      }
+                    });
+                    setPendingAction({
+                      type: 'install', gameId: selectedGame.id, gameTitle: selectedGame.title,
+                      installOnlyEnv: Object.keys(installOnlyEnv).length > 0 ? installOnlyEnv : undefined,
+                    });
+                    setShowGameOptions(false);
+                    setShowDownloads(true);
+                    setActiveGroup('downloads');
+                    play('select');
+                    setTimeout(() => setFocusedId('pending-confirm'), 80);
+                  }}>
+                    {(isFocused) => (
+                      <button className={cn(
+                        "w-full py-5 rounded-2xl font-black text-xl italic transition-all flex items-center justify-center gap-3 shadow-2xl",
+                        isFocused ? "bg-green-500 text-white scale-[1.02]" : "bg-green-700 hover:bg-green-600 text-white"
+                      )}>
+                        <Download size={24} /> INSTALLA
+                      </button>
+                    )}
+                  </Focusable>
+                )}
+              </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Compatibility Overlay */}
+      <AnimatePresence>
+        {showKeyboard && (
+          <div className="fixed inset-0 z-[200] flex flex-col items-center justify-end pb-8 md:pb-12 px-2 pointer-events-none bg-black/40 backdrop-blur-sm">
+            {/* Testo digitato — visibile dal divano.
+                v1.1.15 — prima mostrava SEMPRE searchQuery, anche quando
+                si stava modificando un campo diverso (executable_path,
+                custom_env, launch options...): un bug reale, non solo un
+                limite di design — editando un campo qualunque, questo
+                riquadro restava vuoto/mostrava "Inizia a digitare..."
+                invece del valore vero. Ora riflette activeField quando
+                presente, con etichetta del campo, testo che va a capo
+                (non più troncato con un puntino) e scroll interno oltre
+                una certa altezza per stringhe molto lunghe — l'unico
+                punto in cui leggere/correggere il testo, dato che
+                l'intestazione interna della tastiera è stata rimossa
+                (vedi VirtualKeyboard.tsx). */}
+            <div className="pointer-events-none mb-4 w-full max-w-4xl px-2">
+              <div className="flex items-start gap-3 bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl px-6 py-4 min-h-[4.5rem] max-h-[9rem] overflow-y-auto">
+                {activeField
+                  ? <Edit3 size={20} className="text-blue-400 shrink-0 opacity-60 mt-1" />
+                  : <Search size={20} className="text-blue-400 shrink-0 opacity-60 mt-1" />}
+                <div className="flex-1 min-w-0">
+                  {activeField && (
+                    <div className="text-[10px] font-black uppercase tracking-widest text-blue-300/70 mb-1">
+                      {activeField.label}
+                    </div>
+                  )}
+                  {/* v1.1.16 — tip contestuale del suggerimento (Shift)
+                      attualmente a fuoco: cosa abilita esattamente, non
+                      solo il valore grezzo — utile soprattutto per le
+                      variabili d'ambiente, dove "DXVK_ASYNC=1" da solo
+                      non dice nulla a chi non lo conosce già. */}
+                  {suggestionTip && (
+                    <div className="text-[11px] text-blue-200/80 italic mb-1 leading-snug">
+                      {suggestionTip}
+                    </div>
+                  )}
+                  <div className={cn(
+                    "text-white break-all whitespace-pre-wrap leading-snug",
+                    activeField ? "font-mono text-lg md:text-xl" : "font-black tracking-wide text-2xl"
+                  )}>
+                    {(activeField ? activeField.value : searchQuery) || (
+                      <span className="opacity-20 italic font-normal text-lg">
+                        {activeField ? 'Vuoto…' : 'Inizia a digitare...'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {(activeField ? activeField.value : searchQuery) && (
+                  <span className="text-[10px] font-mono text-white/30 shrink-0 mt-1">
+                    {(activeField ? activeField.value : searchQuery).length} car.
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="pointer-events-auto w-full max-w-4xl">
+              <VirtualKeyboard 
+                value={activeField ? activeField.value : searchQuery}
+                onChange={(val) => {
+                  if (activeField) {
+                    setActiveField(prev => prev ? { ...prev, value: val } : null);
+                  } else {
+                    setSearchQuery(val);
+                  }
+                }}
+                onClose={() => {
+                  if (activeField) {
+                    closeKeyboard();
+                  } else {
+                    // FIX v0.99.6: "Fatto" sulla VK durante una ricerca
+                    // chiudeva solo showKeyboard, senza mai riportare
+                    // activeGroup a null. La VK si chiudeva visivamente ma
+                    // lo scope restava bloccato su 'keyboard' — un group
+                    // ormai senza alcun Focusable montato dentro (la VK è
+                    // smontata), quindi D-pad/stick non navigavano più
+                    // nulla. La libreria filtrata era corretta nei dati
+                    // (searchQuery non cambia), ma irraggiungibile dal
+                    // controller. Ora "Fatto" riporta lo scope alla
+                    // dashboard e seleziona il primo risultato filtrato,
+                    // lasciando la ricerca/filtro intatti — l'utente può
+                    // navigare i risultati, lanciare o aprire l'overlay su
+                    // uno di essi, e premere Y in un secondo momento per
+                    // chiudere la ricerca quando ha finito.
+                    setShowKeyboard(false);
+                    setActiveGroup(null);
+                    setTimeout(() => focusFirstInGroup('dashboard'), 80);
+                  }
+                }}
+                theme={theme}
+                altSuggestions={keyboardAltSuggestions}
+                onSuggestionFocus={setSuggestionTip}
+              />
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Footer */}
+      <footer className={cn(
+        "h-16 border-t flex items-center px-12 gap-16 shrink-0 z-30 transition-colors",
+        theme === 'dark' ? "bg-[#090a0d] border-white/10" : "bg-white border-gray-200"
+      )}>
+        {inputDevice === 'controller' ? (
+          <>
+            <Hint icon="A" color="bg-green-500" label="Select" theme={theme} />
+            <Hint icon="B" color="bg-red-500" label="Back" theme={theme} />
+            <Hint icon="X" color="bg-blue-500" label="Quick Actions" theme={theme} />
+            <Hint icon="Y" color="bg-yellow-500" label="Global Search" theme={theme} />
+            <div className="h-6 w-[1px] bg-blue-500/20" />
+            <div className="flex items-center gap-4">
+              <div className="flex gap-1.5">
+                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">L1</div>
+                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">R1</div>
+              </div>
+              <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">Jump Store</span>
+            </div>
+            <div className="h-6 w-[1px] bg-blue-500/20" />
+            {/* v1.0.0 — L2/R2: stesso stile a "pill" rettangolare di L1/R1
+                sopra (non il cerchio colorato di A/B/X/Y — richiesta
+                esplicita di coerenza con quel gruppo). A differenza di
+                L1/R1 (un'unica azione condivisa, un'unica etichetta), L2 e
+                R2 aprono due pannelli diversi (Download/Notifiche), quindi
+                ciascuno ha la propria etichetta affiancata invece di
+                condividerne una sola. */}
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-1.5">
+                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">L2</div>
+                <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">Download</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">R2</div>
+                <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">Notifications</span>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <Hint icon="⏎" color="bg-gray-500" label="Execute" theme={theme} />
+            <Hint icon="⎋" color="bg-gray-500" label="Exit View" theme={theme} />
+            <Hint icon="TAB" color="bg-blue-500" label="Next Group" theme={theme} />
+            <Hint icon="/" color="bg-yellow-500" label="Spotlight" theme={theme} />
+          </>
+        )}
+        
+        <div className="ml-auto flex items-center gap-8">
+          {/* Download indicator */}
+          <Focusable group="footer-bar" id="footer-downloads" onEnter={() => {
+            setShowDownloads(p => {
+              const next = !p;
+              setShowNotifications(false);
+              setActiveGroup(next ? 'downloads' : null);
+              if (next) setTimeout(() => setFocusedId('downloads-close'), 50);
+              return next;
+            });
+          }}>
+            {(isFocused) => (
+              <button className={cn("flex items-center gap-4 transition-all", isFocused ? "opacity-100 scale-105" : "hover:opacity-80 opacity-70")}>
+                <Activity size={18} className={cn("transition-colors", downloads.some(d => d.status === 'downloading') ? "text-green-500 animate-pulse" : "text-blue-500")} />
+                <div className="flex flex-col text-left">
+                  <span className="text-[9px] font-black opacity-30 uppercase tracking-[0.2em] leading-none">Net Bridge</span>
+                  <span className="text-sm font-mono font-black italic text-blue-500 leading-none">
+                    {downloads.find(d => d.status === 'downloading')?.speed || "0.0 MB/s"}
+                  </span>
+                </div>
+              </button>
+            )}
+          </Focusable>
+          <div className="h-8 w-[1px] bg-blue-500/20" />
+          {/* Campanella notifiche con badge */}
+          <Focusable group="footer-bar" id="footer-notifications" onEnter={() => {
+            setShowNotifications(p => {
+              const next = !p;
+              setShowDownloads(false);
+              setActiveGroup(next ? 'notifications' : null);
+              if (next) {
+                setTimeout(() => setFocusedId('notifications-close'), 50);
+                setNotifications(prev => prev.map(n => ({ ...n, seen: true })));
+              }
+              return next;
+            });
+          }}>
+            {(isFocused) => (
+              <button className={cn(
+                "relative flex items-center justify-center w-9 h-9 rounded-full transition-all",
+                isFocused ? "bg-white/20 scale-110" : "hover:bg-white/10"
+              )}>
+                {unreadCount > 0
+                  ? <BellDot size={20} className="text-blue-400" />
+                  : <Bell size={20} className={cn(theme === 'dark' ? "opacity-40" : "opacity-50")} />}
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full text-[8px] font-black bg-blue-600 text-white flex items-center justify-center">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </button>
+            )}
+          </Focusable>
+          <div className="h-8 w-[1px] bg-blue-500/20" />
+          <div className="text-xl font-black italic tracking-tighter">
+            {time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function OptionItem({ id, group, icon: Icon, label, value, onClick }: any) {
+  const { play } = useAudio();
+  return (
+    <Focusable id={id} group={group} onEnter={() => { onClick?.(); play('select'); }}>
+      {(isFocused) => (
+        <div className={cn(
+          "w-full p-4 rounded-xl flex items-center justify-between transition-all border",
+          isFocused ? "bg-blue-600 border-blue-500 text-white scale-105 shadow-xl shadow-blue-500/30" : "bg-white/5 border-transparent opacity-60"
+        )}>
+          <div className="flex items-center gap-4">
+            <Icon size={18} strokeWidth={3} />
+            <span className="font-black italic uppercase text-sm tracking-tight">{label}</span>
+          </div>
+          <span className="font-mono text-xs font-bold opacity-70">{value}</span>
+        </div>
+      )}
+    </Focusable>
+  );
+}
+
+function ToggleItem({ id, group, label, active }: { id: string, group?: string, label: string, active: boolean }) {
+  const { play } = useAudio();
+  return (
+    <Focusable id={id} group={group} onEnter={() => play('select')}>
+      {(isFocused) => (
+        <div className={cn(
+          "w-full p-5 rounded-2xl flex items-center justify-between transition-all border shadow-lg",
+          isFocused ? "bg-blue-600 border-blue-400 text-white scale-[1.02]" : "bg-white/5 border-white/5 opacity-70"
+        )}>
+          <span className="font-black uppercase text-sm tracking-tight italic">{label}</span>
+          <div className={cn(
+             "w-12 h-6 rounded-full relative transition-colors",
+             active ? "bg-green-500" : "bg-white/20"
+          )}>
+             <div className={cn(
+               "absolute top-1 w-4 h-4 bg-white rounded-full transition-all",
+               active ? "right-1" : "left-1"
+             )} />
+          </div>
+        </div>
+      )}
+    </Focusable>
+  );
+}
+
+function Hint({ icon, color, label, theme }: { icon: string, color: string, label: string, theme: Theme }) {
+  return (
+    <div className="flex items-center gap-3 group cursor-default">
+      <div className={cn(
+        "w-8 h-8 rounded-full text-black flex items-center justify-center font-black text-sm shadow-xl transition-transform group-hover:scale-110",
+        color
+      )}>
+        {icon}
+      </div>
+      <span className={cn(
+        "text-xs font-black opacity-40 group-hover:opacity-100 transition-opacity uppercase tracking-[0.2em] italic",
+        theme === 'dark' ? "text-white" : "text-black"
+      )}>{label}</span>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <FocusProvider>
+      <AudioProvider>
+        <ScalingContainer>
+          <MainApp />
+        </ScalingContainer>
+        <NavDebugOverlay />
+      </AudioProvider>
+    </FocusProvider>
+  );
+}

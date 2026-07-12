@@ -1,0 +1,147 @@
+{
+    "name": "X-Launcher HTPC",
+    "description": "A high-performance HTPC dashboard for Linux gamers, inspired by Steam Big Picture and GOG Galaxy. Features multi-store integration, runner management (Wine/Proton), and controller-first navigation.",
+    "requestFramePermissions": [],
+    "majorCapabilities": [
+        "AI-powered game suggestions",
+        "Multi-store sync"
+    ],
+    "currentStep": 18,
+    "patches": [
+        {
+            "id": "step4-001",
+            "description": "UI configurazione per-game completa: compat reattivi + Game Config + Custom Env",
+            "appliedAt": "2026-05-22T20:06:30.003Z",
+            "files": [
+                "src/App.tsx"
+            ]
+        },
+        {
+            "id": "step6-001",
+            "description": "Plugin Epic Games via legendary CLI: libreria completa con cover art reali, filtro DLC, rilevamento installati",
+            "appliedAt": "2026-05-24T16:44:31.606Z",
+            "files": [
+                "src/backend/plugins/epicPlugin.ts",
+                "X-Launcher-Roadmap.md"
+            ]
+        },
+        {
+            "id": "step16-001",
+            "description": "Navigazione gamepad completa: store bar/footer su dorsali, menu X-Launcher, Settings a tab, Avatar Library, Store Accounts (login/logout Epic+GOG), Runner tab (install/uninstall con conferma e progress), Tool di sistema/Spazio disco come aree informative navigabili",
+            "appliedAt": "2026-06-24T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/components/FocusProvider.tsx",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/GamepadTester.tsx",
+                "src/hooks/useGamepad.ts",
+                "src/backend/plugins/base.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/compatibilityManager.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/notificationEngine.ts",
+                "src/index.css",
+                "server.ts"
+            ]
+        },
+        {
+            "id": "step16-002",
+            "description": "Fix scroll/focus nella tab System (contenitori scrollabili rispettati, header/tab sempre fissi, scroll manuale fino ai bordi reali, primo focus deterministico su ogni tab anche premendo A direttamente). Menu X-Launcher: toggle Fullscreen reso realmente funzionale e persistito (kiosk-launch.sh legge la preferenza all'avvio), nuova voce Exit con conferma a 2 tap che chiude il daemon e la Dashboard",
+            "appliedAt": "2026-06-24T12:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/components/FocusProvider.tsx",
+                "src/backend/appConfig.ts",
+                "server.ts",
+                "kiosk-launch.sh"
+            ]
+        },
+        {
+            "id": "step16-003",
+            "description": "Centro notifiche: scorciatoie L2/R2, stato 'seen' distinto da 'status' (una notifica resta non letta finché l'utente non apre fisicamente il pannello, indipendentemente da timeout automatici), testo più leggibile, pulsante 'Pulisci storico' reso navigabile. Fix autenticazione GOG: isAuthenticated() passato da un'euristica fragile su --list a --check-login-status (comando dedicato, exit code binario documentato). Serie di fix su scroll/focus della libreria: isVisible() separata in due funzioni distinte (scoring direzionale vs fallback generico, la conflazione escludeva permanentemente le righe sotto la piega in finestra più piccola), strategia di scroll a centraggio invece di scroll-al-bordo-minimo (elimina il confine critico che causava 'salita laterale a scatti' tra card adiacenti), parametro axis per evitare ricalcoli verticali su movimento orizzontale, animazione di scroll manuale e cancellabile per restare fluida senza reintrodurre race condition su pressioni rapide ripetute",
+            "appliedAt": "2026-06-24T22:30:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/types.ts",
+                "src/components/FocusProvider.tsx",
+                "src/backend/plugins/gogPlugin.ts"
+            ]
+        },
+        {
+            "id": "step17-001-ai-advisor",
+            "description": "AI Advisor completo (Step 15d): interfaccia comune AIProviderPlugin, KB ampliata a 34 pattern, cinque adapter (Ollama/Gemini/DeepSeek/ChatGPT/Claude), persistenza tentativi (limite 3, storico, firma errore deduplicata)/credenziali/budget token, collegamento a notificationEngine.ts con fallback silenzioso e triplo esito suggestion/clarify/give_up, UI di gestione in Manage Accounts (tab visibile solo se Ollama raggiungibile, toggle a rettangolo-di-focus, test connessione). Corrette due regressioni reali: generi GOG/Epic/Steam bloccati su '[]' nel COALESCE, race condition nel rilevamento chiusura gioco. Cursore mouse spostato a XFixes via tray.py (indipendente dal focus Chromium). Cattura log di lancio per diagnosticare fallimenti silenziosi (wine parte ma l'exe non esiste/crasha). Tastiera virtuale riscritta con layout IT/EN-US completi e vicini di navigazione espliciti.",
+            "appliedAt": "2026-07-06T00:00:00.000Z",
+            "files": [
+                "src/backend/aiProviders/base.ts",
+                "src/backend/aiProviders/attemptTracker.ts",
+                "src/backend/aiProviders/registry.ts",
+                "src/backend/aiProviders/orchestrator.ts",
+                "src/backend/aiProviders/ollama.ts",
+                "src/backend/aiProviders/gemini.ts",
+                "src/backend/aiProviders/openaiCompatible.ts",
+                "src/backend/aiProviders/claude.ts",
+                "src/backend/notificationEngine.ts",
+                "src/backend/db.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/runners/base.ts",
+                "src/backend/runners/implementations.ts",
+                "src/components/VirtualKeyboard.tsx",
+                "src/App.tsx",
+                "src/index.css",
+                "server.ts",
+                "tray.py",
+                "kb-seed.json"
+            ]
+        },
+        {
+            "id": "step18-001-overlay-cleanup",
+            "description": "Pulizia overlay Game Options (Runner Bridge nascosta per Classic Console, core RetroArch filtrati per sistema con fix della persistenza DB del campo 'system', layout Compatibility Layer uniforme senza stiramento dell'ultima voce dispari, scrollbar coerente con custom-scrollbar, navigazione asimmetrica tra sezioni corretta con vicini espliciti calcolati dinamicamente). Box descrizione del pannello info reso flessibile con max-height dinamico, bug di arrotondamento sub-pixel di scrollTop scoperto e corretto con un accumulatore JS proprio dopo una sessione di diagnostica approfondita. Legenda L2/R2 aggiunta in fondo alla dashboard. Un errore introdotto durante il fix di navigazione (selectedGame usato prima della dichiarazione, causa di schermo nero ad ogni caricamento) è stato trovato e corretto nella stessa sessione; il metodo di verifica sintattica è stato esteso per includere le categorie di errore che lo avevano lasciato passare.",
+            "appliedAt": "2026-07-09T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/backend/db.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "src/types.ts",
+                "server.ts"
+            ]
+        },
+        {
+            "id": "step18-002-navigation-model",
+            "description": "Modello di navigazione controller unificato, sviluppato a partire da un documento SNI (Semantic Navigation Interface) fornito dall'utente: NavigationStrategy ('geometric'/'sequential') dichiarabile per group; sequentialChain+chainAxis ('vertical'/'horizontal'/'flow') per liste dinamiche annidate in group misti, incluso il caso di liste flex-wrap con elementi di larghezza variabile il cui punto di a-capo non è prevedibile. Migrati tab Settings, righe Custom Env Variables (con switch di persistenza per-riga per variabili valide solo in fase di installazione), Runner Bridge, core RetroArch, riga API Key/Test/Rimuovi dei provider cloud AI Advisor, chip di suggerimento della tastiera virtuale. Bug di navigazione chiusi in overlay Game Options, Settings/System/AI Advisor, area di test controller (nuova modalità di cattura input con uscita a pressione prolungata di B, LED di stato, timer indipendente dal meccanismo di ottimizzazione re-render). Causa radice dei tagli di impaginazione: unità vh incompatibili col canvas virtuale scalato di ScalingContainer, sostituite con percentuali — regola di progetto permanente aggiunta alla roadmap. Tastiera virtuale ristrutturata: un solo campo di testo (bug reale corretto, prima sempre agganciato alla ricerca invece che al campo in modifica), lingua/incolla come tasti fisici, suggerimenti contestuali per Launch Arguments e Custom Env (Wine/Proton) con tip esplicativo. Regola di progetto inaugurata: ogni nuova feature di navigazione prevede uno strumento di debug spegnibile (navDebugBus/NavDebugOverlay, Ctrl+Alt+N).",
+            "appliedAt": "2026-07-11T00:00:00.000Z",
+            "files": [
+                "src/components/FocusProvider.tsx",
+                "src/components/NavDebugOverlay.tsx",
+                "src/lib/navDebugBus.ts",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/GamepadTester.tsx",
+                "src/hooks/useGamepad.ts",
+                "src/App.tsx",
+                "src/backend/db.ts",
+                "server.ts",
+                "X-Launcher-Roadmap.md"
+            ]
+        },
+        {
+            "id": "step18-003-library-reliability-epic-power",
+            "description": "Affidabilità libreria/installazione: card che 'dimenticava' lo stato installato/disinstallato al cambio store, diagnosticata con log mirati attraverso una catena di cause reali distinte (notifica di libreria mai propagata dopo install/uninstall; sync GOG periodico reso asimmetrico, non revertire su segnale ambiguo di resolveGogExe; guard di sequenza contro fetch fuori ordine; connessione SSE persistente invece di chiusa/riaperta ad ogni cambio store, che perdeva eventi nella finestra di disconnessione; causa reale finale, cache di metadataManager che restituiva l'intero oggetto gioco stantio incluso isInstalled/executablePath). Conteggi Store Accounts corretti (erano filtrati dalla navigazione corrente della dashboard, non riflettevano mai i totali reali). Notifiche: auto-dismiss rimosso per gli esiti significativi (installazione completata), notifiche ripetute per lo stesso gioco sostituiscono invece di impilarsi, messaggio corretto sul cambio modalità schermo (richiede un riavvio, non immediato). Lancio Epic Games migrato a 'legendary launch' (risolve titoli con verifica di proprietà EOS severa, es. SIFU, mantenendo il runner Wine/Proton già configurato per ogni gioco) con rilevamento 'in esecuzione' per nome processo e periodo di grazia per l'avvio lento (autenticazione EOS online). Inibizione screensaver/sospensione durante il gioco per tutti gli store (xset + systemd-inhibit), con diagnosi in due tempi di un problema di pacchetto mancante sul sistema di test. Custom Env 'solo installazione': switch per-riga, non scritto nel profilo persistente, applicato una sola volta al processo di installazione.",
+            "appliedAt": "2026-07-12T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/types.ts",
+                "server.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/downloadManager.ts",
+                "src/backend/metadataManager.ts",
+                "src/backend/runners/implementations.ts"
+            ]
+        }
+    ],
+    "version": "1.1.35-rc.2",
+    "milestone": "v1.1.35-rc.2 — Modello di navigazione controller unificato (sequentialChain/chainAxis, tastiera virtuale ristrutturata) e affidabilità completa di libreria/installazione (card sempre coerenti, lancio Epic via legendary, inibizione screensaver durante il gioco).",
+    "date": "2026-07-12",
+    "notes": "Sessione estesa in due parti. Prima parte: razionalizzazione del sistema di navigazione controller a partire da un modello concettuale (SNI) fornito dall'utente, con generalizzazione progressiva del meccanismo (sequentialChain, poi chainAxis con la variante 'flow' per liste a capo imprevedibile) via via che nuovi casi reali lo richiedevano — pattern ricorrente: un fix per un caso specifico rivela un principio più generale, applicato retroattivamente. Seconda parte: diagnosi approfondita di un bug di persistenza libreria che ha richiesto cinque tentativi progressivi prima della causa radice reale (cache di metadataManager) — ogni tentativo indirizzava una causa reale e verificata nel codice, non ipotesi infondate, ma nessuno era quello finale finché i log diretti dell'utente non hanno reso possibile isolarla con certezza. Lezione esplicita: quando l'analisi statica del codice non basta più dopo diversi fix reali falliti, strumentare con log mirati batte continuare a ipotizzare. Aggiunto anche supporto Epic Games via legendary launch (SIFU e titoli EOS-severi) e inibizione screensaver per sessioni di gioco prolungate da controller."
+}
