@@ -1195,6 +1195,61 @@ Nuovo tab nel pannello Settings (accanto a Plugins e Input):
 
 -----
 
+## Step 19 — Funzionalità di secondo livello (roadmap pianificata dopo v1.1.36)
+
+Definita dopo la chiusura del ciclo di affidabilità libreria/Epic/screensaver (v1.1.20→v1.1.36). Quattro fronti indipendenti, non ancora iniziati — ordine di elenco, non necessariamente di priorità.
+
+### 19a — Protocollo `xlaunch://` comune a tutte le librerie
+
+Un URI scheme unico (`xlaunch://<store>/<id>` o simile) per lanciare un gioco da fuori la Dashboard — link diretti da un browser, script esterni, o altre integrazioni — indipendentemente dallo store di provenienza. Da valutare: registrazione del protocollo a livello di sistema (`xdg-mime`/`.desktop` con `MimeType=x-scheme-handler/xlaunch`), e come risolvere l'id gioco in modo univoco fra store diversi che potrebbero avere convenzioni di id differenti (già visto in questa sessione: `gog-<slug>`, `epic-<appName esadecimale>`, `classic-<slug>-<hash>`).
+
+### 19b — Supporto multilingua (Italiano/Inglese built-in + sistema di traduzioni caricabili)
+
+**Problema attuale, confermato dall'utente**: l'interfaccia mescola italiano e inglese in modo incoerente — alcune stringhe sono in un lingua, altre nell'altra, senza un criterio. Da costruire:
+- Sistema di stringhe centralizzato (i18n) invece di testo cablato sparso nei componenti — probabilmente il lavoro più esteso dei quattro, dato il numero di stringhe già scritte direttamente in JSX in tutta l'app
+- Due lingue built-in complete (Italiano, Inglese)
+- Meccanismo per caricare pacchetti di traduzione aggiuntivi (file esterni, non ricompilazione) per altre lingue
+- Autorilevamento della lingua di sistema all'avvio, con possibilità di override manuale nelle Impostazioni
+
+### 19c — Plugin store: Amazon Games e itch.io
+
+Amazon Games è già presente nell'elenco plugin (visto più volte nei log di questa sessione come "disabilitato — skip") — probabilmente un plugin già abbozzato ma mai completato o mai attivato di default. itch.io da valutare da zero: non ha un client ufficiale Linux con CLI paragonabile a `legendary`/`lgogdownloader`, andrebbe verificato se esiste un tool di terze parti equivalente o se serve un approccio diverso (es. API itch.io dirette + gestione manuale dei file scaricati).
+
+### 19d — Supporto launcher di terze parti condivisi (Ubisoft Connect, EA App, Rockstar Games Launcher, Battle.net)
+
+**Obiettivo**: questi launcher, se richiesti da un gioco (es. un titolo Ubisoft venduto su Epic o GOG che internamente richiede Ubisoft Connect), vanno installati **una sola volta** e resi disponibili a tutti i giochi di qualunque store che ne abbiano bisogno — non una copia duplicata per ogni prefix di gioco, come accadrebbe lasciando fare al runner in isolamento. Supporto comune sia per prefix Wine sia Proton, in base al runner assegnato al gioco specifico (stesso principio già stabilito con il lancio Epic via `legendary launch`, che rispetta il runner scelto per gioco invece di imporne uno proprio). Da progettare: dove vive il prefix condiviso di ciascun launcher di terze parti (una cartella dedicata fuori dai prefix per-gioco), come i giochi che ne hanno bisogno vi si "agganciano" (variabile d'ambiente? percorso iniettato nel lancio?), e come si gestisce l'installazione iniziale di ciascun launcher (manuale la prima volta, poi riusata automaticamente).
+
+**Nessuno dei quattro è ancora iniziato.**
+
+-----
+
+## Piano di sviluppo Step 18-20 (ordine di esecuzione)
+
+Definito tenendo conto di due criteri insieme, non solo la complessità crescente: una modifica **strutturale** (che toccherebbe più lavoro futuro se rimandata) resta prioritaria anche se un lavoro "più semplice" sarebbe altrimenti in coda prima per complessità pura.
+
+1. **Step 18 — Consolidamento fetch libreria**. Vittoria rapida, a basso rischio, nessuna nuova stringa/UI. Riduce il rischio che i nuovi plugin (punto 4) aggiungano un ulteriore punto di fetch scoordinato invece di usare quello consolidato.
+2. **19b — Fondamenta multilingua**. **Priorità strutturale, non di complessità**: è l'unico dei sei fronti che tocca *come viene scritta ogni stringa in tutta l'interfaccia*, non una funzionalità isolata. Rimandarlo significherebbe ritoccare due volte ogni stringa aggiunta nel frattempo dai punti 3-5. Probabilmente il più esteso in termini di lavoro assoluto fra i quattro di "secondo livello", ma va anticipato lo stesso.
+3. **19a — Protocollo `xlaunch://`**. Contenuto e autosufficiente (URI scheme → risoluzione id → `launchGame()` esistente). Fatto qui, i nuovi plugin del punto successivo possono nascere già conformi alla stessa convenzione di id invece di doverla adattare dopo.
+4. **19c — Plugin Amazon Games + itch.io**. Segue un pattern di plugin già consolidato (gogPlugin/epicPlugin/steamPlugin). Amazon Games sembra già uno stub esistente da completare; itch.io richiede prima una ricerca di fattibilità (nessun tool CLI equivalente a legendary noto).
+5. **19d — Launcher di terze parti condivisi**. Il più complesso dei quattro "di secondo livello": tocca il cuore della pipeline di lancio (`gameManager.ts`), non solo l'aggiunta di un plugin. Beneficia di un roster store già stabile (punto 4) e di `xlaunch://` già pronto (punto 3).
+6. **Step 20 — Sessione Wayland/gamescope**. Il più complesso e strutturalmente indipendente in assoluto — non sblocca né dipende da nessuno degli altri cinque, resta ultimo sia per complessità sia perché nulla lo richiede prima.
+
+-----
+
+
+
+## Step 20 — Sessione Wayland/gamescope indipendente (modalità console completa)
+
+Definito insieme allo Step 19, come fronte separato e più strutturale. Obiettivo: una sessione grafica indipendente da XFCE/X11 (l'ambiente attuale), basata su **Wayland + gamescope**, per far girare la Dashboard in una modalità "console" a tutti gli effetti — stile SteamOS/Steam Deck: nessun desktop environment sotto, nessuna finestra da gestire, solo la Dashboard e i giochi lanciati a schermo intero in un compositor dedicato.
+
+**Perché è un fronte a sé, non un'estensione di quanto già fatto**: tutto il lavoro di questa sessione (ScalingContainer, `xset`/DPMS, `xdotool`/`wmctrl`, il rilevamento finestra per minimizzare la Dashboard al lancio di un gioco) è costruito assumendo X11 — gamescope è un compositor Wayland con un modello completamente diverso (nested compositor, non gestione finestre tradizionale). Serve probabilmente un percorso di avvio alternativo (una sessione dedicata selezionabile da LightDM, analoga a come SteamOS/Steam Big Picture avviano gamescope come propria sessione), non una modifica di `kiosk-launch.sh` esistente.
+
+**Menzionato nella roadmap già in precedenza** come "Sessione X11 dedicata via LightDM / Console-Kiosk Mode v2" (Step 17 dei rilanci iniziali) — questo Step 20 lo sostituisce e lo precisa: non più genericamente "una sessione X11 dedicata", ma specificamente **Wayland + gamescope**, la stessa base tecnica di SteamOS.
+
+**Non ancora iniziato** — nessuna indagine di fattibilità fatta finora. Primi punti da chiarire quando si affronta: se i runner Wine/Proton già in uso funzionano invariati sotto gamescope (in generale sì, è pensato apposta per questo caso d'uso), cosa succede al meccanismo attuale di minimizzazione/rilevamento finestra durante il lancio di un gioco (probabilmente da ripensare da zero, non riusabile), e se LightDM supporta l'avvio diretto di una sessione gamescope o serve un `.desktop` di sessione dedicato scritto a mano.
+
+-----
+
 
 
 Convenzioni adottate durante lo sviluppo, valide per tutto il codice successivo, non solo per la milestone in cui sono state introdotte.

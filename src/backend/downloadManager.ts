@@ -522,14 +522,42 @@ function makeLgogProgressParser(): (line: string) => { progress: number; speed: 
 // ---------------------------------------------------------------------------
 // Parser progresso legendary
 //
-// legendary scrive su stderr con \r:
-//   "Progress: 42.00% (1.23/2.91 GiB), Running for 00:01:23, ETA: 00:02:00"
-//   "Verification progress: 50.00% (500/1000)"
+// v1.1.36 — BUG REALE CONFERMATO (issue GitHub dirette legendary/Heroic):
+// legendary scrive percentuale e velocità su DUE RIGHE SEPARATE, mai
+// insieme sulla stessa riga come il vecchio commento/regex assumeva:
+//   "[DLManager] INFO: = Progress: 38.98% (8181/20990), Running for
+//    00:01:17, ETA: 00:02:00"
+//   "[DLManager] INFO: + Download - 40.49 MiB/s (raw) / 45.95 MiB/s
+//    (decompressed)"
+// Il vecchio parser (funzione singola, senza stato) cercava un match di
+// velocità DENTRO la riga "Progress:" stessa — non l'ha mai trovato,
+// perché non esiste in quel formato. Risultato: la percentuale
+// funzionava (letta altrove), la velocità restava sempre vuota — per
+// GOG funzionava perché makeLgogProgressParser() è già una factory con
+// stato dedicata a quel formato specifico (multi-riga, slot paralleli).
+// Stessa soluzione qui: una chiusura ricorda l'ultima velocità vista
+// sulla riga "+ Download" e la restituisce insieme alla prossima riga
+// "Progress:" che arriva — un tick di ritardo (la velocità è quella del
+// tick precedente, non quello corrente), impercettibile dato l'update
+// una volta al secondo, comunque preferibile a non mostrarla mai.
 // ---------------------------------------------------------------------------
-function parseLegendaryProgress(line: string): { progress: number; speed: string } | null {
-  const m = line.match(/Progress:\s*([\d.]+)%(?:.*?([\d.]+\s*(?:MiB|GiB|KiB)\/s))?/i);
-  if (m) return { progress: parseFloat(m[1]), speed: m[2] ?? '' };
-  return null;
+function makeLegendaryProgressParser(): (line: string) => { progress: number; speed: string } | null {
+  let lastSpeed = '';
+
+  return (line: string) => {
+    const speedMatch = line.match(/\+?\s*Download\s*-\s*([\d.]+\s*(?:KiB|MiB|GiB)\/s)/i);
+    if (speedMatch) {
+      lastSpeed = speedMatch[1];
+      return null; // riga informativa, non un aggiornamento di percentuale
+    }
+
+    const progressMatch = line.match(/Progress:\s*([\d.]+)%/i);
+    if (progressMatch) {
+      return { progress: parseFloat(progressMatch[1]), speed: lastSpeed };
+    }
+
+    return null;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,7 +1093,7 @@ class DownloadManager {
       '--base-path', task.installPath,
       '--yes',
       '--skip-sdl',   // evita prompt SDL che in alcune versioni ignora --yes
-    ], parseLegendaryProgress);
+    ], makeLegendaryProgressParser());
 
     // v0.99.35 — sync esplicito tra fine download e inizio creazione
     // prefix. Ipotesi in verifica: dopo un download lungo (24+ GB),

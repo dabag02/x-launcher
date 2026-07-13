@@ -31,3 +31,7 @@ __pycache__/
 # Log locali
 *.log
 npm-debug.log*
+
+# File di backup (.bak, .bak0, .bak1, .bak2, ...) — aggiunto
+# automaticamente da upload-github.sh
+*.bak*
