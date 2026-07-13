@@ -2689,3 +2689,20 @@ Verificare se `xorg-xset` è installato (`which xset` o `pacman -Qs xset`); se a
 ### Verifica
 
 `tsc --noEmit`: diff vuoto rispetto al check precedente.
+
+## v1.1.36 — Velocità di download Epic mai mostrata: causa reale trovata
+
+Confermato con issue GitHub dirette (legendary/Heroic): il download via `legendary install` scrive percentuale e velocità su **due righe separate**, mai insieme:
+```
+[DLManager] INFO: = Progress: 38.98% (8181/20990), Running for 00:01:17, ETA: 00:02:00
+[DLManager] INFO: + Download - 40.49 MiB/s (raw) / 45.95 MiB/s (decompressed)
+```
+`parseLegendaryProgress` (funzione singola, senza stato) cercava un match di velocità DENTRO la riga "Progress:" stessa — non lo trovava mai, perché nel formato reale non esiste in quella posizione. La percentuale funzionava (letta correttamente), la velocità restava sempre vuota — sia nel widget Downloads sia nella barra Net Bridge, che leggono entrambi lo stesso campo `speed` dello stesso task. GOG non ne soffriva perché `makeLgogProgressParser()` era già una factory con stato dedicata al formato multi-riga di lgogdownloader.
+
+### Fix
+
+`parseLegendaryProgress` trasformata in `makeLegendaryProgressParser()`, una factory con stato (stessa architettura di quella GOG): una chiusura ricorda l'ultima velocità vista sulla riga `"+ Download - ..."` e la restituisce insieme alla prossima riga `"Progress: ...%"` che arriva. Un tick di ritardo (la velocità mostrata è quella del secondo precedente, non quello corrente) — impercettibile con un aggiornamento al secondo, comunque preferibile a non mostrarla mai.
+
+### Verifica
+
+`tsc --noEmit`: stesso errore pre-esistente e non correlato in `db.ts` (solo spostato di riga), nessun errore nuovo.
