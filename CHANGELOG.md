@@ -2706,3 +2706,372 @@ Confermato con issue GitHub dirette (legendary/Heroic): il download via `legenda
 ### Verifica
 
 `tsc --noEmit`: stesso errore pre-esistente e non correlato in `db.ts` (solo spostato di riga), nessun errore nuovo.
+
+## v1.1.37 — Step 18: consolidamento fetch libreria giochi
+
+Cinque punti indipendenti chiamavano `/api/games` e poi `setGames(...)` per conto proprio — login store, logout store, polling autenticazione OAuth, handler SSE `library-updated`, effetto legato ad activeStore/filtri — ciascuno con la propria copia di guard di sequenza/cache/riconciliazione selezione. Il guard (`librarySeqRef`, v1.1.22) evitava dati corrotti dalla corsa fra risposte fuori ordine, ma non eliminava la duplicazione: ogni nuovo punto che in futuro chiamasse `/api/games` per conto proprio avrebbe rischiato di reintrodurre la stessa classe di bug (vedi roadmap).
+
+### Scoperta che ha cambiato l'approccio
+
+Login, logout e polling OAuth non avevano solo bisogno di essere consolidati nella stessa funzione: erano del tutto ridondanti. `gameManager.loginToStore()`/`logoutFromStore()` chiamano già `refreshLibrary()` internamente, che notifica `onLibraryRefreshed()` → broadcast SSE `library-updated` a tutti i client — **prima ancora** che la risposta HTTP di `/api/stores/login`/`logout` torni al frontend. Il polling OAuth chiama esplicitamente `/api/library/refresh`, che fa lo stesso. Il fetch manuale di `/api/games` in questi tre punti correva quindi sempre contro il fetch che l'handler SSE avrebbe comunque fatto per lo stesso evento.
+
+L'unico comportamento speciale perso eliminandoli — la fusione mirata sullo store disconnesso nel logout (`setGames(prev => [...prev.filter(g => g.store !== storeId), ...gamesData])`, pensata per il caso in cui l'utente guarda uno store diverso da quello disconnesso) — non protegge nulla che non sia già coperto da `allGamesForAccountCounts` (fetch dedicato e separato per i conteggi in Manage Accounts, introdotto in v1.1.20).
+
+### Fix
+
+Nuova funzione condivisa `refreshGamesList()` (`src/App.tsx`): incapsula fetch + guard di sequenza + aggiornamento cache + `setGames` + riconciliazione `selectedGameId` (overlay aperto → non toccare selezione; Steam Big Picture virtuale esclusa dal controllo esistenza — stessa logica già in uso, ora scritta una sola volta). Parametrizzata su store/filtri correnti o forzati, strategia di merge (`replace` di default, `merge-by-store` mantenuta disponibile per un futuro punto che ne avesse davvero bisogno), e invalidazione cache opzionale.
+
+Restano solo due chiamanti reali: l'handler SSE `library-updated` e l'effetto legato ad activeStore/filtri (che mantiene la propria lettura cache "stale-while-revalidate" e il fetch parallelo di `/api/stores`, non delegati alla funzione condivisa perché specifici di quell'effetto). Login, logout e polling OAuth non chiamano più `/api/games`: fanno solo il proprio fetch di `/api/stores` (che l'evento SSE non copre) e lasciano che la libreria arrivi via SSE come qualunque altro cambiamento (install/uninstall/watcher Steam/ROM).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti e non correlati (stesso elenco di `db.ts`/`gameManager.ts`/`metadataManager.ts`/`epicPlugin.ts`/`compatibilityManager.ts` visto nelle verifiche precedenti), nessun errore nuovo introdotto da questa modifica.
+
+## v1.1.38 — Step 19b: fondamenta i18n (prima sezione: Settings/Store Accounts)
+
+Campionamento delle stringhe visibili in JSX confermato: mix IT/EN diffuso e senza criterio (`"By Title"`, `"Settings"`, `"No active transfers"` accanto a `"Rimuovi"`, `"Annulla"`, `"Spazio disco"`), su un `App.tsx` di ~7700 righe. Anticipato nel piano di esecuzione del ciclo 2 prima degli step 3-5 proprio per questo: ogni stringa che quegli step aggiungeranno nascerà già nel sistema di traduzione, invece di dover essere ritoccata due volte.
+
+### Motore scelto
+
+`i18next` + `react-i18next` + `i18next-http-backend`, non una soluzione custom. Motivazione: la richiesta esplicita di "pacchetti caricabili" (una nuova lingua senza ricompilare) è esattamente il caso d'uso di `i18next-http-backend` — file JSON serviti a runtime da `public/locales/<lingua>/<namespace>.json` (copiati in `dist/` da Vite al build, serviti dallo stesso `express.static(dist)` già in uso in `server.ts`) — oltre a gestione di fallback lingua, chiavi mancanti e interpolazione di variabili già pronte, e un pattern (`useTranslation()`/`t('chiave')`) riconoscibile da chiunque abbia lavorato con i18n in React, a differenza di una convenzione bespoke.
+
+### Architettura
+
+Un namespace per sezione principale della UI invece di un unico dizionario globale — solo `settings` esiste per ora (`public/locales/it|en/settings.json`), le altre sezioni diventeranno un namespace ciascuna nelle prossime sessioni. `src/i18n/i18n.ts` inizializza i18next con `lng: 'it'`/`fallbackLng: 'it'` (l'italiano resta la lingua di riferimento del progetto) e `react: { useSuspense: false }` per non dover introdurre un `<Suspense>` attorno all'albero esistente.
+
+### Migrazione di prova
+
+Tab bar di Settings (5 etichette) e l'intera tab Store Accounts (stato sessione, badge Synced, spinner di attesa, pulsanti Connect/Cancel/Disconnect con conferma) convertite a `t()`, con interpolazione per i conteggi (`{{synced}}`/`{{installed}}`). Le tab System/Plugins/Input/AI Advisor (~1800 delle ~2500 righe del modale Settings, l'AI Advisor da solo ne rappresenta la maggior parte) restano hardcoded, da migrare nelle prossime sessioni con lo stesso pattern.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti (solo spostati di riga per le righe aggiunte), nessun errore nuovo. Verifica visiva del testo residuo nella tab Store Accounts: nessuna stringa hardcoded rimasta.
+
+### Selettore di lingua + persistenza
+
+Aggiunto nella stessa v1.1.38, subito dopo la migrazione di prova, per rendere l'intera funzionalità testabile end-to-end (fino a qui non esisteva alcuna UI per vedere l'inglese renderizzato, solo modificando `src/i18n/i18n.ts` a mano). Nuovo campo `language: 'it' | 'en'` in `appConfig.ts` (stesso meccanismo chiave=valore già in uso per `displayMode`/`aiMonthlyTokenBudget`, letto/scritto da `readAppConfig()`/`writeAppConfig()`, esposto da `GET`/`PATCH /api/config`). Il frontend legge la preferenza al boot e chiama `i18n.changeLanguage()`. Nuovo selettore IT/EN in Settings → System, primo elemento della tab (il pulsante di chiusura e la lista Runner installati sono stati aggiornati di conseguenza per i loro `neighbors.down`/riferimenti al "primo elemento").
+
+Autorilevamento della lingua di sistema all'avvio resta da fare (roadmap) — il default, in assenza di preferenza salvata, resta `'it'`.
+
+### Fix — navigazione controller del selettore di lingua
+
+Bug segnalato dall'utente in test su hardware reale, in due parti:
+
+1. **Causa banale ma bloccante**: cartella creata come `public/locale/` invece di `public/locales/` — l'HTTP backend non trovava mai i file, `t()` restituiva la chiave grezza (`tabs.accounts` a schermo) per qualunque lingua, dando l'impressione che il cambio lingua non facesse nulla.
+2. **Bug reale di navigazione**: il selettore era implementato come DUE `Focusable` separati (uno per IT, uno per EN) nello stesso group `"settings"` usato da tutta la navigazione su/giù della tab System — competevano con essa invece di essere un singolo stop selezionabile su/giù con sinistra/destra riservati al cambio valore, raggiungibile solo per caso muovendo lo stick. Stesso principio già risolto altrove nell'app per il cambio tab (L1/R1 isolato dallo stick, `cycleSettingsTab`) non applicato qui.
+
+Riscritto come un solo `Focusable` (`settings-language-toggle`) — su/giù lo raggiungono come qualunque altra riga della tab, sinistra/destra intercettati nell'effetto gamepad principale (stesso schema di isolamento di L1/R1, nuova funzione `cycleUiLanguage`) cambiano il valore mentre ha il focus, A lo cicla comunque per chi preme invece di muovere lo stick lateralmente.
+
+### Fix — ingresso in tab e risalita dal primo runner
+
+Due bug ulteriori segnalati in test, dopo il fix del punto precedente:
+
+1. **Entrando nella tab System** (dalla tab bar o con L1/R1), il focus atterrava sul primo runner installato, non sul selettore di lingua: `getFirstFocusableForSettingsTab('engine')` — usata sia dal click sulla tab bar sia da `cycleSettingsTab` per L1/R1 — non era stata aggiornata quando il selettore è diventato il vero primo elemento della tab, restituiva ancora l'id del vecchio primo elemento (lista runner).
+2. **Risalendo dal primo runner installato**, "su" non raggiungeva il selettore (portava dritto al pulsante di chiusura), mentre "sinistra" sì — controintuitivo. Causa: il selettore di lingua è stretto e allineato a sinistra, la riga runner è larga; uno scoring puramente geometrico valuta "sinistra" (dx grande) più vicino di "su" (dy piccolo rispetto a dx) e sceglie quello. Risolto con un `neighbors.up` esplicito sul primo runner (e sul pulsante "Aggiorna" di Runner installabili, per il caso senza runner installati), stesso principio già in uso per `isLastInstalled`/`systemToolsUpNeighbor` più sotto nello stesso file — non un meccanismo nuovo.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.39 — Step 19b: migrazione tab System
+
+Seconda sezione migrata dopo Store Accounts (v1.1.38): l'intera tab System di Settings — Runner installati/installabili, i tre banner ProtonUp-Qt/Lutris rilevati (con i nomi comando `yay -S ...` lasciati invariati, non sono testo da tradurre), Tool di sistema, Spazio disco. I nomi dei tool stessi (Wine, ProtonUp-Qt, Lutris, Steam, ecc. nella griglia "Tool di sistema") restano hardcoded intenzionalmente — sono nomi propri di prodotto, non stringhe UI.
+
+Le stringhe con markup misto (es. banner con `<code>` colorato in mezzo al testo) sono state divise in `prefix`/`middle`/`suffix` invece di un'unica chiave con interpolazione, per preservare lo styling inline invece di appiattirlo in testo semplice.
+
+Nuove chiavi sotto il namespace `settings`, sezione `system`, in entrambi `public/locales/it|en/settings.json`.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati con `json.load`. Verifica visiva del testo residuo nella tab System: nessuna stringa hardcoded rimasta (esclusi i nomi propri di tool/comandi shell).
+
+## v1.1.40 — Step 19b: migrazione tab Plugins
+
+Terza sezione migrata. Paragrafo introduttivo, pulsanti Riprova/Ricarica, badge DRM-free/DRM, "richiede: {{tool}}". Lasciati intenzionalmente hardcoded `plugin.name`/`plugin.description`/`plugin.requiredTool`: sono dati letti dal registro plugin lato backend (contenuto, non chrome della UI) — localizzarli richiederebbe i18n lato backend sui metadati di ciascun plugin, un lavoro distinto e non ancora pianificato, fuori dallo scopo di questo step.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati. Nessuna stringa hardcoded residua nella tab (esclusi i dati plugin da backend).
+
+## v1.1.41 — Step 19b: migrazione tab Input
+
+Quarta sezione migrata. Dispositivi connessi (badge "connesso", "Plugin assegnato: {{plugin}}"), Plugin input (intestazione + nota sul plugin Generico fallback), Test controller. Stessa scelta della tab Plugins per `plugin.name`/`plugin.description` degli input plugin: lasciati hardcoded, sono dati da backend (`InputManager.plugins`), non chrome UI.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati. Nessuna stringa hardcoded residua nella tab (esclusi i dati plugin da backend).
+
+## v1.1.42 — Step 19b: fix traduzione plugin store/input + GamepadTester
+
+Due gap segnalati dall'utente in test su hardware reale, con screenshot delle tab Plugins e Input in inglese:
+
+1. **GamepadTester.tsx non era stato toccato**: componente separato da `App.tsx`, le sue stringhe ("Test input live", "Navigazione normale", i messaggi di istruzione) non comparivano nei grep fatti direttamente su `App.tsx` durante la migrazione della tab Input (v1.1.41) — una svista, non una scelta di scope. Aggiunto `useTranslation('settings')` nel componente stesso, stesse chiavi (sezione `input`) del resto della tab che lo ospita.
+2. **Descrizioni plugin store/input restavano in italiano**: `plugin.description` (e `plugin.name` per gli input plugin) sono dati letti dal backend (`steamPlugin.ts`, `XInputPlugin.ts`, ecc.), non stringhe scritte in `App.tsx` — la scelta precedente di lasciarle intatte come "contenuto, non chrome UI" (v1.1.40/41) era corretta in linea di principio ma produceva un'esperienza visibilmente incoerente una volta cambiata lingua, non solo un dettaglio.
+
+Per il punto 2, invece di spostare l'i18n lato backend (i plugin non sono pensati per restituire chiavi al posto di testo — un lavoro distinto e più invasivo), le traduzioni vivono nel frontend indicizzate per id plugin (`storePluginDescriptions`, `inputPluginDescriptions`, `inputPluginNames` nel namespace `settings`), con **fallback al testo originale del backend per qualunque plugin non presente in queste chiavi** — coerente con lo spirito "pacchetti caricabili" del resto del sistema i18n: un plugin di terze parti futuro senza traduzione mostra il proprio testo invece di rompersi o mostrare una chiave grezza. Gli id con punti (`Battle.net`) vengono sanificati prima della lookup, incompatibili altrimenti con il keySeparator di i18next.
+
+Non toccati: i nomi propri di store/prodotto (Steam, GOG Galaxy, Xbox / XInput, DualShock 4, DualSense) — restano identici in entrambe le lingue, solo "Controller Generico"/"Generic Controller" aveva davvero bisogno di una traduzione.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati. Nessuna stringa hardcoded residua in `GamepadTester.tsx`.
+
+## v1.1.43 — Step 19b: migrazione tab AI Advisor — Settings completo
+
+Quinta e ultima sezione di Settings migrata: banner Sperimentale, paragrafo introduttivo modelli, Budget token mensile (con la relativa etichetta della tastiera virtuale), Modelli installati (con le etichette di peso Leggero/Medio/Pesante/Molto pesante), Provider cloud (A pagamento/Gratuito-economico, API Key, placeholder, Testa connessione, Rimuovi key).
+
+Correzione di stima: la roadmap indicava questa tab come "la più estesa, ~1800 delle ~2500 righe del modale Settings" — una sovrastima fatta senza verificare i confini reali del blocco JSX. La tab è in realtà ~360 righe, paragonabile a System; le ~1800 righe restanti dopo la chiusura di Settings appartengono ad altri overlay (Compatibility Overlay e altri) fuori dallo scope di questo step.
+
+`CLOUD_PROVIDERS` è una costante definita in `App.tsx` (non dati da backend come i plugin store/input) — le note di ciascun provider (`cp.note`) sono state tradotte con lo stesso pattern id→testo con fallback già usato per i plugin, per coerenza e a prova di futuri provider aggiunti senza aggiornare le chiavi. `cp.name` (Google Gemini, DeepSeek, ChatGPT (OpenAI), Claude (Anthropic)) restano invariati, sono nomi di prodotto.
+
+Corretto anche un dettaglio non segnalato ma trovato nel passaggio: il conteggio token usava `toLocaleString('it-IT')` fisso — ora usa `i18n.language`, così la formattazione numerica (virgola/punto per le migliaia) segue la lingua scelta invece di restare sempre italiana.
+
+Con questa voce, **tutte e cinque le tab di Settings sono migrate**. Restano: il resto della Dashboard/Quick Menu/notifiche/overlay fuori da Settings, e l'autorilevamento della lingua di sistema all'avvio.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati. Nessuna stringa hardcoded residua nella tab (esclusi i nomi di prodotto dei provider).
+
+## v1.1.44 — Step 19b: Quick Menu, primo namespace oltre Settings
+
+Prima sezione fuori da Settings: il pannello Quick Menu (Gestisci Account, Avatar, Modalità Gamescope, Cambia Tema, Modalità Console/Schermo, Esci). Nuovo namespace dedicato `quickMenu` (`public/locales/it|en/quickMenu.json`) invece di infilarlo dentro `settings` — è una sezione a sé, non una sotto-sezione delle Impostazioni, coerente con l'architettura "un namespace per sezione principale" già dichiarata in `src/i18n/i18n.ts`. Referenziato dal componente con il prefisso esplicito (`t('quickMenu:chiave')`) sullo stesso hook `useTranslation('settings')` già in uso in `MainApp`, senza bisogno di un secondo hook — i18next risolve il namespace dal prefisso indipendentemente da quale l'hook abbia caricato di default, purché il namespace sia elencato in `ns` nella configurazione (fatto).
+
+"X-Launcher Core" nel footer del pannello resta invariato, è un nome di prodotto.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati (inclusi i due nuovi file `quickMenu.json`). Nessuna stringa hardcoded residua nel Quick Menu (esclusi i nomi di prodotto).
+
+## v1.1.45 — Step 19b: layout responsivo per etichette tradotte
+
+Bug di layout segnalato dall'utente con screenshot: "IMPOSTAZIONI" (Quick Menu) troppo lungo finiva addosso al pulsante X di chiusura, e "MODALITÀ GAMESCOPE" restava su una riga sovrapponendosi al valore invece di andare a capo come "Modalità Schermo"/"Schermo Intero" (stessa riga, stesso componente `OptionItem`, comportamento diverso solo per un caso limite del box model, non per scelta di design).
+
+Causa: né `OptionItem` né gli header dei tre overlay laterali (Quick Menu, Deployment Manager, Notifiche) dichiaravano esplicitamente `flex-1 min-w-0` sul gruppo che deve poter restringersi/andare a capo (icona+etichetta, o icona+titolo) e `shrink-0` sul gruppo che non deve mai essere schiacciato (il valore a destra, o il pulsante di chiusura). Senza questa dichiarazione il comportamento del browser è incoerente da riga a riga — a volte va a capo per puro caso (quando il valore accanto è abbastanza lungo da forzare comunque lo shrink), a volte sovrappone.
+
+Discussa con l'utente l'alternativa di rendere variabile la larghezza dei pannelli overlay (oggi `w-96` fisso) in base alla lingua: scartata perché farebbe spostare l'intera griglia della Dashboard dietro ogni volta che si cambia lingua, un effetto più disorientante del wrapping su due righe already visto funzionare bene. Preferita la correzione del flex/wrap: il testo tradotto va sempre a capo dentro lo spazio disponibile, il pulsante di chiusura non viene mai coperto, in ogni lingua.
+
+Corretti: `OptionItem` (righe Quick Menu), header Quick Menu, header Deployment Manager (Downloads), header Notifiche — stesso pattern identico in tutti e tre, anche se solo i primi due erano già visibilmente rotti in italiano/inglese (Notifiche non ancora migrata a i18n, ma vulnerabile allo stesso bug non appena lo sarà — corretta preventivamente).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.46 — Step 19b: scala header Quick Menu allineata a Downloads/Notifiche
+
+Segnalato dall'utente con screenshot dopo il fix v1.1.45 (niente più sovrapposizione): "IMPOSTAZIONI" sembrava "più grande di prima". Verificato: non è una regressione del fix precedente — il titolo del Quick Menu era già `text-3xl` con badge icona e pulsante di chiusura `w-10 h-10` **nel codice originale caricato**, contro `text-2xl`/`w-8 h-8` di Downloads e Notifiche. Una discrepanza di scala preesistente fra i tre overlay laterali, mascherata finché il titolo si sovrapponeva alla X — il fix v1.1.45 l'ha resa visibile, non creata.
+
+Allineato il Quick Menu alla stessa scala degli altri due overlay (`text-2xl`, badge/pulsante `w-8 h-8`, icone `size={16}`) invece di introdurre un meccanismo di ridimensionamento percentuale nuovo, discusso come alternativa: tre pannelli identici nella struttura (stessa larghezza `w-96`, stesso pattern header+lista) meritano la stessa scala tipografica, non tre scelte diverse per ciascuno.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.47 — Step 19b: header Dashboard, ricerca, ordinamento, filtri
+
+Terzo namespace, `dashboard` (`public/locales/it|en/dashboard.json`): barra store ("Tutti i Giochi" — i nomi dei singoli store restano invariati, sono brand), indicatore di stato in alto a destra (Gamescope Standalone/Wayland Native tenuti identici in entrambe le lingue, sono nomi tecnici; Finestra/Modalità Console/Schermo Intero tradotti — stessi valori già usati nel Quick Menu, duplicati qui in `dashboard.json` invece di referenziare `quickMenu.json` da un namespace diverso, scelta deliberata: sono due sezioni distinte, la piccola duplicazione di tre parole è più economica di un accoppiamento fra namespace pensati per essere indipendenti), placeholder di ricerca (con interpolazione del nome store), le quattro opzioni di ordinamento, il filtro "Installati", le etichette Generi/Categorie, lo stato vuoto "Nessun titolo trovato" con relativo pulsante di reset filtri.
+
+Non toccati: i nomi dei generi/categorie stessi (RPG, Azione, ecc.) — sono dati reali dei giochi (`g.genres`/`g.categories`), non stringhe UI, stesso principio già applicato ai plugin.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati (inclusi i due nuovi file `dashboard.json`).
+
+## v1.1.48 — Step 19b: sidebar dettagli gioco
+
+Sotto-sezione `sidebar` nel namespace `dashboard` esistente (non un namespace nuovo, è ancora la stessa area Dashboard): tooltip "Verificato" (con e senza metodo), badge "Plugin disattivato", "Client Steam"/Installato/Non Installato, Rating/HLTB (con interpolazione), Tempo di gioco, "Caricamento libreria…", pannello di benvenuto ("Bentornato, {{name}}" + testo esplicativo), conteggio titoli/verificati — questi ultimi due con la pluralizzazione nativa di i18next (`_one`/`_other`) invece del ternario manuale `count === 1 ? 'titolo' : 'titoli'` che c'era prima, per coerenza con come i18next gestisce i plurali ovunque altro serva in futuro.
+
+Non toccato: il pannello Debug Console (Daemon Log, filtri livello, Live/Paused) — è uno strumento di sviluppo/diagnostica più che UI utente finale, deprioritizzato rispetto al resto; da valutare se vale la pena migrarlo in una sessione dedicata.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.49 — Step 19b: fix corsa selettore lingua al boot + status gioco + nome store non-brand
+
+Tre problemi segnalati dall'utente in test su hardware reale, il primo dei tre il più serio incontrato finora in questo step:
+
+1. **Corsa (race condition) sul selettore di lingua al primo avvio a freddo dopo il login**: il fetch di `/api/config` che applica la lingua persistita gira in un effect al mount, senza alcuna guardia contro un cambio manuale nel frattempo. Su un boot a freddo (filesystem/rete non ancora "caldi"), questo fetch può risolversi molto più tardi del solito — se l'utente raggiunge Settings e preme il selettore PRIMA che risolva, il cambio manuale funziona (suono incluso), ma quando il fetch finalmente risolve, l'effect chiamava comunque `i18n.changeLanguage()` con il valore persistito precedente, annullando silenziosamente la scelta appena fatta senza alcun feedback che lo segnalasse. Ai riavvii successivi (filesystem/rete "caldi") il fetch risolve prima che l'utente possa anche solo aprire Settings, quindi la corsa non si manifesta mai — coerente con quanto osservato. Fix: un ref (`userChangedLanguageRef`), impostato da `cycleUiLanguage` al primo cambio manuale, controllato dall'effect di boot prima di applicare il valore persistito.
+2. **Le card in libreria mostravano ancora "READY TO LAUNCH"/"NOT INSTALLED" in inglese con la UI in italiano**: `game.status` è testo scritto letteralmente in inglese nel database da ciascun plugin store (`steamPlugin.ts`/`gogPlugin.ts`/`epicPlugin.ts`/`classicPlugin.ts`, persistito via `db.updateGameStatus`) — stessa categoria delle descrizioni plugin già affrontata in v1.1.42, stessa soluzione: mappa valore→traduzione con fallback al testo originale (`translateGameStatus`), namespace `dashboard`.
+3. **"Classic Console" suggerito come traducibile**: a differenza di Steam/GOG/Epic/Battle.net/Amazon Games (marchi di terzi, sempre invariati), "Classic Console" è un nome descrittivo coniato dal progetto stesso — stesso principio già applicato a "Controller Generico" fra gli input plugin. Nuovo helper `translateStorePluginName`, applicato ai tre punti in cui compare il nome di uno store (barra store principale, tab Store Accounts, tab Plugins).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.50 — Step 19b: Game Options (header + Runner Bridge)
+
+Quarto namespace, `gameOptions` (`public/locales/it|en/gameOptions.json`): header dell'overlay (badge installato/non installato, nome store — anche qui `translateStorePluginName` per coerenza con "Classic Console"), sezione Runner Bridge (intestazione, badge "Attivo" per il runner corrente).
+
+Overlay grande quanto le tab più estese di Settings: restano da migrare Compatibility Layer/Core (sezione adattiva RetroArch/DOSBox/ScummVM/compat layer) e l'intero Game Config (Step 4, campi launch args e altro). Stessa strategia già usata per Settings: sezioni successive nelle prossime sessioni invece di un unico passaggio rischioso su un file così esteso.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati (inclusi i due nuovi file `gameOptions.json`).
+
+## v1.1.51 — Step 19b: Game Options completo
+
+Chiuso l'overlay Game Options — Compatibility Layer/RetroArch Core (stato Non installato/Disponibile, messaggio di installazione mancante, badge "Attivo", "Default per questo sistema", layer di compatibilità AMD FSR/GameMode/MangoHud/EasyAntiCheat/BattlEye — nomi tecnici/brand lasciati invariati, solo l'intestazione "Layer di Compatibilità" tradotta), Game Config (badge "configurato"/"richiesto per avviare", suffisso "(manuale)" del path Libretro — i nomi dei campi stessi come Executable Path/Launch Arguments/Steam App ID restano identificatori tecnici non tradotti, stesso trattamento di "RetroArch Core"/"Runner Bridge"), Dipendenze Wine (intestazione, badge consigliato/lento, sottotitolo), Variabili d'ambiente personalizzate (etichetta tastiera virtuale, pill Persistente/Solo install., le due caption esplicative, pulsante aggiungi), i due switch finali (Disabilita sync NT veloce, Usa Known Fixes) con le rispettive descrizioni, e i due pulsanti di azione DISINSTALLA/INSTALLA.
+
+Con questa voce l'overlay Game Options è completamente bilingue, fatta eccezione per i field name tecnici lasciati deliberatamente invariati (coerenti con le altre scelte già fatte in questo stesso overlay) e i nomi di prodotto/tecnologia (Heroic Games Launcher, AMD FSR, ecc.).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati. Nessuna stringa hardcoded residua nell'intero overlay (esclusi field name tecnici e nomi di prodotto).
+
+## v1.1.52 — Step 19b: contenuto interno di Downloads e Notifiche
+
+Due nuovi namespace, `downloads` e `notifications` (gli header di entrambi gli overlay erano già a posto dal fix layout v1.1.45).
+
+**Downloads/Deployment Manager**: dialog di conferma installa/disinstalla (titolo, descrizione, pulsanti), due titoli di notifica generati qui stesso ("Installazione non avviata"/"Disinstallazione non riuscita", tradotti nel punto in cui vengono costruiti — sono stringhe scritte in questo file, non dati da backend), stato vuoto "Nessun trasferimento attivo", etichetta di fase di download, percentuale completamento, conferma annullamento download, Riprendi/Pausa/Annulla, footer Peer Hash Cache (nome tecnico invariato) + verifica checksum, suggerimento attivazione controller.
+
+**Notifiche**: "Pulisci storico" (il testo mancava ancora nonostante il fix di layout v1.1.45, che aveva sistemato solo lo spazio a disposizione), stato vuoto "Nessuna notifica", suffissi di stato (in attesa di conferma/risolto/non risolto), "Log tecnico", pulsanti Ha funzionato/Non ha funzionato, fallback "Chiudi".
+
+**Non toccato, deliberatamente fuori scope**: il contenuto delle notifiche stesse (`notif.title`/`notif.body`/`notif.rawLog`, e le etichette di `primaryAction`/`secondaryAction`) — sono generate da chiamate a `pushNotification()` sparse in tutto il file (non solo qui), con testo scritto al momento della chiamata. Tradurre tutte quelle chiamate è un audit a parte, più esteso di quanto rientri in questa sessione — stesso trattamento già riservato al Debug Console.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati (inclusi i quattro nuovi file `downloads.json`/`notifications.json`).
+
+## v1.1.53 — Step 19b: fix intestazione libreria (Collection/Titles Synced/nome store)
+
+Tre stringhe segnalate dall'utente con screenshot, tutte nello stesso header sopra la griglia dei giochi, mai toccate nelle sessioni precedenti perché non erano emerse nei grep fatti sull'header principale (v1.1.47) — un punto diverso del file, la riga del titolo della sezione libreria:
+
+1. **"Collection"** — sempre in inglese, hardcoded, indipendentemente dalla lingua.
+2. **Il nome dello store come titolo di sezione** (es. "Classic Console" invece di "Console Classiche" quando quella tab è attiva) — non passava da `translateStorePluginName`, a differenza degli altri tre punti già corretti in v1.1.49 (barra store, tab Store Accounts, tab Plugins). Un quarto punto che mi era sfuggito.
+3. **"{{n}} Titles Synced"** — hardcoded in inglese, ora con la pluralizzazione i18next (`_one`/`_other`) invece di un'unica forma fissa.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.54 — Step 19b: fix nome store nella sidebar dettagli gioco
+
+Quinto punto mancante segnalato dall'utente con screenshot: la riga "Voto | Store | Runner" nella sidebar principale (quella sempre visibile selezionando un gioco, non l'overlay Game Options) mostrava `selectedGame.store` senza passare da `translateStorePluginName` — "Classic Console" restava tale anche in italiano. Stesso identico bug già corretto in v1.1.49/53 in altri quattro punti (barra store, tab Store Accounts, tab Plugins, titolo sezione libreria); questo quinto era in un componente diverso (la sidebar dei dettagli, non toccato in quei fix precedenti).
+
+Trovati nello stesso passaggio, non ancora corretti — un messaggio di notifica e un dialog di conferma nativo del browser che incorporano `game.store` in una frase costruita a runtime: restano nello stesso bucket deprioritizzato dell'audit trasversale delle notifiche (v1.1.52), non un'omissione di questo fix.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.55 — Step 19b: barra footer (legenda comandi)
+
+Segnalata dall'utente: la barra in basso con la legenda dei tasti non era mai stata toccata in questo step, restava sempre in inglese. Aggiunta una sezione `footer` al namespace `dashboard` esistente: le etichette A/B/X/Y (Select/Back/Quick Actions/Global Search), L1/R1 "Jump Store", L2/R2 "Download"/"Notifications", e il ramo alternativo per tastiera/mouse (Execute/Exit View/Next Group/Spotlight). "Net Bridge" tenuto identico in entrambe le lingue — stesso trattamento già riservato a "Runner Bridge"/"Peer Hash Cache", nomi tecnici del progetto.
+
+Nello stesso passaggio, corretti anche "Vuoto…"/"Inizia a digitare..." nella tastiera virtuale (sezione `keyboard` nello stesso namespace) — non erano stati notati prima perché visibili solo quando il campo di ricerca/testo è vuoto, non erano nello scope dei fix precedenti.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.56 — Step 19b: fix titoli header Deployment Manager/Notifiche
+
+Bug segnalato dall'utente: i titoli h2 stessi degli overlay Downloads e Notifiche ("Deployment Manager"/"Notifiche") restavano letterali indipendentemente dalla lingua — il fix di layout v1.1.45 aveva sistemato lo spazio/overlap attorno al titolo, ma non aveva mai sostituito il testo con `t()`; il fix del contenuto interno (v1.1.52) aveva tradotto tutto il resto di entrambi gli overlay tranne il titolo stesso. Un'omissione passata inosservata in due fix precedenti.
+
+"Deployment Manager" tradotto ("Gestione Installazioni" in italiano) anziché lasciato come nome tecnico invariato: a differenza di "Runner Bridge"/"Peer Hash Cache"/"Net Bridge" (etichette tecniche secondarie), è il titolo principale di un intero overlay, sullo stesso piano di "Notifiche" — stessa categoria di "Classic Console"/"Controller Generico" (nomi coniati dal progetto, non brand di terzi), non quella dei nomi tecnici.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.57 — Step 19b: Avatar Library + fix "Confirm A" ed ESCI rosso
+
+**Fix segnalato dall'utente**: la voce ESCI del Quick Menu chiedeva sempre "Confirm A" identico in italiano e inglese — bug mio, la chiave `confirmA` era stata scritta con lo stesso valore letterale in entrambi i file di traduzione fin dalla sua creazione (stesso problema anche in `settings.system.confirmA`, corretto nello stesso passaggio). Aggiunta anche la richiesta dell'utente: il pulsante ESCI ora diventa rosso mentre è in attesa di conferma (nuovo prop `pending` su `OptionItem`, passato solo per questa riga), tornando blu/normale se B annulla — la logica di annullamento con B esisteva già e funzionava correttamente, mancava solo il riscontro visivo.
+
+**Ottavo namespace, `avatarLibrary`**: titolo overlay ("Libreria Avatar", trattato come nome coniato dal progetto — stessa categoria di "Gestione Installazioni"/"Notifiche", non un termine tecnico), suffisso tipi di file, pulsanti Rimuovi/Account, tooltip Ricarica, stato vuoto "Cartella vuota" con istruzioni, badge "● Attivo" sull'avatar selezionato.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati (inclusi i due nuovi file `avatarLibrary.json`).
+
+## v1.1.58 — Step 19b: Knowledge Base bilingue
+
+Su richiesta esplicita dell'utente, primo dei due lavori concordati sul backend AI Advisor (il secondo, il prompt di sistema parametrizzato sulla lingua, resta per il prossimo passaggio).
+
+**Scoperta preliminare, non richiesta ma rilevante**: l'ipotesi dell'utente ("la lingua della risposta AI dipende da come arriva il log") non è corretta — verificato in `aiProviders/base.ts`: `AI_SYSTEM_PROMPT` ha "in italiano" scritto fisso tre volte (nei tre esiti possibili: solution/question/reason), condiviso identico da tutti e 5 i provider. L'AI è istruita a rispondere sempre in italiano, indipendentemente da log o lingua UI — se in pratica si sono viste risposte in inglese, è più probabile un'istruzione non seguita perfettamente dal modello che un vero meccanismo lingua-del-log→lingua-risposta, che nel codice non esiste.
+
+**Schema**: nuova colonna `solution_en TEXT` nullable in `knowledge_base` (SQLite), stesso pattern di migrazione già in uso in `db.ts` (PRAGMA table_info + ALTER TABLE ADD COLUMN se manca) — un DB già popolato continua a funzionare senza reimportare nulla. `solution` resta il testo italiano originale (compatibilità con le voci `ai-writeback` già scritte, che hanno solo quello); `solution_en` è la traduzione, `null` per le voci senza — nuovo helper esportato `localizedSolution(entry, language)` che sceglie quale mostrare, con fallback a `solution` se manca la traduzione inglese (mai una stringa vuota).
+
+**Contenuto**: tutte e 34 le voci di `kb-seed.json` tradotte in inglese (`solution_en`), verificate con uno script di conteggio (34/34).
+
+**Uso**: `notificationEngine.ts` ora chiama `localizedSolution(entry, readAppConfig().language)` nei due punti che consultano la KB (`download-error`, `launch-error`) invece di mostrare sempre `entry.solution` grezzo.
+
+Deliberatamente non tradotte: le voci `ai-writeback` (suggerimenti AI confermati dall'utente e salvati in KB) — arrivano in una sola lingua, quella impostata al momento della chiamata; non esiste una "seconda lingua" coerente da generare per quel tipo di voce senza richiamare di nuovo l'AI.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `knowledgeBase.ts`/`notificationEngine.ts`). JSON di `kb-seed.json` validato, 34/34 voci con `solution_en` presente.
+
+## v1.1.59 — Step 19b: fix wrap Net Bridge nel footer
+
+Bug segnalato dall'utente: il blocco "Net Bridge / velocità download" nel footer, accanto alla campanella notifiche, restava su 2 righe in inglese ma arrivava a spezzarsi su 4 in italiano ("Net" / "Bridge" / "0.0" / "MB/s"). Causa: nessuno dei due span aveva `whitespace-nowrap`, e l'intera `<footer>` è un'unica riga flex senza priorità di shrink dichiarata fra il lato sinistro (legenda comandi) e destro (Net Bridge/notifiche/orologio) — le etichette italiane della legenda, collettivamente un po' più larghe di quelle inglesi, bastavano a far scattare lo shrink di default sul blocco più a destra, il primo a cedere spazio.
+
+Fix: `whitespace-nowrap` sulle due righe del blocco Net Bridge (mai più "una parola per riga"), `shrink-0` sull'intero cluster destro del footer (download/notifiche/orologio — priorità informativa più alta della legenda comandi, che può ragionevolmente assorbire lo spazio mancante), `whitespace-nowrap` anche sull'etichetta del componente `Hint` condiviso dalla legenda, per coerenza preventiva.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.60 — Step 19b: prompt di sistema AI Advisor parametrizzato sulla lingua
+
+Secondo dei due lavori concordati sul backend AI Advisor (dopo la Knowledge Base bilingue, v1.1.58).
+
+`AI_SYSTEM_PROMPT` (costante con "in italiano" fisso tre volte, condivisa da tutti e 5 i provider) diventa `buildSystemPrompt(language)` in `base.ts` — le istruzioni al modello restano in italiano (un LLM le segue bene in qualunque lingua siano scritte, e l'utente non le vede mai), cambia solo la lingua richiesta per i tre campi di testo libero che l'utente vede davvero (`solution`/`question`/`reason`).
+
+`ErrorContext` (sempre in `base.ts`) guadagna un campo opzionale `language?: 'it' | 'en'`, popolato da `orchestrator.ts` leggendo `readAppConfig().language` prima di chiamare ciascun provider — stesso punto che già forniva il budget token, nessuna nuova dipendenza. I quattro file provider (`ollama.ts`, `claude.ts`, `gemini.ts`, `openaiCompatible.ts` — quest'ultimo condiviso da ChatGPT e DeepSeek, cinque provider in quattro file) aggiornati per chiamare `buildSystemPrompt(context.language)` al posto della costante statica.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente sui cinque file toccati: `base.ts`, `orchestrator.ts`, `ollama.ts`, `claude.ts`, `gemini.ts`, `openaiCompatible.ts`). Nessun riferimento residuo alla vecchia costante `AI_SYSTEM_PROMPT` in tutto `src/backend/`.
+
+## v1.1.61 — Step 19b: fix pulsante Incolla nella tastiera virtuale
+
+Segnalato dall'utente: il pulsante "Incolla" (e i messaggi transitori "Clipboard vuota"/"Clipboard non disponibile") restava sempre in italiano, perché `VirtualKeyboard.tsx` non aveva mai `useTranslation` — non toccato finora in questo step. Aggiunte le chiavi mancanti alla sezione `keyboard` già esistente nel namespace `dashboard`.
+
+**Precisazione importante, richiesta esplicitamente dall'utente**: il layout fisico dei tasti (`layoutId`, IT/EN-US — quali lettere/accenti compaiono, non le etichette dei pulsanti) resta **deliberatamente indipendente** dalla lingua della UI — era già così prima di questo fix (un secondo stato separato, cambiato con il suo tasto dedicato, non con il selettore di lingua di Settings), e questo fix non lo tocca: un utente può avere la UI in inglese e continuare a digitare con il layout italiano, o viceversa. Solo le etichette testuali dei pulsanti (Incolla, i due messaggi clipboard) erano il problema, non il layout.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.62 — Step 19b: audit completo del contenuto delle notifiche
+
+Lavoro rimasto sospeso da v1.1.52, quando erano state tradotte solo le parti fisse del pannello Notifiche (titolo, pulsanti, stati) ma non il contenuto delle singole notifiche generate in giro per il codice — segnalato all'utente come "~30 stringhe in ~30 punti diversi" prima di iniziare.
+
+**Backend (`notificationEngine.ts`)**: `actionLabel()` e l'intero `eventToNotification()` (tutti gli 11 case dello switch — download-completed/error, known-fixes-result, launch-error/blocked, auth-error/ok, runner-installed/uninstalled/error, validation-prompt, system) parametrizzati su `lang = readAppConfig().language`, letto una sola volta in testa alla funzione. Stesso trattamento per `tryAIAdvisor()`: i tre titoli `[EXPERIMENTAL]`, il testo delle opzioni di chiarimento, e — bonus trovato nello stesso passaggio — la riga di budget token usava `toLocaleString('it-IT')` fisso indipendentemente dalla lingua (stesso bug già corretto lato frontend in v1.1.43 per lo stesso identico conteggio, mai portato qui).
+
+Non serve un sistema i18n completo lato backend per ~20 stringhe in un solo file: stesso approccio già usato per `buildSystemPrompt` — un parametro `lang` e ternari `lang === 'en' ? ... : ...` inline, non un nuovo file di traduzione.
+
+**Frontend (`App.tsx`)**: le 4 chiamate `pushNotification()` rimaste (avvio bloccato per plugin disabilitato, toggle voce "Kiosk" nel menu Ctrl+Alt+K, cambio modalità schermo, passaggio a Desktop) migrate a `t('dashboard:notif.*')` con interpolazione, nuova sezione `notif` nel namespace `dashboard` già esistente.
+
+Non toccato, per scelta: i due punti già segnalati in v1.1.54 (`game.store` grezzo in un corpo di notifica e in un `confirm()` nativo del browser) — non fanno parte di questo audit di per sé ma di un fix di traduzione del nome store già discusso a parte.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `notificationEngine.ts`). JSON validati.
+
+## v1.1.63 — Step 19b: autorilevamento lingua di sistema
+
+Ultimo punto della roadmap Step 19b. Fino a qui, in assenza di preferenza salvata, la lingua di default era sempre 'it' — questa voce la sostituisce con un vero autorilevamento al primo avvio.
+
+**Distinguere "mai impostata" da "impostata su 'it'"**: `readAppConfig()` da solo non bastava — il merge coi default appiattisce i due casi allo stesso valore. Nuova funzione `hasLanguageBeenSet()` in `appConfig.ts`, che rilegge il file grezzo e verifica se la chiave `language=` è già presente; esposta come `languageIsUserSet` nella risposta di `GET /api/config`.
+
+**Rilevamento**: `navigator.languages[0]` (preferito a `navigator.language` singolo: riflette l'ordine di preferenza reale del sistema/browser), primary subtag BCP-47 estratto (`es-MX` → `es`, `zh-CN` → `zh`). Se è 'it' o 'en', diventa la lingua e viene persistita subito in `app.conf` — nessuna differenza pratica da una scelta manuale da questo punto in poi. Se non è supportata, fallback a 'en' (persistito anch'esso, così questo ramo non si ripete ad ogni avvio).
+
+**Messaggio per lingua non supportata, richiesto esplicitamente dall'utente**: quando scatta il fallback, una notifica spiega la situazione — ma nella lingua REALE dell'utente, non in italiano o inglese (altrimenti non la capirebbe, vanificando lo scopo). Nuovo modulo `src/i18n/unsupportedLanguageNotices.ts`, con testi scritti per spagnolo/tedesco/francese/cinese semplificato per ora, fallback inglese generico per qualunque altra lingua rilevata non ancora coperta — il set cresce nel tempo, non è pensato per essere esaustivo subito. Deliberatamente NON un namespace i18next come gli altri: è contenuto in lingue che l'app non supporta ancora come UI, non chrome tradotto — stesso principio già usato per la Knowledge Base multilingua.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `unsupportedLanguageNotices.ts`, `appConfig.ts`, `server.ts`).
+
+## v1.1.64 — Step 19b: fix overlap "Pulisci storico"/titolo in Notifiche
+
+Segnalato dall'utente: il pulsante "Pulisci storico" tornava a sovrapporsi al titolo "Notifiche"/"Notifications". Causa più sottile del solito: il fix v1.1.45 (`flex-1 min-w-0` sul contenitore del titolo) presupponeva che il titolo potesse restringersi andando a capo se serviva — ma "Notifiche"/"Notifications" è una singola parola, senza spazi, e una parola senza punti di rottura non può andare a capo: se badge + "Pulisci storico" + pulsante di chiusura insieme non ci stavano più sulla riga, il titolo la sovrapponeva comunque invece di restringersi, perché semplicemente non può farlo.
+
+Fix: "Pulisci storico" spostato su una riga propria, sotto l'header, allineato a destra — non più sulla stessa riga di titolo/badge/chiusura. La riga principale ora ha solo titolo e pulsante di chiusura in competizione per lo spazio, con margine molto più ampio in entrambe le lingue; `truncate` aggiunto al titolo come rete di sicurezza ulteriore, anche se con questo riordino non dovrebbe mai più servire davvero.
+
+**Nota per l'utente**: verificato che l'overlay Downloads/Deployment Manager non ha un pulsante equivalente di pulizia cronologia — esiste solo nel pannello Notifiche. Se serve aggiungerlo anche lì, è una richiesta a parte, non ancora fatta.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.

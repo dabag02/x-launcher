@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/utils';
 import { InputState, ButtonName } from '../input/types';
 import { Theme } from '../types';
@@ -28,6 +29,13 @@ interface GamepadTesterProps {
 // garantendo che "quello che vedi qui" sia sempre coerente con "quello che
 // l'app sta effettivamente leggendo".
 export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, theme = 'dark', captureActive = false, exitHoldProgress = 0 }) => {
+  // Step 19b (v1.1.42) — mancava qui: componente separato da App.tsx,
+  // saltato nella migrazione della tab Input perché le sue stringhe non
+  // comparivano nel grep fatto direttamente su App.tsx. Stesso namespace
+  // 'settings', sezione 'input' — le chiavi vivono logicamente insieme al
+  // resto della tab che lo ospita, anche se il componente è in un file
+  // diverso.
+  const { t } = useTranslation('settings');
   const isLight = theme === 'light';
   const pressed = (btn: ButtonName) => state.buttons.has(btn);
 
@@ -166,15 +174,15 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
               connessione; lo stato di navigazione ha un solo LED,
               quello sotto. */}
           <span className="text-[10px] font-black uppercase tracking-[0.3em] opacity-50">
-            {connected ? 'Test input live' : 'Nessun controller rilevato'}
+            {connected ? t('input.testInputLive') : t('input.noControllerDetected')}
           </span>
         </div>
         <p className={cn("text-[10px] leading-relaxed", isLight ? "text-gray-500" : "text-white/40")}>
           {captureActive
-            ? 'Modalità test attiva: la Dashboard ignora ogni input mentre sei qui, per non attivare altre funzioni per sbaglio.'
+            ? t('input.testModeActive')
             : connected
-              ? 'Premi un tasto o muovi gli stick: lo schema si illumina in tempo reale con esattamente quello che la Dashboard sta leggendo dal controller.'
-              : 'Collega un controller per verificare che i suoi input vengano rilevati correttamente.'}
+              ? t('input.testInstructions')
+              : t('input.connectControllerPrompt')}
         </p>
         {/* v1.1.9 — sostituita la barra di avanzamento (troppo lunga,
             visibilmente coperta solo a metà) con un LED a tre stati, più
@@ -195,7 +203,7 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
             "text-[9px] font-black uppercase tracking-widest",
             !captureActive ? "text-green-400" : exitHoldProgress > 0 ? "text-yellow-400" : "text-red-400"
           )}>
-            {!captureActive ? 'Navigazione normale' : exitHoldProgress > 0 ? 'Uscita in corso — tieni premuto B' : 'Modalità test — tieni premuto B per uscire'}
+            {!captureActive ? t('input.navNormal') : exitHoldProgress > 0 ? t('input.exitInProgress') : t('input.testModeHint')}
           </span>
         </div>
       </div>

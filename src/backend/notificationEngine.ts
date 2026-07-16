@@ -228,6 +228,7 @@ class NotificationEngine {
 
     const response = result.response;
     const providerLabel = result.providerName ? ` (${result.providerName})` : '';
+    const lang = readAppConfig().language;
 
     // v0.99.90 — Step 15d: contatore budget token, stile "hai usato X di Y
     // token questo mese" discusso in fase di progettazione — mai
@@ -236,15 +237,20 @@ class NotificationEngine {
     // ogni notifica AI, invece che in un componente a parte: la notifica
     // è già il punto in cui l'utente vede il costo di questa specifica
     // chiamata, ha senso mostrargli lì anche il totale del mese.
+    // v1.1.61 — toLocaleString('it-IT') era fisso indipendentemente dalla
+    // lingua (stesso bug già corretto lato frontend in v1.1.43 per lo
+    // stesso identico conteggio, qui mai portato).
     const usageLine = (result.usageThisMonth !== undefined && result.monthlyBudget !== undefined)
-      ? `\n\n💠 ${result.usageThisMonth.toLocaleString('it-IT')} / ${result.monthlyBudget.toLocaleString('it-IT')} token questo mese`
+      ? (lang === 'en'
+          ? `\n\n💠 ${result.usageThisMonth.toLocaleString('en-US')} / ${result.monthlyBudget.toLocaleString('en-US')} tokens this month`
+          : `\n\n💠 ${result.usageThisMonth.toLocaleString('it-IT')} / ${result.monthlyBudget.toLocaleString('it-IT')} token questo mese`)
       : '';
 
     if (response.kind === 'suggestion') {
       const s = response.suggestion;
       this.push({
         id: this.mkId(), type: 'ai-suggestion', status: 'pending',
-        title: `[EXPERIMENTAL] Suggerimento AI${providerLabel} — ${gameTitle}`,
+        title: lang === 'en' ? `[EXPERIMENTAL] AI suggestion${providerLabel} — ${gameTitle}` : `[EXPERIMENTAL] Suggerimento AI${providerLabel} — ${gameTitle}`,
         body: s.solution + usageLine,
         game_id: gameId, game_title: gameTitle,
         raw_log: errorText,
@@ -253,7 +259,7 @@ class NotificationEngine {
         confidence: s.confidence,
         created_at: this.now(),
         primary_action: s.actionType !== 'none'
-          ? JSON.stringify({ label: this.actionLabel(s.actionType, s.actionParams), handler: s.actionType, params: s.actionParams })
+          ? JSON.stringify({ label: this.actionLabel(s.actionType, s.actionParams, lang), handler: s.actionType, params: s.actionParams })
           : undefined,
       });
     } else if (response.kind === 'clarify') {
@@ -265,11 +271,13 @@ class NotificationEngine {
       // lasciato come sviluppo successivo (annotato in roadmap).
       // L'obiettivo qui era che l'intera pipeline prompt→risposta a tre
       // esiti→notifica funzionasse end-to-end anche per questo caso, non
-      // ancora che fosse pienamente interattivo.
+      // ancora che fosse pienamente interattiva.
       this.push({
         id: this.mkId(), type: 'info', status: 'pending',
-        title: `[EXPERIMENTAL] L'AI${providerLabel} ha bisogno di più informazioni — ${gameTitle}`,
-        body: `${response.question}\n\nOpzioni possibili: ${response.options.join(' / ')}\n\n(risposta interattiva non ancora disponibile in questa versione — prosegui con il debug manuale nel frattempo)${usageLine}`,
+        title: lang === 'en' ? `[EXPERIMENTAL] AI${providerLabel} needs more information — ${gameTitle}` : `[EXPERIMENTAL] L'AI${providerLabel} ha bisogno di più informazioni — ${gameTitle}`,
+        body: lang === 'en'
+          ? `${response.question}\n\nPossible options: ${response.options.join(' / ')}\n\n(interactive answering not yet available in this version — continue with manual debugging in the meantime)${usageLine}`
+          : `${response.question}\n\nOpzioni possibili: ${response.options.join(' / ')}\n\n(risposta interattiva non ancora disponibile in questa versione — prosegui con il debug manuale nel frattempo)${usageLine}`,
         game_id: gameId, game_title: gameTitle,
         raw_log: errorText, source: 'ai', created_at: this.now(),
       });
@@ -277,7 +285,7 @@ class NotificationEngine {
       // give_up — informativo, nessuna azione richiesta all'utente.
       this.push({
         id: this.mkId(), type: 'info', status: 'dismissed',
-        title: `[EXPERIMENTAL] L'AI${providerLabel} non ha trovato una soluzione — ${gameTitle}`,
+        title: lang === 'en' ? `[EXPERIMENTAL] AI${providerLabel} found no solution — ${gameTitle}` : `[EXPERIMENTAL] L'AI${providerLabel} non ha trovato una soluzione — ${gameTitle}`,
         body: response.reason + usageLine,
         game_id: gameId, game_title: gameTitle,
         raw_log: errorText, source: 'ai', created_at: this.now(),
@@ -360,26 +368,36 @@ class NotificationEngine {
     return new Date().toISOString();
   }
 
-  private actionLabel(actionType: string, params: Record<string, string>): string {
+  // Step 19b (v1.1.61) — audit del contenuto delle notifiche: titoli e
+  // corpi qui sotto erano tutti letterali in italiano, indipendentemente
+  // dalla lingua UI configurata (a differenza del testo del pannello
+  // Notifiche stesso, già bilingue dal v1.1.52 — questo è il contenuto
+  // delle singole notifiche, generato qui). notificationEngine.ts gira
+  // lato backend, senza accesso a i18next/ai file di traduzione del
+  // frontend: stesso approccio già usato per buildSystemPrompt in
+  // aiProviders/base.ts, un helper minimo invece di un sistema i18n
+  // completo per ~20 stringhe in un solo file.
+  private actionLabel(actionType: string, params: Record<string, string>, lang: 'it' | 'en'): string {
     switch (actionType) {
-      case 'winetricks':    return `Installa ${params.verbs ?? 'dipendenze'}`;
-      case 'config_patch':  return 'Applica configurazione';
-      case 'relaunch':      return 'Riavvia gioco';
-      case 'open_section':  return params.section === 'accounts' ? 'Vai agli Account'
-                                  : params.section === 'plugins'  ? 'Vai ai Plugin'
-                                  : 'Apri impostazioni';
-      default:              return 'Applica';
+      case 'winetricks':    return lang === 'en' ? `Install ${params.verbs ?? 'dependencies'}` : `Installa ${params.verbs ?? 'dipendenze'}`;
+      case 'config_patch':  return lang === 'en' ? 'Apply configuration' : 'Applica configurazione';
+      case 'relaunch':      return lang === 'en' ? 'Relaunch game' : 'Riavvia gioco';
+      case 'open_section':  return params.section === 'accounts' ? (lang === 'en' ? 'Go to Accounts' : 'Vai agli Account')
+                                  : params.section === 'plugins'  ? (lang === 'en' ? 'Go to Plugins' : 'Vai ai Plugin')
+                                  : (lang === 'en' ? 'Open settings' : 'Apri impostazioni');
+      default:              return lang === 'en' ? 'Apply' : 'Applica';
     }
   }
 
   private eventToNotification(event: EngineEvent): StoredNotification | null {
+    const lang = readAppConfig().language;
     switch (event.type) {
 
       case 'download-completed':
         return {
           id: this.mkId(), type: 'success', status: 'pending',
-          title: `${event.gameTitle} installato`,
-          body: 'Installazione completata. Il gioco è pronto per essere avviato.',
+          title: lang === 'en' ? `${event.gameTitle} installed` : `${event.gameTitle} installato`,
+          body: lang === 'en' ? 'Installation complete. The game is ready to launch.' : 'Installazione completata. Il gioco è pronto per essere avviato.',
           game_id: event.gameId, game_title: event.gameTitle,
           source: 'system', created_at: this.now(),
         };
@@ -388,15 +406,17 @@ class NotificationEngine {
         return event.found
           ? {
               id: this.mkId(), type: 'info', status: 'pending',
-              title: `Known fix trovato (Heroic) — ${event.gameTitle}`,
-              body: `Dipendenze applicate e salvate come configurazione predefinita: ${(event.verbs ?? []).join(', ')}`,
+              title: lang === 'en' ? `Known fix found (Heroic) — ${event.gameTitle}` : `Known fix trovato (Heroic) — ${event.gameTitle}`,
+              body: lang === 'en'
+                ? `Dependencies applied and saved as the default configuration: ${(event.verbs ?? []).join(', ')}`
+                : `Dipendenze applicate e salvate come configurazione predefinita: ${(event.verbs ?? []).join(', ')}`,
               game_id: event.gameId, game_title: event.gameTitle,
               source: 'system', created_at: this.now(),
             }
           : {
               id: this.mkId(), type: 'info', status: 'pending',
-              title: `Nessun known fix (Heroic) — ${event.gameTitle}`,
-              body: 'Installazione con i verb configurati di default.',
+              title: lang === 'en' ? `No known fix (Heroic) — ${event.gameTitle}` : `Nessun known fix (Heroic) — ${event.gameTitle}`,
+              body: lang === 'en' ? 'Installing with the default configured verbs.' : 'Installazione con i verb configurati di default.',
               game_id: event.gameId, game_title: event.gameTitle,
               source: 'system', created_at: this.now(),
             };
@@ -408,21 +428,21 @@ class NotificationEngine {
           const actionParams = (() => { try { return JSON.parse(entry.action_params); } catch { return {}; } })();
           return {
             id: this.mkId(), type: 'kb-suggestion', status: 'pending',
-            title: `Soluzione nota — ${event.gameTitle}`,
-            body: entry.solution,
+            title: lang === 'en' ? `Known solution — ${event.gameTitle}` : `Soluzione nota — ${event.gameTitle}`,
+            body: localizedSolution(entry, lang),
             game_id: event.gameId, game_title: event.gameTitle,
             raw_log: event.error,
             source: 'kb',
             created_at: this.now(),
             primary_action: entry.action_type !== 'none'
-              ? JSON.stringify({ label: this.actionLabel(entry.action_type, actionParams), handler: entry.action_type, params: actionParams })
+              ? JSON.stringify({ label: this.actionLabel(entry.action_type, actionParams, lang), handler: entry.action_type, params: actionParams })
               : undefined,
           };
         }
         return {
           id: this.mkId(), type: 'error', status: 'pending',
-          title: `Errore installazione — ${event.gameTitle}`,
-          body: event.error || "Errore durante il download o l'installazione.",
+          title: lang === 'en' ? `Installation error — ${event.gameTitle}` : `Errore installazione — ${event.gameTitle}`,
+          body: event.error || (lang === 'en' ? 'An error occurred during download or installation.' : "Errore durante il download o l'installazione."),
           game_id: event.gameId, game_title: event.gameTitle,
           raw_log: event.error, source: 'system', created_at: this.now(),
         };
@@ -436,21 +456,21 @@ class NotificationEngine {
           const actionParams = (() => { try { return JSON.parse(entry.action_params); } catch { return {}; } })();
           return {
             id: this.mkId(), type: 'kb-suggestion', status: 'pending',
-            title: `Soluzione nota — ${event.gameTitle}`,
-            body: entry.solution,
+            title: lang === 'en' ? `Known solution — ${event.gameTitle}` : `Soluzione nota — ${event.gameTitle}`,
+            body: localizedSolution(entry, lang),
             game_id: event.gameId, game_title: event.gameTitle,
             raw_log: event.error,
             source: 'kb',
             created_at: this.now(),
             primary_action: entry.action_type !== 'none'
-              ? JSON.stringify({ label: this.actionLabel(entry.action_type, actionParams), handler: entry.action_type, params: actionParams })
+              ? JSON.stringify({ label: this.actionLabel(entry.action_type, actionParams, lang), handler: entry.action_type, params: actionParams })
               : undefined,
           };
         }
         return {
           id: this.mkId(), type: 'error', status: 'pending',
-          title: `Avvio fallito — ${event.gameTitle}`,
-          body: event.error || 'Il gioco non si è avviato correttamente.',
+          title: lang === 'en' ? `Launch failed — ${event.gameTitle}` : `Avvio fallito — ${event.gameTitle}`,
+          body: event.error || (lang === 'en' ? "The game didn't start correctly." : 'Il gioco non si è avviato correttamente.'),
           game_id: event.gameId, game_title: event.gameTitle,
           raw_log: event.error, source: 'system', created_at: this.now(),
         };
@@ -459,20 +479,20 @@ class NotificationEngine {
       case 'launch-blocked':
         return {
           id: this.mkId(), type: 'warning', status: 'pending',
-          title: `Avvio bloccato — ${event.gameTitle}`,
+          title: lang === 'en' ? `Launch blocked — ${event.gameTitle}` : `Avvio bloccato — ${event.gameTitle}`,
           body: event.reason,
           game_id: event.gameId, game_title: event.gameTitle,
           source: 'system', created_at: this.now(),
-          primary_action: JSON.stringify({ label: 'Impostazioni Plugin', handler: 'open_section', params: { section: 'plugins' } }),
+          primary_action: JSON.stringify({ label: lang === 'en' ? 'Plugin Settings' : 'Impostazioni Plugin', handler: 'open_section', params: { section: 'plugins' } }),
         };
 
       case 'auth-error':
         return {
           id: this.mkId(), type: 'warning', status: 'pending',
-          title: `Sessione scaduta — ${event.store}`,
-          body: event.message || 'La sessione è scaduta. Accedi di nuovo dalle impostazioni account.',
+          title: lang === 'en' ? `Session expired — ${event.store}` : `Sessione scaduta — ${event.store}`,
+          body: event.message || (lang === 'en' ? 'The session has expired. Sign in again from the account settings.' : 'La sessione è scaduta. Accedi di nuovo dalle impostazioni account.'),
           source: 'system', created_at: this.now(),
-          primary_action: JSON.stringify({ label: 'Vai agli Account', handler: 'open_section', params: { section: 'accounts' } }),
+          primary_action: JSON.stringify({ label: lang === 'en' ? 'Go to Accounts' : 'Vai agli Account', handler: 'open_section', params: { section: 'accounts' } }),
           game_id: null as any, game_title: null as any, raw_log: null as any,
           secondary_action: null as any, ai_provider: null as any, confidence: null as any,
         };
@@ -480,8 +500,8 @@ class NotificationEngine {
       case 'auth-ok':
         return {
           id: this.mkId(), type: 'success', status: 'pending',
-          title: `${event.store} — autenticazione completata`,
-          body: 'Sessione attiva. La libreria verrà sincronizzata.',
+          title: lang === 'en' ? `${event.store} — authentication complete` : `${event.store} — autenticazione completata`,
+          body: lang === 'en' ? 'Session active. The library will be synced.' : 'Sessione attiva. La libreria verrà sincronizzata.',
           source: 'system', created_at: this.now(),
           game_id: null as any, game_title: null as any, raw_log: null as any,
           primary_action: null as any, secondary_action: null as any,
@@ -491,8 +511,8 @@ class NotificationEngine {
       case 'runner-installed':
         return {
           id: this.mkId(), type: 'success', status: 'pending',
-          title: `Runner installato — ${event.runnerId}`,
-          body: 'Il runner è disponibile per l\'uso nei profili di compatibilità.',
+          title: lang === 'en' ? `Runner installed — ${event.runnerId}` : `Runner installato — ${event.runnerId}`,
+          body: lang === 'en' ? 'The runner is available for use in compatibility profiles.' : 'Il runner è disponibile per l\'uso nei profili di compatibilità.',
           source: 'system', created_at: this.now(),
           game_id: null as any, game_title: null as any, raw_log: null as any,
           primary_action: null as any, secondary_action: null as any,
@@ -502,8 +522,8 @@ class NotificationEngine {
       case 'runner-uninstalled':
         return {
           id: this.mkId(), type: 'success', status: 'pending',
-          title: `Runner disinstallato — ${event.runnerId}`,
-          body: 'Il runner è stato rimosso. Non più disponibile nei profili di compatibilità.',
+          title: lang === 'en' ? `Runner uninstalled — ${event.runnerId}` : `Runner disinstallato — ${event.runnerId}`,
+          body: lang === 'en' ? 'The runner has been removed. No longer available in compatibility profiles.' : 'Il runner è stato rimosso. Non più disponibile nei profili di compatibilità.',
           source: 'system', created_at: this.now(),
           game_id: null as any, game_title: null as any, raw_log: null as any,
           primary_action: null as any, secondary_action: null as any,
@@ -513,7 +533,7 @@ class NotificationEngine {
       case 'runner-error':
         return {
           id: this.mkId(), type: 'error', status: 'pending',
-          title: `Errore installazione runner — ${event.runnerId}`,
+          title: lang === 'en' ? `Runner installation error — ${event.runnerId}` : `Errore installazione runner — ${event.runnerId}`,
           body: event.error,
           raw_log: event.error, source: 'system', created_at: this.now(),
           game_id: null as any, game_title: null as any,
@@ -535,8 +555,10 @@ class NotificationEngine {
         // della knowledge base per questo tipo di notifica.
         return {
           id: this.mkId(), type: 'info', status: 'applied',
-          title: `${event.gameTitle} — ha funzionato?`,
-          body: 'Il gioco si è appena chiuso. Se ha funzionato correttamente, conferma per marcarlo come verificato con la configurazione attuale (runner, verb, argomenti di lancio). Se non ha funzionato, resterà da testare e la domanda ricomparirà alla prossima chiusura.',
+          title: lang === 'en' ? `${event.gameTitle} — did it work?` : `${event.gameTitle} — ha funzionato?`,
+          body: lang === 'en'
+            ? "The game just closed. If it worked correctly, confirm to mark it as verified with the current configuration (runner, verbs, launch arguments). If it didn't work, it'll stay unverified and the question will reappear the next time it closes."
+            : 'Il gioco si è appena chiuso. Se ha funzionato correttamente, conferma per marcarlo come verificato con la configurazione attuale (runner, verb, argomenti di lancio). Se non ha funzionato, resterà da testare e la domanda ricomparirà alla prossima chiusura.',
           game_id: event.gameId, game_title: event.gameTitle,
           source: 'validation', created_at: this.now(),
           // v0.99.38 — FIX CRASH: better-sqlite3 con parametri nominati
@@ -558,7 +580,9 @@ class NotificationEngine {
           id: this.mkId(),
           type: event.level === 'error' ? 'error' : 'warning',
           status: 'pending',
-          title: event.level === 'error' ? 'Errore di sistema' : 'Avviso di sistema',
+          title: lang === 'en'
+            ? (event.level === 'error' ? 'System error' : 'System warning')
+            : (event.level === 'error' ? 'Errore di sistema' : 'Avviso di sistema'),
           body: event.message,
           raw_log: event.message,
           source: 'system', created_at: this.now(),
@@ -571,7 +595,8 @@ class NotificationEngine {
 }
 
 // Import KB (lazy per evitare circular deps al boot)
-import { knowledgeBase } from './knowledgeBase';
+import { knowledgeBase, localizedSolution } from './knowledgeBase';
+import { readAppConfig } from './appConfig';
 
 // Singleton esportato
 export const notificationEngine = new NotificationEngine();

@@ -21,7 +21,7 @@ import {
   AIResponse,
   ErrorContext,
   parseAIResponse,
-  AI_SYSTEM_PROMPT,
+  buildSystemPrompt,
   type TokenUsage,
 } from './base';
 
@@ -85,7 +85,7 @@ export class ClaudePlugin extends AIProviderPlugin {
         body: JSON.stringify({
           model: this.model,
           max_tokens: MAX_TOKENS,
-          system: AI_SYSTEM_PROMPT,
+          system: buildSystemPrompt(context.language),
           messages: [
             { role: 'user', content: buildUserMessage(context) },
           ],

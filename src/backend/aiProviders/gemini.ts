@@ -28,7 +28,7 @@ import {
   AIResponse,
   ErrorContext,
   parseAIResponse,
-  AI_SYSTEM_PROMPT,
+  buildSystemPrompt,
   type TokenUsage,
 } from './base';
 
@@ -99,7 +99,7 @@ export class GeminiPlugin extends AIProviderPlugin {
         ai.models.generateContent({
           model: this.model,
           contents: buildUserMessage(context),
-          config: { systemInstruction: AI_SYSTEM_PROMPT },
+          config: { systemInstruction: buildSystemPrompt(context.language) },
         }),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('timeout')), REQUEST_TIMEOUT_MS)

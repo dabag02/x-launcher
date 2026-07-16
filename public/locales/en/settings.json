@@ -1,0 +1,143 @@
+{
+  "tabs": {
+    "accounts": "Store Accounts",
+    "system": "System",
+    "plugins": "Plugins",
+    "input": "Input",
+    "aiAdvisor": "AI Advisor"
+  },
+  "accounts": {
+    "sessionActive": "Session Active · Synced: {{synced}} · Installed: {{installed}}",
+    "waitingBrowser": "Waiting for browser...",
+    "disconnected": "Disconnected",
+    "synced": "Synced",
+    "waitingTerminal": "Waiting for terminal completion…",
+    "noLoginRequired": "No login required",
+    "linkedAccount": "✓ Linked Account",
+    "confirmDisconnect": "Confirm disconnect? Press A",
+    "cancel": "Cancel",
+    "connectStore": "Connect Store"
+  },
+  "language": {
+    "label": "Language",
+    "it": "Italian",
+    "en": "English"
+  },
+  "system": {
+    "installedRunners": "Installed Runners",
+    "noRunnersFound": "No Proton runner found in ~/.local/share/Steam/",
+    "removing": "removing…",
+    "confirmA": "Confirm A",
+    "installedBadge": "installed",
+    "installableRunners": "Installable Runners",
+    "refresh": "↻ Refresh",
+    "protonupLutris": {
+      "title": "ProtonUp-Qt and Lutris detected",
+      "prefix": "Runners will be installed via ",
+      "suffix": " · Lutris available for advanced management"
+    },
+    "protonupOnly": {
+      "title": "ProtonUp-Qt detected",
+      "prefix": "Runners installed via ",
+      "middle": " · Lutris not found — ",
+      "suffix": " for advanced management"
+    },
+    "lutrisOnly": {
+      "title": "Lutris detected · ProtonUp-Qt not found",
+      "prefix": "Runners downloaded via GitHub Releases (fallback) · ",
+      "suffix": " for optimal management"
+    },
+    "neitherFound": {
+      "title": "ProtonUp-Qt and Lutris not found",
+      "desc": "X-Launcher will use GitHub Releases as a fallback, but installation may be slower. For optimal runner management, install at least one of the two:",
+      "recommended": "— recommended"
+    },
+    "loadingVersions": "Loading available versions…",
+    "installing": "installing…",
+    "installAction": "Install",
+    "systemTools": "System Tools",
+    "diskSpace": "Disk Space",
+    "freeSpace": "{{free}} free",
+    "usedPercentTotal": "{{percent}}% used · {{total}} total",
+    "folderNotCreated": "folder not created yet",
+    "loadingEllipsis": "Loading..."
+  },
+  "plugins": {
+    "intro": "Enable or disable store plugins. Installed games stay visible even with the plugin disabled, but DRM titles won't be launchable.",
+    "retry": "↻ Retry",
+    "loadingPlugins": "Loading plugins...",
+    "reload": "↻ Reload",
+    "drmFree": "DRM-free",
+    "drm": "DRM",
+    "requires": "requires: {{tool}}"
+  },
+  "input": {
+    "connectedDevices": "Connected Devices",
+    "noControllerDetected": "No controller detected",
+    "assignedPlugin": "Assigned plugin: {{plugin}}",
+    "connected": "connected",
+    "inputPlugins": "Input Plugins",
+    "genericFallbackNote": "The Generic plugin is the fallback for unrecognized controllers and shouldn't be disabled.",
+    "testController": "Controller Test",
+    "testInputLive": "Live Input Test",
+    "testModeActive": "Test mode active: the Dashboard ignores all input while you're here, so nothing else triggers by accident.",
+    "testInstructions": "Press a button or move the sticks: the diagram lights up in real time with exactly what the Dashboard is reading from the controller.",
+    "connectControllerPrompt": "Connect a controller to verify its inputs are detected correctly.",
+    "navNormal": "Normal navigation",
+    "exitInProgress": "Exiting — keep holding B",
+    "testModeHint": "Test mode — hold B to exit"
+  },
+  "storePluginDescriptions": {
+    "Steam": "Steam library — reads local .acf files",
+    "GOG_Galaxy": "GOG Galaxy library — DRM-free, requires lgogdownloader",
+    "Battle_net": "Battle.net — not yet supported",
+    "Amazon_Games": "Amazon Games — not yet supported",
+    "Classic_Console": "Classic consoles and ROMs — RetroArch, DOSBox, ScummVM",
+    "Epic_Games": "Epic Games library — requires legendary"
+  },
+  "inputPluginDescriptions": {
+    "ds4": "PlayStation 4 controller (via USB or Bluetooth)",
+    "ds5": "PlayStation 5 controller (via USB or Bluetooth)",
+    "generic": "Fallback for unrecognized controllers — standard XInput layout",
+    "xinput": "Xbox 360, Xbox One, Xbox Series and generic XInput controllers"
+  },
+  "inputPluginNames": {
+    "generic": "Generic Controller"
+  },
+  "aiAdvisor": {
+    "experimental": "Experimental",
+    "experimentalNote": "The AI Advisor is in testing — responses may need manual debugging.",
+    "modelsIntro": "Ollama models already downloaded on this machine. Pick which one to use for the AI Advisor when the local Knowledge Base doesn't find a known solution — smaller models respond faster and put less load on the GPU shared with games, larger models can give more accurate answers.",
+    "monthlyBudget": "Monthly Token Budget",
+    "tokensThisMonth": "{{used}} / {{budget}} tokens this month",
+    "setBudget": "Set budget",
+    "budgetFieldLabel": "Monthly Token Budget",
+    "tokensPerMonth": "tokens/month",
+    "installedModels": "Installed Models",
+    "noModelsFound": "No model found — download one from the terminal with 'ollama pull <name>'.",
+    "weight": {
+      "light": "Light",
+      "medium": "Medium",
+      "heavy": "Heavy",
+      "veryHeavy": "Very Heavy"
+    },
+    "active": "active",
+    "select": "select",
+    "inactive": "inactive",
+    "cloudProviders": "Cloud Providers",
+    "paid": "Paid",
+    "freeCheap": "Free/cheap",
+    "apiKey": "API Key",
+    "apiKeyPlaceholder": "Paste/type the API key…",
+    "apiKeyStoredPlaceholder": "•••••••• (saved)",
+    "testing": "testing…",
+    "testConnection": "Test connection",
+    "removeKey": "Remove key"
+  },
+  "cloudProviderNotes": {
+    "gemini": "Real free tier with rate limits. On this tier, prompts and responses may be used by Google to improve its models — for sensitive data, use the paid tier.",
+    "deepseek": "5 million free tokens on signup, no credit card required.",
+    "chatgpt": "Requires a prepaid top-up (min. $5) on platform.openai.com — no real free tier, even for the cheapest models.",
+    "claude": "Pay-as-you-go from the very first use on console.anthropic.com — no real free tier."
+  }
+}

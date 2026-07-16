@@ -19,7 +19,7 @@ import {
   AIResponse,
   ErrorContext,
   parseAIResponse,
-  AI_SYSTEM_PROMPT,
+  buildSystemPrompt,
   type TokenUsage,
 } from './base';
 
@@ -88,7 +88,7 @@ export class OpenAICompatiblePlugin extends AIProviderPlugin {
           model: this.model,
           response_format: { type: 'json_object' },
           messages: [
-            { role: 'system', content: AI_SYSTEM_PROMPT },
+            { role: 'system', content: buildSystemPrompt(context.language) },
             { role: 'user', content: buildUserMessage(context) },
           ],
         }),

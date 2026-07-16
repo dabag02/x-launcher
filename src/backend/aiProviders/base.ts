@@ -92,6 +92,17 @@ export interface ErrorContext {
    * domande invece di un tentativo ex-novo. undefined al primo giro.
    */
   clarificationAnswer?: string;
+  /**
+   * Step 19b (v1.1.60) — lingua UI configurata al momento della chiamata
+   * (da readAppConfig().language, popolata da orchestrator.ts prima di
+   * chiamare askForFix). Prima di questo campo il prompt di sistema aveva
+   * "in italiano" fisso per tutti e 5 i provider, indipendentemente dalla
+   * lingua scelta nella UI — ora ogni adapter costruisce il proprio
+   * system prompt con buildSystemPrompt(context.language) invece di
+   * referenziare una costante statica. undefined → trattato come 'it'
+   * (comportamento storico invariato per chi non passa questo campo).
+   */
+  language?: 'it' | 'en';
 }
 
 /**
@@ -264,15 +275,27 @@ export function parseAIResponse(raw: string, usage: TokenUsage): AIResponse {
  * provider. I singoli adapter lo antepongono al proprio messaggio con il
  * contesto (ErrorContext), incluso lo storico dei tentativi falliti se
  * presente.
+ *
+ * Step 19b (v1.1.60) — prima era una costante con "in italiano" fisso nei
+ * tre esiti (solution/question/reason), indipendentemente dalla lingua
+ * scelta nella UI. L'ipotesi "la lingua della risposta dipende dal log"
+ * non era corretta: il prompt semplicemente non lasciava altra scelta al
+ * modello. Ora è una funzione, parametrizzata sulla lingua corrente — le
+ * ISTRUZIONI stesse restano in italiano (un LLM le capisce bene in
+ * qualunque lingua siano scritte, tradurle non cambia nulla per l'utente,
+ * che non le vede mai), cambia solo la lingua richiesta per i tre campi
+ * di testo libero che l'utente VEDE davvero nella notifica.
  */
-export const AI_SYSTEM_PROMPT = `Sei un assistente che aiuta a diagnosticare problemi di compatibilità Wine/Proton per giochi Windows lanciati su Linux tramite X-Launcher, un launcher HTPC.
+export function buildSystemPrompt(language: 'it' | 'en' = 'it'): string {
+  const langName = language === 'en' ? 'inglese' : 'italiano';
+  return `Sei un assistente che aiuta a diagnosticare problemi di compatibilità Wine/Proton per giochi Windows lanciati su Linux tramite X-Launcher, un launcher HTPC.
 
 Rispondi SOLO con un oggetto JSON valido, nessun testo prima o dopo, in UNO di questi tre formati:
 
 1. Se hai una soluzione concreta da proporre:
 {
   "kind": "suggestion",
-  "solution": "spiegazione breve e concreta del problema e della soluzione, in italiano",
+  "solution": "spiegazione breve e concreta del problema e della soluzione, in ${langName}",
   "actionType": "winetricks" | "config_patch" | "relaunch" | "open_section" | "none",
   "actionParams": { "chiave": "valore" },
   "confidence": "high" | "medium" | "low"
@@ -281,14 +304,14 @@ Rispondi SOLO con un oggetto JSON valido, nessun testo prima o dopo, in UNO di q
 2. Se ti manca un'informazione essenziale per rispondere (es. non è chiaro se il problema è video, audio, o di input):
 {
   "kind": "clarify",
-  "question": "domanda breve e specifica, in italiano",
+  "question": "domanda breve e specifica, in ${langName}",
   "options": ["opzione 1", "opzione 2", "opzione 3"]
 }
 
 3. Se non hai una risposta affidabile da dare, anche dopo aver visto i tentativi precedenti falliti:
 {
   "kind": "give_up",
-  "reason": "spiegazione breve del perché non sei sicuro, in italiano"
+  "reason": "spiegazione breve del perché non sei sicuro, in ${langName}"
 }
 
 Regole:
@@ -297,4 +320,5 @@ Regole:
 - Se ti vengono forniti tentativi precedenti già falliti, NON riproporre la stessa soluzione o una equivalente — se non hai altre idee valide, usa "give_up" invece di ripetere.
 - Se non sei ragionevolmente sicuro della causa, usa confidence "low" invece di inventare una soluzione plausibile ma non verificata, oppure usa "give_up" se la low confidence rende il suggerimento inutile.
 - PRIORITÀ CRITICA: se il log contiene un errore esplicito relativo al file eseguibile o al suo percorso (es. "failed to open", "No such file", "cannot find the file specified", un percorso che termina con un'estensione insolita come .bak invece di .exe), quella è quasi sempre la causa REALE del mancato avvio — dagli priorità assoluta rispetto a warning generici di driver grafici (libEGL, libGL, dri2, Mesa), che sono spesso rumore innocuo presente anche nei lanci riusciti e NON la causa del fallimento a meno che non siano l'unico segnale d'errore presente nel log.`;
+}
 

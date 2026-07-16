@@ -1,0 +1,16 @@
+{
+  "title": "Impostazioni",
+  "manageAccounts": "Gestisci Account",
+  "avatar": "Avatar",
+  "gamescopeMode": "Modalità Gamescope",
+  "on": "Attivo",
+  "off": "Disattivo",
+  "toggleTheme": "Cambia Tema",
+  "consoleMode": "Modalità Console",
+  "backToDesktop": "Torna al Desktop",
+  "displayMode": "Modalità Schermo",
+  "windowed": "Finestra",
+  "fullScreen": "Schermo Intero",
+  "exit": "Esci",
+  "confirmA": "Conferma con A"
+}
