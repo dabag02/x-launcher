@@ -35,7 +35,12 @@ export type KBConfidence = 'high' | 'medium' | 'low';
 export interface KnowledgeEntry {
   id:           string;
   pattern:      string;                      // regex o stringa da cercare nel log
-  solution:     string;                      // testo in linguaggio naturale
+  solution:     string;                      // testo in linguaggio naturale (italiano)
+  // Step 19b (v1.1.58) — traduzione inglese, null per le voci che non ce
+  // l'hanno ancora (tipicamente ai-writeback: un suggerimento AI arriva
+  // in una sola lingua, quella impostata al momento della chiamata — non
+  // esiste una "seconda lingua" da salvare per quel tipo di voce).
+  solution_en:  string | null;
   action_type:  KBActionType;
   action_params: string;                     // JSON serializzato
   source:       KBSource;
@@ -49,6 +54,16 @@ export interface KnowledgeEntry {
 export interface KBMatch {
   entry:      KnowledgeEntry;
   matchScore: number;                        // 0.0 – 1.0
+}
+
+// Step 19b (v1.1.58) — un solo punto che decide quale campo mostrare,
+// invece di ripetere lo stesso if/fallback nei due punti di
+// notificationEngine.ts che consultano la KB: se la lingua corrente è
+// 'en' e la voce ha una traduzione, usa quella; altrimenti il testo
+// italiano originale (mai una stringa vuota — ogni voce di seed ha
+// sempre "solution", solo "solution_en" può mancare).
+export function localizedSolution(entry: KnowledgeEntry, language: 'it' | 'en'): string {
+  return (language === 'en' && entry.solution_en) ? entry.solution_en : entry.solution;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,24 +93,37 @@ class KnowledgeStore {
         created_at    TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+    // Step 19b (v1.1.58) — KB bilingue, richiesta esplicita dell'utente:
+    // "solution" resta il testo italiano originale (compatibilità con le
+    // voci già scritte da ai-writeback, che hanno solo quello), la
+    // traduzione inglese vive in una colonna separata nullable — non
+    // sostituisce mai il dato esistente, un DB già popolato continua a
+    // funzionare senza reimportare nulla. Stesso pattern di migrazione già
+    // in uso altrove (vedi db.ts, PRAGMA table_info + ALTER TABLE ADD
+    // COLUMN se manca).
+    const kbCols = (this.db.prepare("PRAGMA table_info(knowledge_base)").all() as any[]).map(r => r.name);
+    if (!kbCols.includes('solution_en')) {
+      this.db.exec("ALTER TABLE knowledge_base ADD COLUMN solution_en TEXT");
+    }
   }
 
   upsert(entry: KnowledgeEntry): void {
     this.db.prepare(`
       INSERT INTO knowledge_base
-        (id, pattern, solution, action_type, action_params, source, confidence,
+        (id, pattern, solution, solution_en, action_type, action_params, source, confidence,
          hit_count, score, last_seen, created_at)
       VALUES
-        (@id, @pattern, @solution, @action_type, @action_params, @source, @confidence,
+        (@id, @pattern, @solution, @solution_en, @action_type, @action_params, @source, @confidence,
          @hit_count, @score, @last_seen, @created_at)
       ON CONFLICT(id) DO UPDATE SET
         solution     = excluded.solution,
+        solution_en  = excluded.solution_en,
         action_type  = excluded.action_type,
         action_params= excluded.action_params,
         confidence   = excluded.confidence,
         score        = excluded.score,
         last_seen    = excluded.last_seen
-    `).run(entry);
+    `).run({ ...entry, solution_en: entry.solution_en ?? null });
   }
 
   getAll(): KnowledgeEntry[] {
@@ -251,6 +279,10 @@ function loadSeed(store: KnowledgeStore): void {
         store.upsert({
           ...entry,
           source: 'seed',
+          // Step 19b (v1.1.58) — undefined non è accettato dal driver
+          // SQLite come parametro nominato: se il seed non ha ancora
+          // solution_en per questa voce, normalizza esplicitamente a null.
+          solution_en: entry.solution_en ?? null,
           // SQLite accetta solo stringhe — serializza action_params se è un oggetto
           action_params: typeof entry.action_params === 'string'
             ? entry.action_params
@@ -320,6 +352,10 @@ class KnowledgeBase {
       id,
       pattern:      params.pattern,
       solution:     params.solution,
+      // Un suggerimento AI arriva in una sola lingua (quella impostata al
+      // momento della chiamata, vedi Step successivo sul prompt) — nessuna
+      // seconda lingua da salvare qui, a differenza delle voci di seed.
+      solution_en:  null,
       action_type:  params.actionType,
       action_params: JSON.stringify(params.actionParams),
       source:       'ai-writeback',

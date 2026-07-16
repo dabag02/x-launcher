@@ -1,491 +1,525 @@
 [
-    {
-        "id": "seed-d3dx9",
-        "pattern": "err:module:import_dll.*d3dx9",
-        "solution": "Manca il runtime DirectX 9. Installa il pacchetto winetricks d3dx9_43 nel prefix del gioco.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "d3dx9_43"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+  {
+    "id": "seed-d3dx9",
+    "pattern": "err:module:import_dll.*d3dx9",
+    "solution": "Manca il runtime DirectX 9. Installa il pacchetto winetricks d3dx9_43 nel prefix del gioco.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "d3dx9_43"
     },
-    {
-        "id": "seed-d3dcompiler",
-        "pattern": "err:module:import_dll.*d3dcompiler",
-        "solution": "Manca il compilatore shader DirectX. Installa d3dcompiler_47 via winetricks.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "d3dcompiler_47"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Missing the DirectX 9 runtime. Install the winetricks package d3dx9_43 in the game's prefix."
+  },
+  {
+    "id": "seed-d3dcompiler",
+    "pattern": "err:module:import_dll.*d3dcompiler",
+    "solution": "Manca il compilatore shader DirectX. Installa d3dcompiler_47 via winetricks.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "d3dcompiler_47"
     },
-    {
-        "id": "seed-vulkan-dll",
-        "pattern": "vulkan-1.dll not found",
-        "solution": "Vulkan non disponibile nel prefix. Disabilita DXVK nel profilo di compatibilità del gioco e usa il rendering OpenGL.",
-        "action_type": "config_patch",
-        "action_params": {
-            "key": "dxvk",
-            "value": "0"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Missing the DirectX shader compiler. Install d3dcompiler_47 via winetricks."
+  },
+  {
+    "id": "seed-vulkan-dll",
+    "pattern": "vulkan-1.dll not found",
+    "solution": "Vulkan non disponibile nel prefix. Disabilita DXVK nel profilo di compatibilità del gioco e usa il rendering OpenGL.",
+    "action_type": "config_patch",
+    "action_params": {
+      "key": "dxvk",
+      "value": "0"
     },
-    {
-        "id": "seed-vcrun",
-        "pattern": "err:seh:setup_exception",
-        "solution": "Crash del runtime Visual C++. Installa vcrun2019 (o vcrun2022 per giochi più recenti) via winetricks.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "vcrun2019"
-        },
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.75,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Vulkan is not available in the prefix. Disable DXVK in the game's compatibility profile and use OpenGL rendering instead."
+  },
+  {
+    "id": "seed-vcrun",
+    "pattern": "err:seh:setup_exception",
+    "solution": "Crash del runtime Visual C++. Installa vcrun2019 (o vcrun2022 per giochi più recenti) via winetricks.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "vcrun2019"
     },
-    {
-        "id": "seed-dotnet",
-        "pattern": "err:ole:CoGetClassObject",
-        "solution": "Componente COM mancante, spesso richiede .NET Framework. Installa dotnet48 via winetricks.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "dotnet48"
-        },
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.75,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.75,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Visual C++ runtime crash. Install vcrun2019 (or vcrun2022 for newer games) via winetricks."
+  },
+  {
+    "id": "seed-dotnet",
+    "pattern": "err:ole:CoGetClassObject",
+    "solution": "Componente COM mancante, spesso richiede .NET Framework. Installa dotnet48 via winetricks.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "dotnet48"
     },
-    {
-        "id": "seed-no-adapter",
-        "pattern": "err:d3d:.*No adapter",
-        "solution": "Wine non rileva la GPU. Prova ad abilitare il software rendering oppure verifica che i driver GPU siano aggiornati.",
-        "action_type": "config_patch",
-        "action_params": {
-            "key": "dxvk",
-            "value": "0"
-        },
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.75,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.75,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Missing COM component, often requires .NET Framework. Install dotnet48 via winetricks."
+  },
+  {
+    "id": "seed-no-adapter",
+    "pattern": "err:d3d:.*No adapter",
+    "solution": "Wine non rileva la GPU. Prova ad abilitare il software rendering oppure verifica che i driver GPU siano aggiornati.",
+    "action_type": "config_patch",
+    "action_params": {
+      "key": "dxvk",
+      "value": "0"
     },
-    {
-        "id": "seed-access-violation",
-        "pattern": "0xc0000005",
-        "solution": "Access Violation generico. Prova a disabilitare DXVK e/o VKD3D nel profilo di compatibilità.",
-        "action_type": "config_patch",
-        "action_params": {
-            "key": "dxvk",
-            "value": "0"
-        },
-        "source": "seed",
-        "confidence": "low",
-        "hit_count": 0,
-        "score": 0.6,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.75,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Wine doesn't detect the GPU. Try enabling software rendering, or check that the GPU drivers are up to date."
+  },
+  {
+    "id": "seed-access-violation",
+    "pattern": "0xc0000005",
+    "solution": "Access Violation generico. Prova a disabilitare DXVK e/o VKD3D nel profilo di compatibilità.",
+    "action_type": "config_patch",
+    "action_params": {
+      "key": "dxvk",
+      "value": "0"
     },
-    {
-        "id": "seed-stack-overflow",
-        "pattern": "err:ntdll:.*stack overflow",
-        "solution": "Stack overflow in Wine. Aumenta lo stack size nel profilo avanzato oppure aggiorna il runner a una versione più recente.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.7,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "low",
+    "hit_count": 0,
+    "score": 0.6,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Generic Access Violation. Try disabling DXVK and/or VKD3D in the compatibility profile."
+  },
+  {
+    "id": "seed-stack-overflow",
+    "pattern": "err:ntdll:.*stack overflow",
+    "solution": "Stack overflow in Wine. Aumenta lo stack size nel profilo avanzato oppure aggiorna il runner a una versione più recente.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.7,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Stack overflow in Wine. Increase the stack size in the advanced profile, or update the runner to a newer version."
+  },
+  {
+    "id": "seed-opengl",
+    "pattern": "err:wgl:",
+    "solution": "OpenGL context fallito. Verifica che i driver Mesa siano aggiornati: sudo pacman -S mesa lib32-mesa",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.7,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "OpenGL context failed. Check that the Mesa drivers are up to date: sudo pacman -S mesa lib32-mesa"
+  },
+  {
+    "id": "seed-epic-auth",
+    "pattern": "legendary.*not logged in",
+    "solution": "La sessione Epic Games è scaduta. Vai su Impostazioni → Account e accedi di nuovo a Epic Games.",
+    "action_type": "open_section",
+    "action_params": {
+      "section": "accounts"
     },
-    {
-        "id": "seed-opengl",
-        "pattern": "err:wgl:",
-        "solution": "OpenGL context fallito. Verifica che i driver Mesa siano aggiornati: sudo pacman -S mesa lib32-mesa",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.7,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "The Epic Games session has expired. Go to Settings → Accounts and sign in to Epic Games again."
+  },
+  {
+    "id": "seed-gog-auth",
+    "pattern": "lgogdownloader.*401",
+    "solution": "La sessione GOG è scaduta (HTTP 401). Vai su Impostazioni → Account e accedi di nuovo a GOG.",
+    "action_type": "open_section",
+    "action_params": {
+      "section": "accounts"
     },
-    {
-        "id": "seed-epic-auth",
-        "pattern": "legendary.*not logged in",
-        "solution": "La sessione Epic Games è scaduta. Vai su Impostazioni → Account e accedi di nuovo a Epic Games.",
-        "action_type": "open_section",
-        "action_params": {
-            "section": "accounts"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "The GOG session has expired (HTTP 401). Go to Settings → Accounts and sign in to GOG again."
+  },
+  {
+    "id": "seed-wine-cannot-find",
+    "pattern": "wine: cannot find",
+    "solution": "Wine non trova l'eseguibile del gioco. Apri l'overlay del gioco e riconfigura il percorso dell'eseguibile.",
+    "action_type": "open_section",
+    "action_params": {
+      "section": "overlay"
     },
-    {
-        "id": "seed-gog-auth",
-        "pattern": "lgogdownloader.*401",
-        "solution": "La sessione GOG è scaduta (HTTP 401). Vai su Impostazioni → Account e accedi di nuovo a GOG.",
-        "action_type": "open_section",
-        "action_params": {
-            "section": "accounts"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Wine can't find the game's executable. Open the game's overlay and reconfigure the executable path."
+  },
+  {
+    "id": "seed-xinput",
+    "pattern": "err:module:import_dll.*xinput",
+    "solution": "Manca la libreria XInput (controller). Installa xinput9_1_0 via winetricks.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "xinput9_1_0"
     },
-    {
-        "id": "seed-wine-cannot-find",
-        "pattern": "wine: cannot find",
-        "solution": "Wine non trova l'eseguibile del gioco. Apri l'overlay del gioco e riconfigura il percorso dell'eseguibile.",
-        "action_type": "open_section",
-        "action_params": {
-            "section": "overlay"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Missing the XInput library (controller). Install xinput9_1_0 via winetricks."
+  },
+  {
+    "id": "seed-msvcp",
+    "pattern": "err:module:import_dll.*msvcp",
+    "solution": "Manca la libreria runtime MSVC (msvcp*.dll). Installa vcrun2022 via winetricks.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "vcrun2022"
     },
-    {
-        "id": "seed-xinput",
-        "pattern": "err:module:import_dll.*xinput",
-        "solution": "Manca la libreria XInput (controller). Installa xinput9_1_0 via winetricks.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "xinput9_1_0"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Missing the MSVC runtime library (msvcp*.dll). Install vcrun2022 via winetricks."
+  },
+  {
+    "id": "seed-physx",
+    "pattern": "PhysX.*not found|err:module:import_dll.*PhysX",
+    "solution": "Manca il runtime NVIDIA PhysX. Installa physx via winetricks.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "physx"
     },
-    {
-        "id": "seed-msvcp",
-        "pattern": "err:module:import_dll.*msvcp",
-        "solution": "Manca la libreria runtime MSVC (msvcp*.dll). Installa vcrun2022 via winetricks.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "vcrun2022"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.8,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "Missing the NVIDIA PhysX runtime. Install physx via winetricks."
+  },
+  {
+    "id": "seed-plugin-disabled",
+    "pattern": "Plugin.*disabilitato",
+    "solution": "Il plugin store è disabilitato. Vai su Impostazioni → Plugins e riattivalo per poter avviare i giochi di quello store.",
+    "action_type": "open_section",
+    "action_params": {
+      "section": "plugins"
     },
-    {
-        "id": "seed-physx",
-        "pattern": "PhysX.*not found|err:module:import_dll.*PhysX",
-        "solution": "Manca il runtime NVIDIA PhysX. Installa physx via winetricks.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "physx"
-        },
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.8,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.95,
+    "last_seen": null,
+    "created_at": "2026-06-01T00:00:00.000Z",
+    "solution_en": "The store plugin is disabled. Go to Settings → Plugins and re-enable it to launch games from that store."
+  },
+  {
+    "id": "seed-innoextract-missing",
+    "pattern": "innoextract non trovato",
+    "solution": "Manca innoextract, necessario per estrarre gli installer GOG dopo il download (il download stesso può completarsi correttamente — l'errore emerge solo allo step di estrazione successivo). Installa con: sudo pacman -S innoextract",
+    "action_type": "none",
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.9,
+    "last_seen": null,
+    "created_at": "2026-06-28T00:00:00.000Z",
+    "solution_en": "Missing innoextract, needed to extract GOG installers after download (the download itself can complete successfully — the error only shows up at the following extraction step). Install with: sudo pacman -S innoextract"
+  },
+  {
+    "id": "seed-mfplat",
+    "pattern": "err:mfplat|err:module:import_dll.*mf(readwrite|plat)",
+    "solution": "Manca il codec Media Foundation per i filmati in-game. Installa il verb winetricks 'mf' (o 'wmp9' per titoli più vecchi).",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "mf"
     },
-    {
-        "id": "seed-plugin-disabled",
-        "pattern": "Plugin.*disabilitato",
-        "solution": "Il plugin store è disabilitato. Vai su Impostazioni → Plugins e riattivalo per poter avviare i giochi di quello store.",
-        "action_type": "open_section",
-        "action_params": {
-            "section": "plugins"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.95,
-        "last_seen": null,
-        "created_at": "2026-06-01T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.75,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Missing the Media Foundation codec for in-game videos. Install the winetricks verb 'mf' (or 'wmp9' for older titles)."
+  },
+  {
+    "id": "seed-xaudio2",
+    "pattern": "err:module:import_dll.*x(audio2|3daudio)|err:module:import_dll.*xact",
+    "solution": "Manca il runtime XAudio2/XACT. Installa il verb winetricks 'xact' (include XAudio2).",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "xact"
     },
-    {
-        "id": "seed-innoextract-missing",
-        "pattern": "innoextract non trovato",
-        "solution": "Manca innoextract, necessario per estrarre gli installer GOG dopo il download (il download stesso può completarsi correttamente — l'errore emerge solo allo step di estrazione successivo). Installa con: sudo pacman -S innoextract",
-        "action_type": "none",
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.9,
-        "last_seen": null,
-        "created_at": "2026-06-28T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Missing the XAudio2/XACT runtime. Install the winetricks verb 'xact' (includes XAudio2)."
+  },
+  {
+    "id": "seed-openal",
+    "pattern": "err:module:import_dll.*openal32",
+    "solution": "Manca OpenAL, richiesto dall'audio del gioco. Installa il verb winetricks 'openal'.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "openal"
     },
-    {
-        "id": "seed-mfplat",
-        "pattern": "err:mfplat|err:module:import_dll.*mf(readwrite|plat)",
-        "solution": "Manca il codec Media Foundation per i filmati in-game. Installa il verb winetricks 'mf' (o 'wmp9' per titoli più vecchi).",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "mf"
-        },
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.75,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Missing OpenAL, required by the game's audio. Install the winetricks verb 'openal'."
+  },
+  {
+    "id": "seed-vcrun-specific-dll",
+    "pattern": "err:module:import_dll.*(msvcp1[0-9]0|msvcr1[0-9]0|vcruntime1[0-9]0|ucrtbase)",
+    "solution": "Manca una libreria runtime Visual C++ specifica (2013/2015-2022). Installa vcrun2013 e vcrun2022 via winetricks: coprono la quasi totalità dei giochi che dipendono da queste DLL.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "vcrun2013,vcrun2022"
     },
-    {
-        "id": "seed-xaudio2",
-        "pattern": "err:module:import_dll.*x(audio2|3daudio)|err:module:import_dll.*xact",
-        "solution": "Manca il runtime XAudio2/XACT. Installa il verb winetricks 'xact' (include XAudio2).",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "xact"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Missing a specific Visual C++ runtime library (2013/2015-2022). Install vcrun2013 and vcrun2022 via winetricks: they cover almost all games that depend on these DLLs."
+  },
+  {
+    "id": "seed-d3dx11",
+    "pattern": "err:module:import_dll.*d3dx11",
+    "solution": "Manca il runtime DirectX 11 legacy (D3DX11, distinto da d3d11.dll di sistema). Installa d3dx11_43 via winetricks.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "d3dx11_43"
     },
-    {
-        "id": "seed-openal",
-        "pattern": "err:module:import_dll.*openal32",
-        "solution": "Manca OpenAL, richiesto dall'audio del gioco. Installa il verb winetricks 'openal'.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "openal"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Missing the legacy DirectX 11 runtime (D3DX11, distinct from the system's d3d11.dll). Install d3dx11_43 via winetricks."
+  },
+  {
+    "id": "seed-eac-unsupported",
+    "pattern": "easy anti-?cheat.*(not|non).*(support|compat)|EACSvc|BEService",
+    "solution": "Il gioco usa un anti-cheat a livello kernel (Easy Anti-Cheat o BattlEye) che nella maggior parte dei casi blocca l'esecuzione su Wine/Proton, salvo che lo sviluppatore abbia esplicitamente abilitato il supporto Linux. Non è un problema risolvibile con winetricks o config: verifica su ProtonDB se questo titolo specifico è supportato prima di continuare a debuggare.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The game uses a kernel-level anti-cheat (Easy Anti-Cheat or BattlEye) that in most cases blocks execution on Wine/Proton, unless the developer has explicitly enabled Linux support. This isn't fixable with winetricks or config changes: check ProtonDB to see if this specific title is supported before continuing to debug."
+  },
+  {
+    "id": "seed-esync-fd-limit",
+    "pattern": "esync.*fail|failed to map|too many open files|fsync.*not supported",
+    "solution": "Il limite di file descriptor del sistema è troppo basso per esync/fsync (comune di default su molte distro). Aumenta il limite con 'ulimit -n 1048576' prima del lancio, o imposta un limite più alto in modo permanente in /etc/security/limits.conf.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.75,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The system's file descriptor limit is too low for esync/fsync (common by default on many distros). Raise the limit with 'ulimit -n 1048576' before launching, or set a higher limit permanently in /etc/security/limits.conf."
+  },
+  {
+    "id": "seed-wine-mono",
+    "pattern": "wine-mono|mscoree.*builtin|appwiz\\.cpl.*mono",
+    "solution": "Il gioco richiede il componente Wine Mono (supporto .NET integrato in Wine) e non è installato in questa prefix. Installa il verb winetricks 'mono' (nome varia per versione, es. mono4.9.4).",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "mono"
     },
-    {
-        "id": "seed-vcrun-specific-dll",
-        "pattern": "err:module:import_dll.*(msvcp1[0-9]0|msvcr1[0-9]0|vcruntime1[0-9]0|ucrtbase)",
-        "solution": "Manca una libreria runtime Visual C++ specifica (2013/2015-2022). Installa vcrun2013 e vcrun2022 via winetricks: coprono la quasi totalità dei giochi che dipendono da queste DLL.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "vcrun2013,vcrun2022"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.7,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The game requires the Wine Mono component (.NET support built into Wine) and it isn't installed in this prefix. Install the winetricks verb 'mono' (name varies by version, e.g. mono4.9.4)."
+  },
+  {
+    "id": "seed-wine-gecko",
+    "pattern": "wine-gecko|mshtml.*builtin",
+    "solution": "Il gioco (o il suo installer/launcher) richiede Wine Gecko (motore HTML integrato) e non è installato. Installa il verb winetricks 'gecko'.",
+    "action_type": "winetricks",
+    "action_params": {
+      "verbs": "gecko"
     },
-    {
-        "id": "seed-d3dx11",
-        "pattern": "err:module:import_dll.*d3dx11",
-        "solution": "Manca il runtime DirectX 11 legacy (D3DX11, distinto da d3d11.dll di sistema). Installa d3dx11_43 via winetricks.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "d3dx11_43"
-        },
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.7,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The game (or its installer/launcher) requires Wine Gecko (built-in HTML engine) and it isn't installed. Install the winetricks verb 'gecko'."
+  },
+  {
+    "id": "seed-corrupted-prefix",
+    "pattern": "wine: could not load kernel32\\.dll|the wine configuration is being updated.*fail",
+    "solution": "La prefix Wine risulta corrotta o incompleta (kernel32.dll non caricabile è un sintomo grave, non un semplice DLL mancante). La soluzione affidabile è ricreare la prefix da zero per questo gioco, non applicare altre patch sopra una prefix già danneggiata.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The Wine prefix appears corrupted or incomplete (kernel32.dll failing to load is a serious symptom, not a simple missing DLL). The reliable fix is to recreate the prefix from scratch for this game, not to patch further on top of an already-damaged prefix."
+  },
+  {
+    "id": "seed-vulkan-icd",
+    "pattern": "vulkan.*(icd|loader).*not found|failed to find.*vulkan.*driver|vkCreateInstance.*ERROR_INCOMPATIBLE_DRIVER",
+    "solution": "Il loader Vulkan non trova un driver ICD valido sul sistema (diverso da 'vulkan-1.dll mancante nel prefix': qui il problema è lato sistema operativo, non Wine). Verifica che i pacchetti Vulkan del driver GPU siano installati (es. su Arch: 'vulkan-radeon'/'vulkan-intel' oppure i pacchetti NVIDIA proprietari includono già il supporto Vulkan).",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.7,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The Vulkan loader can't find a valid ICD driver on the system (different from 'vulkan-1.dll missing in the prefix': here the problem is at the OS level, not Wine). Check that the GPU driver's Vulkan packages are installed (e.g. on Arch: 'vulkan-radeon'/'vulkan-intel', or the proprietary NVIDIA packages which already include Vulkan support)."
+  },
+  {
+    "id": "seed-case-sensitivity-save",
+    "pattern": "file not found.*\\.sav|savegame.*not found|could not (open|find) save",
+    "solution": "Il gioco cerca un file di salvataggio con un nome che non corrisponde esattamente per maiuscole/minuscole — comune su Linux, dove il filesystem è case-sensitive a differenza di Windows. Controlla la cartella dei salvataggi nella prefix e verifica che i nomi dei file corrispondano esattamente a quelli attesi dal gioco.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "low",
+    "hit_count": 0,
+    "score": 0.6,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The game is looking for a save file whose name doesn't match exactly in case — common on Linux, where the filesystem is case-sensitive unlike Windows. Check the save folder in the prefix and verify the file names match exactly what the game expects."
+  },
+  {
+    "id": "seed-directinput-mouse",
+    "pattern": "err:dinput|mouse.*not captured|cursor.*locked.*fail",
+    "solution": "Problema di cattura del mouse via DirectInput, comune con giochi che si aspettano un mouse relativo (FPS/simulatori). Prova ad abilitare l'opzione 'Windows Mouse Warp Override' o il verb winetricks correlato, oppure verifica le impostazioni di cattura cursore del compositor.",
+    "action_type": "config_patch",
+    "action_params": {
+      "key": "mouse_warp_override",
+      "value": "force"
     },
-    {
-        "id": "seed-eac-unsupported",
-        "pattern": "easy anti-?cheat.*(not|non).*(support|compat)|EACSvc|BEService",
-        "solution": "Il gioco usa un anti-cheat a livello kernel (Easy Anti-Cheat o BattlEye) che nella maggior parte dei casi blocca l'esecuzione su Wine/Proton, salvo che lo sviluppatore abbia esplicitamente abilitato il supporto Linux. Non è un problema risolvibile con winetricks o config: verifica su ProtonDB se questo titolo specifico è supportato prima di continuare a debuggare.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-esync-fd-limit",
-        "pattern": "esync.*fail|failed to map|too many open files|fsync.*not supported",
-        "solution": "Il limite di file descriptor del sistema è troppo basso per esync/fsync (comune di default su molte distro). Aumenta il limite con 'ulimit -n 1048576' prima del lancio, o imposta un limite più alto in modo permanente in /etc/security/limits.conf.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.75,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-wine-mono",
-        "pattern": "wine-mono|mscoree.*builtin|appwiz\\.cpl.*mono",
-        "solution": "Il gioco richiede il componente Wine Mono (supporto .NET integrato in Wine) e non è installato in questa prefix. Installa il verb winetricks 'mono' (nome varia per versione, es. mono4.9.4).",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "mono"
-        },
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.7,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-wine-gecko",
-        "pattern": "wine-gecko|mshtml.*builtin",
-        "solution": "Il gioco (o il suo installer/launcher) richiede Wine Gecko (motore HTML integrato) e non è installato. Installa il verb winetricks 'gecko'.",
-        "action_type": "winetricks",
-        "action_params": {
-            "verbs": "gecko"
-        },
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.7,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-corrupted-prefix",
-        "pattern": "wine: could not load kernel32\\.dll|the wine configuration is being updated.*fail",
-        "solution": "La prefix Wine risulta corrotta o incompleta (kernel32.dll non caricabile è un sintomo grave, non un semplice DLL mancante). La soluzione affidabile è ricreare la prefix da zero per questo gioco, non applicare altre patch sopra una prefix già danneggiata.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-vulkan-icd",
-        "pattern": "vulkan.*(icd|loader).*not found|failed to find.*vulkan.*driver|vkCreateInstance.*ERROR_INCOMPATIBLE_DRIVER",
-        "solution": "Il loader Vulkan non trova un driver ICD valido sul sistema (diverso da 'vulkan-1.dll mancante nel prefix': qui il problema è lato sistema operativo, non Wine). Verifica che i pacchetti Vulkan del driver GPU siano installati (es. su Arch: 'vulkan-radeon'/'vulkan-intel' oppure i pacchetti NVIDIA proprietari includono già il supporto Vulkan).",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.7,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-case-sensitivity-save",
-        "pattern": "file not found.*\\.sav|savegame.*not found|could not (open|find) save",
-        "solution": "Il gioco cerca un file di salvataggio con un nome che non corrisponde esattamente per maiuscole/minuscole — comune su Linux, dove il filesystem è case-sensitive a differenza di Windows. Controlla la cartella dei salvataggi nella prefix e verifica che i nomi dei file corrispondano esattamente a quelli attesi dal gioco.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "low",
-        "hit_count": 0,
-        "score": 0.6,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-directinput-mouse",
-        "pattern": "err:dinput|mouse.*not captured|cursor.*locked.*fail",
-        "solution": "Problema di cattura del mouse via DirectInput, comune con giochi che si aspettano un mouse relativo (FPS/simulatori). Prova ad abilitare l'opzione 'Windows Mouse Warp Override' o il verb winetricks correlato, oppure verifica le impostazioni di cattura cursore del compositor.",
-        "action_type": "config_patch",
-        "action_params": {
-            "key": "mouse_warp_override",
-            "value": "force"
-        },
-        "source": "seed",
-        "confidence": "low",
-        "hit_count": 0,
-        "score": 0.55,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-large-address-aware",
-        "pattern": "out of memory|not enough (storage|memory) is available|0xc0000017",
-        "solution": "Il gioco (a 32 bit) sta esaurendo lo spazio di indirizzamento disponibile — comune per titoli datati non compilati con supporto Large Address Aware. Prova ad applicare una patch LAA all'eseguibile, o verifica che la prefix sia effettivamente a 32 bit se il gioco lo richiede.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "low",
-        "hit_count": 0,
-        "score": 0.55,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-proton-pfx-missing",
-        "pattern": "steam_compat_data_path.*not (found|set)|proton.*pfx.*not found",
-        "solution": "Proton non trova la propria struttura di prefix (cartella 'pfx') nel percorso configurato — tipico di un primo lancio dove Proton non ha ancora completato il bootstrap, o di un percorso STEAM_COMPAT_DATA_PATH non corrispondente a quello atteso. Verifica che il runner e il percorso prefix salvati per questo gioco corrispondano davvero a un'installazione Proton valida.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.7,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-battleye-unsupported",
-        "pattern": "battleye.*(linux|not supported|unavailable)|BEDaisy",
-        "solution": "Il gioco usa BattlEye e questo titolo specifico non ha il supporto Linux abilitato lato sviluppatore (a differenza di alcuni giochi BattlEye che lo supportano esplicitamente). Controlla ProtonDB o l'elenco ufficiale BattlEye dei giochi Linux-enabled prima di continuare il debug.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "high",
-        "hit_count": 0,
-        "score": 0.85,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    },
-    {
-        "id": "seed-libGL-mismatch",
-        "pattern": "libGL error|MESA-LOADER.*failed|failed to load driver",
-        "solution": "Conflitto tra le librerie Mesa/libGL di sistema e quelle richieste da Wine/Proton (comune se ci sono più installazioni di driver grafici, o pacchetti 32/64 bit disallineati). Verifica che i pacchetti multilib del driver GPU (es. 'lib32-mesa', 'lib32-vulkan-icd-loader' su Arch) siano installati e aggiornati insieme alla loro controparte 64 bit.",
-        "action_type": "none",
-        "action_params": {},
-        "source": "seed",
-        "confidence": "medium",
-        "hit_count": 0,
-        "score": 0.7,
-        "last_seen": null,
-        "created_at": "2026-07-04T00:00:00.000Z"
-    }
+    "source": "seed",
+    "confidence": "low",
+    "hit_count": 0,
+    "score": 0.55,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Mouse-capture issue via DirectInput, common with games that expect relative mouse movement (FPS/sims). Try enabling the 'Windows Mouse Warp Override' option or the related winetricks verb, or check the compositor's cursor-capture settings."
+  },
+  {
+    "id": "seed-large-address-aware",
+    "pattern": "out of memory|not enough (storage|memory) is available|0xc0000017",
+    "solution": "Il gioco (a 32 bit) sta esaurendo lo spazio di indirizzamento disponibile — comune per titoli datati non compilati con supporto Large Address Aware. Prova ad applicare una patch LAA all'eseguibile, o verifica che la prefix sia effettivamente a 32 bit se il gioco lo richiede.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "low",
+    "hit_count": 0,
+    "score": 0.55,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The (32-bit) game is running out of available address space — common for older titles not built with Large Address Aware support. Try applying a LAA patch to the executable, or check that the prefix is actually 32-bit if the game requires it."
+  },
+  {
+    "id": "seed-proton-pfx-missing",
+    "pattern": "steam_compat_data_path.*not (found|set)|proton.*pfx.*not found",
+    "solution": "Proton non trova la propria struttura di prefix (cartella 'pfx') nel percorso configurato — tipico di un primo lancio dove Proton non ha ancora completato il bootstrap, o di un percorso STEAM_COMPAT_DATA_PATH non corrispondente a quello atteso. Verifica che il runner e il percorso prefix salvati per questo gioco corrispondano davvero a un'installazione Proton valida.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.7,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Proton can't find its own prefix structure (the 'pfx' folder) at the configured path — typical of a first launch where Proton hasn't finished bootstrapping yet, or of a STEAM_COMPAT_DATA_PATH that doesn't match the expected one. Check that the runner and prefix path saved for this game actually correspond to a valid Proton installation."
+  },
+  {
+    "id": "seed-battleye-unsupported",
+    "pattern": "battleye.*(linux|not supported|unavailable)|BEDaisy",
+    "solution": "Il gioco usa BattlEye e questo titolo specifico non ha il supporto Linux abilitato lato sviluppatore (a differenza di alcuni giochi BattlEye che lo supportano esplicitamente). Controlla ProtonDB o l'elenco ufficiale BattlEye dei giochi Linux-enabled prima di continuare il debug.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "high",
+    "hit_count": 0,
+    "score": 0.85,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "The game uses BattlEye and this specific title doesn't have Linux support enabled by the developer (unlike some BattlEye games that explicitly support it). Check ProtonDB or the official BattlEye list of Linux-enabled games before continuing to debug."
+  },
+  {
+    "id": "seed-libGL-mismatch",
+    "pattern": "libGL error|MESA-LOADER.*failed|failed to load driver",
+    "solution": "Conflitto tra le librerie Mesa/libGL di sistema e quelle richieste da Wine/Proton (comune se ci sono più installazioni di driver grafici, o pacchetti 32/64 bit disallineati). Verifica che i pacchetti multilib del driver GPU (es. 'lib32-mesa', 'lib32-vulkan-icd-loader' su Arch) siano installati e aggiornati insieme alla loro controparte 64 bit.",
+    "action_type": "none",
+    "action_params": {},
+    "source": "seed",
+    "confidence": "medium",
+    "hit_count": 0,
+    "score": 0.7,
+    "last_seen": null,
+    "created_at": "2026-07-04T00:00:00.000Z",
+    "solution_en": "Conflict between the system's Mesa/libGL libraries and the ones required by Wine/Proton (common if there are multiple graphics driver installations, or mismatched 32/64-bit packages). Check that the GPU driver's multilib packages (e.g. 'lib32-mesa', 'lib32-vulkan-icd-loader' on Arch) are installed and up to date alongside their 64-bit counterpart."
+  }
 ]

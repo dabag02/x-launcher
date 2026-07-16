@@ -1,0 +1,10 @@
+{
+  "title": "Libreria Avatar",
+  "fileTypes": "jpg · png · webp",
+  "remove": "Rimuovi",
+  "account": "Account",
+  "reload": "Ricarica",
+  "emptyFolderTitle": "Cartella vuota",
+  "emptyFolderDesc": "Aggiungi immagini .jpg .png .webp in",
+  "activeBadge": "● Attivo"
+}

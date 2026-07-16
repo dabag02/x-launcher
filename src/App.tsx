@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ScalingContainer } from './components/ScalingContainer';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -351,6 +352,11 @@ function useScrollOnceOverflow(ref: React.RefObject<HTMLInputElement>, trigger: 
 }
 
 function MainApp() {
+  // Step 19b (v1.1.38) — namespace 'settings': solo la sezione Settings è
+  // stata migrata finora (vedi roadmap Step 19b per il piano di
+  // migrazione sezione per sezione). Le altre stringhe dell'app restano
+  // hardcoded fino alla prossima sessione dedicata.
+  const { t, i18n } = useTranslation('settings');
   const [games, setGames] = useState<Game[]>([]);
   // v1.1.20 — bug confermato: la tab Store Accounts calcolava i conteggi
   // "Synced"/"Installed" per store filtrando lo stesso array `games` usato
@@ -655,7 +661,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.1.35-rc.2');
+  const [appVersion, setAppVersion] = useState('v1.1.64');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -699,6 +705,117 @@ function MainApp() {
   useEffect(() => { sortByRef.current = sortBy; }, [sortBy]);
   const sortOrderRef = useRef(sortOrder);
   useEffect(() => { sortOrderRef.current = sortOrder; }, [sortOrder]);
+
+  // Step 18 (v1.1.37) — punto unico di fetch per la libreria giochi.
+  //
+  // Prima di questa funzione, cinque punti indipendenti chiamavano
+  // `/api/games` e poi `setGames(...)` per conto proprio: l'effetto
+  // legato ad activeStore/filtri, l'handler SSE 'library-updated', il
+  // login store, il logout store, il polling OAuth — ciascuno con la
+  // propria copia della logica di guard di sequenza/cache/riconciliazione
+  // selezione, a rischio di divergere ad ogni nuova modifica (vedi
+  // roadmap, Step 18). login/logout/polling sono stati poi eliminati del
+  // tutto come chiamanti diretti (v. sotto) perché `loginToStore`/
+  // `logoutFromStore`/`POST /api/library/refresh` scatenano comunque
+  // `refreshLibrary()` lato server, che a sua volta emette l'evento SSE
+  // 'library-updated' — l'handler SSE (che ora passa da qui) copre già
+  // quei tre casi. Restano quindi due soli chiamanti reali: l'effetto
+  // filtri e l'handler SSE.
+  //
+  // `mergeStrategy: 'merge-by-store'` resta disponibile per un futuro
+  // punto che avesse davvero bisogno di aggiornare solo le entry di uno
+  // store specifico senza toccare le altre (il vecchio comportamento del
+  // logout, rimosso qui perché non protegge nulla che non sia già coperto
+  // da `allGamesForAccountCounts` — vedi analisi condivisa prima di
+  // questo fix) — non rimosso dalla funzione condivisa per non dover
+  // reintrodurlo da capo se dovesse servire altrove.
+  const refreshGamesList = useCallback(async (opts: {
+    store?: string;
+    useCurrentFilters?: boolean;
+    signal?: AbortSignal;
+    mergeStrategy?: 'replace' | 'merge-by-store';
+    clearCacheFirst?: boolean;
+    reconcileSelection?: boolean;
+    showLoadingIndicator?: boolean;
+  } = {}): Promise<Game[] | null> => {
+    const {
+      store = activeStoreRef.current || 'All',
+      useCurrentFilters = false,
+      signal,
+      mergeStrategy = 'replace',
+      clearCacheFirst = false,
+      reconcileSelection = true,
+      showLoadingIndicator = false,
+    } = opts;
+
+    if (clearCacheFirst) libraryCacheRef.current.clear();
+
+    const search   = useCurrentFilters ? (searchQueryRef.current || '') : '';
+    const sortByV  = useCurrentFilters ? (sortByRef.current || 'title') : 'title';
+    const orderV   = useCurrentFilters ? (sortOrderRef.current || 'asc') : 'asc';
+    const genre    = useCurrentFilters ? (selectedGenreRef.current || '') : '';
+    const category = useCurrentFilters ? (selectedCategoryRef.current || '') : '';
+
+    const params = new URLSearchParams();
+    params.append('store', store);
+    params.append('search', search);
+    params.append('sortBy', sortByV);
+    params.append('order', orderV);
+    if (genre)    params.append('genre', genre);
+    if (category) params.append('category', category);
+
+    // Stesso guard di sequenza già in uso da v1.1.22: ogni chiamata
+    // cattura il proprio numero all'avvio, e il risultato viene applicato
+    // SOLO se nessuna chiamata più recente è partita nel frattempo —
+    // l'ultimo fetch AVVIATO vince sempre, non l'ultimo a rispondere.
+    const mySeq = ++librarySeqRef.current;
+    let newGames: Game[];
+    try {
+      if (showLoadingIndicator) setIsFetchingLibrary(true);
+      const res = await fetch(`/api/games?${params.toString()}`, { signal });
+      if (!res.ok) return null;
+      newGames = await res.json();
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return null;
+      console.error('Failed to fetch library:', err);
+      return null;
+    } finally {
+      if (showLoadingIndicator) setIsFetchingLibrary(false);
+    }
+
+    if (mySeq !== librarySeqRef.current) {
+      // Un fetch più recente è già partito: questo risultato non è più
+      // il più aggiornato disponibile, scartato per non sovrascrivere
+      // dati più freschi con dati superati.
+      return null;
+    }
+
+    if (mergeStrategy === 'merge-by-store') {
+      setGames(prev => [...prev.filter(g => g.store !== store), ...newGames]);
+    } else {
+      setGames(newGames);
+    }
+
+    libraryCacheRef.current.set(
+      buildLibraryCacheKey(store, search, sortByV, orderV, genre, category),
+      newGames
+    );
+
+    if (reconcileSelection && mergeStrategy !== 'merge-by-store') {
+      setSelectedGameId(prev => {
+        // Overlay aperto → non toccare mai la selezione corrente
+        if (showGameOptionsRef.current) return prev;
+        // Nessuna selezione reale non deve produrne una finta (v0.99.38)
+        if (!prev) return '';
+        // La card Big Picture è virtuale, mai in newGames (v0.99.37)
+        if (prev === STEAM_BIG_PICTURE_ID) return prev;
+        const stillExists = newGames.some((g: any) => g.id === prev);
+        return stillExists ? prev : (newGames[0]?.id || '');
+      });
+    }
+
+    return newGames;
+  }, [buildLibraryCacheKey]);
 
   const setStoreFilter = (key: 'genre' | 'category' | 'onlyInstalled', value: string | boolean) => {
     setStoreFilters(prev => ({
@@ -918,6 +1035,23 @@ function MainApp() {
   // desktop su cui mostrare una finestra normale — sostituito da una voce
   // "Console Mode" che fa uno switch di sessione LightDM verso XFCE.
   const [dedicatedSession, setDedicatedSession] = useState(false);
+  // Step 19b (v1.1.49) — bug confermato dall'utente al primo avvio a
+  // freddo dopo il login: il fetch di /api/config qui sotto, su un boot a
+  // freddo, può risolversi MOLTO più tardi del solito (filesystem/rete
+  // ancora "a freddo"). Se l'utente raggiunge Settings e preme il
+  // selettore di lingua PRIMA che questo fetch risolva, il cambio manuale
+  // avviene correttamente (i18n.changeLanguage + suono) — ma quando il
+  // fetch finalmente risolve, questo effetto chiamava comunque
+  // i18n.changeLanguage(d.language) con il valore PERSISTITO (quello di
+  // prima, non quello appena scelto), silenziosamente annullando la
+  // scelta manuale un istante dopo, senza alcun suono o feedback visivo
+  // che lo segnalasse — da qui l'impressione di "il selettore non
+  // risponde". Ai riavvii successivi il fetch è quasi istantaneo
+  // (filesystem/rete "caldi"), risolve ben prima che l'utente possa anche
+  // solo aprire Settings, quindi la corsa non si manifesta mai. Il ref
+  // impedisce a questo effetto di sovrascrivere una scelta manuale
+  // avvenuta nel frattempo.
+  const userChangedLanguageRef = useRef(false);
   useEffect(() => {
     fetch('/api/config').then(r => r.json()).then(d => {
       if (d.displayMode === 'kiosk' || d.displayMode === 'window' || d.displayMode === 'borderless') {
@@ -930,6 +1064,55 @@ function MainApp() {
         setDisplayMode(d.fullscreen ? 'kiosk' : 'window');
       }
       setDedicatedSession(d.dedicatedSession === true);
+      // Step 19b (v1.1.38, guardia aggiunta in v1.1.49, autorilevamento in
+      // v1.1.63) — applica la lingua persistita SOLO se l'utente non ha
+      // già cambiato lingua manualmente nel frattempo.
+      if ((d.language === 'it' || d.language === 'en') && !userChangedLanguageRef.current) {
+        i18n.changeLanguage(d.language);
+      } else if (d.languageIsUserSet === false && !userChangedLanguageRef.current) {
+        // Primissimo avvio mai (nessuna preferenza ancora scritta in
+        // app.conf, vedi hasLanguageBeenSet() in appConfig.ts) — autorileva
+        // dal browser invece di assumere 'it' come fino a v1.1.62.
+        // navigator.languages[0] è preferito a navigator.language: riflette
+        // l'ordine di preferenza reale impostato a livello di sistema/
+        // browser, non solo la prima lingua installata.
+        const detected = (navigator.languages?.[0] || navigator.language || 'en').toLowerCase();
+        const primarySubtag = detected.split('-')[0];
+        const supported: Array<'it' | 'en'> = ['it', 'en'];
+        if (supported.includes(primarySubtag as any)) {
+          const lang = primarySubtag as 'it' | 'en';
+          i18n.changeLanguage(lang);
+          fetch('/api/config', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ language: lang }),
+          }).catch(() => {});
+        } else {
+          // Lingua di sistema non ancora supportata come UI — fallback
+          // inglese, persistito subito così questo ramo non si ripete ad
+          // ogni avvio (languageIsUserSet diventerà true al prossimo
+          // /api/config). L'avviso, però, va nella lingua REALE
+          // dell'utente (o nel fallback inglese generico se non ancora
+          // presente nel dizionario) — mostrarlo in inglese o italiano
+          // vanificherebbe lo scopo se l'utente non capisce nessuno dei
+          // due.
+          i18n.changeLanguage('en');
+          fetch('/api/config', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ language: 'en' }),
+          }).catch(() => {});
+          import('./i18n/unsupportedLanguageNotices').then(({ getUnsupportedLanguageNotice }) => {
+            const notice = getUnsupportedLanguageNotice(primarySubtag);
+            pushNotification({
+              type: 'info',
+              title: notice.title,
+              body: notice.body,
+              source: 'system',
+            });
+          });
+        }
+      }
     }).catch(() => {});
   }, []);
 
@@ -1307,70 +1490,19 @@ function MainApp() {
         }
 
         if (event === 'library-updated') {
-          // Un cambiamento reale alla libreria (install/uninstall) invalida
-          // TUTTA la cache: un nuovo titolo può comparire sia in "All Games"
-          // sia nello store specifico, quindi invalidare solo una chiave
-          // lascerebbe l'altra stale.
-          libraryCacheRef.current.clear();
-
-          const activeStoreNow    = activeStoreRef.current;
-          const searchQueryNow    = searchQueryRef.current;
-          const sortByNow         = sortByRef.current;
-          const sortOrderNow      = sortOrderRef.current;
-          const selectedGenreNow  = selectedGenreRef.current;
-          const selectedCategoryNow = selectedCategoryRef.current;
-
-          const params = new URLSearchParams();
-          params.append('store', activeStoreNow || 'All');
-          params.append('search', searchQueryNow || '');
-          params.append('sortBy', sortByNow || 'title');
-          params.append('order', sortOrderNow || 'asc');
-          if (selectedGenreNow)    params.append('genre', selectedGenreNow);
-          if (selectedCategoryNow) params.append('category', selectedCategoryNow);
-
-          // v1.1.22 — cattura il numero di sequenza PRIMA di avviare la
-          // fetch: se un fetch più recente (da questo stesso handler o
-          // dall'effetto principale legato ad activeStore/filtri) parte
-          // mentre questa è ancora in volo, il risultato di questa va
-          // scartato quando arriva, anche se arriva prima.
-          const mySeq = ++librarySeqRef.current;
-          const res = await fetch(`/api/games?${params.toString()}`);
-          if (res.ok) {
-            const newGames = await res.json();
-            if (mySeq !== librarySeqRef.current) {
-              // Un fetch più recente è già partito: questo risultato non
-              // è più il più aggiornato disponibile, scartato per non
-              // sovrascrivere dati più freschi con dati superati.
-              return;
-            }
-            setGames(newGames);
-            libraryCacheRef.current.set(
-              buildLibraryCacheKey(activeStoreNow || 'All', searchQueryNow || '', sortByNow || 'title', sortOrderNow || 'asc', selectedGenreNow || '', selectedCategoryNow || ''),
-              newGames
-            );
-            setSelectedGameId(prev => {
-              // Overlay aperto → non toccare mai la selezione corrente
-              if (showGameOptionsRef.current) return prev;
-              // v0.99.38 — prima qui si selezionava automaticamente
-              // newGames[0], cioè "il primo gioco alfabeticamente" — bug
-              // percepito come "appare sempre A Plague Tale: Innocence di
-              // default". Nessuna selezione reale non deve produrne una
-              // finta: il pannello destro mostra un messaggio di benvenuto
-              // quando selectedGameId è vuoto (vedi selectedGame più sotto),
-              // la selezione vera arriva solo quando l'utente sposta
-              // davvero il focus su una card.
-              if (!prev) return '';
-              // v0.99.37 — la card Big Picture non è mai in newGames (dati
-              // server, non conosce card virtuali) — senza questo caso
-              // esplicito veniva trattata come selezione "sparita" ad ogni
-              // evento library-updated (install/uninstall di un QUALSIASI
-              // gioco), resettando la selezione a newGames[0] anche se
-              // l'utente aveva Big Picture correttamente selezionata.
-              if (prev === STEAM_BIG_PICTURE_ID) return prev;
-              const stillExists = newGames.some((g: any) => g.id === prev);
-              return stillExists ? prev : (newGames[0]?.id || '');
-            });
-          }
+          // Step 18 (v1.1.37) — passa dalla funzione condivisa
+          // refreshGamesList(). `clearCacheFirst: true` perché un
+          // cambiamento reale alla libreria (install/uninstall/login/
+          // logout — vedi sotto, ora tutti passano da qui) invalida
+          // TUTTA la cache: un nuovo titolo può comparire sia in "All
+          // Games" sia nello store specifico, quindi invalidare solo una
+          // chiave lascerebbe l'altra stale. `useCurrentFilters: true`
+          // perché questo handler deve rispettare qualunque combinazione
+          // di store/ricerca/ordinamento/genere/categoria l'utente stia
+          // guardando in quel momento, letta dai ref sincronizzati (mai
+          // dalla propria closure di montaggio — vedi commento v1.1.24
+          // sull'EventSource persistente più sopra).
+          await refreshGamesList({ useCurrentFilters: true, clearCacheFirst: true });
         }
       } catch {}
     };
@@ -1402,14 +1534,20 @@ function MainApp() {
     };
 
     // Carica libreria + stores (solo al boot / cambio filtri)
+    //
+    // Step 18 (v1.1.37) — il fetch dei giochi passa dalla funzione
+    // condivisa refreshGamesList() (guard di sequenza, cache, e
+    // riconciliazione selectedGameId incapsulati lì, condivisi con
+    // l'handler SSE 'library-updated'). Restano qui, non delegati alla
+    // funzione condivisa perché specifici di questo effetto: la lettura
+    // della cache PRIMA del fetch (stale-while-revalidate, mostra subito
+    // l'ultima versione nota per questa combinazione di filtri invece di
+    // un flash vuoto) e il fetch di `/api/stores` in parallelo.
     const fetchLibrary = async (signal: AbortSignal) => {
       const cacheKey = buildLibraryCacheKey(
         activeStore || 'All', searchQuery || '', sortBy || 'title', sortOrder || 'asc',
         selectedGenre || '', selectedCategory || ''
       );
-      // Mostra subito la versione cached per questa combinazione di filtri,
-      // se esiste — elimina sia il flash vuoto sia la libreria precedente
-      // che restava visibile in attesa del fetch fresco.
       const cached = libraryCacheRef.current.get(cacheKey);
       if (cached) {
         setGames(cached);
@@ -1418,62 +1556,15 @@ function MainApp() {
       // Refresh on-demand (v0.99.4) avviene in un effect dedicato più sotto,
       // legato solo ad activeStore — qui restiamo legati anche a sort/search/
       // genere/categoria, che non richiedono un nuovo scan dei plugin.
-
-      // v1.1.22 — stesso guard di sequenza usato nell'handler
-      // 'library-updated': questo effetto ha già un AbortController, ma
-      // protegge solo contro se stesso (si riattiva quando activeStore/
-      // filtri cambiano) — non contro un fetch avviato da QUELL'ALTRO
-      // percorso indipendente. Il numero di sequenza coordina entrambi.
-      const mySeq = ++librarySeqRef.current;
-
       try {
-        const params = new URLSearchParams();
-        params.append('store', activeStore || 'All');
-        params.append('search', searchQuery || '');
-        params.append('sortBy', sortBy || 'title');
-        params.append('order', sortOrder || 'asc');
-        if (selectedGenre)    params.append('genre', selectedGenre);
-        if (selectedCategory) params.append('category', selectedCategory);
-
-        setIsFetchingLibrary(true);
         const [gamesData, storesData] = await Promise.all([
-          fetch(`/api/games?${params.toString()}`, { signal }).then(safeJson),
+          refreshGamesList({ useCurrentFilters: true, signal, showLoadingIndicator: true }),
           fetch('/api/stores', { signal }).then(safeJson),
         ]);
-        setIsFetchingLibrary(false);
-
-        if (mySeq !== librarySeqRef.current) {
-          // Un fetch più recente (anche dall'handler SSE) è già partito:
-          // questo risultato non è più il più aggiornato, scartato.
-          return;
-        }
-
-        // Non azzerare la lista durante il fetch — evita il flash vuoto al cambio store
-        if (Array.isArray(gamesData)) {
-          setGames(gamesData);
-          libraryCacheRef.current.set(cacheKey, gamesData);
-        }
+        // gamesData === null → fetch scartato (superato da un altro più
+        // recente, o abortito): refreshGamesList non ha toccato `games`,
+        // niente altro da fare qui.
         setStores(storesData);
-
-        if (gamesData.length > 0) {
-          setSelectedGameId(prev => {
-            // v0.99.38 — vedi commento esteso nel listener SSE
-            // 'library-updated' poco sopra: nessuna selezione reale non
-            // deve produrne una finta. Prima: `if (!prev) return
-            // gamesData[0].id` — causava "appare sempre il primo gioco
-            // alfabetico (A Plague Tale: Innocence) al caricamento", anche
-            // se l'utente non aveva ancora selezionato nulla.
-            if (!prev) return '';
-            // v0.99.37 — vedi commento identico nel listener SSE
-            // 'library-updated': la card Big Picture è virtuale, non è mai
-            // in gamesData (risposta server), va esclusa esplicitamente
-            // dal controllo "esiste ancora?" o viene scambiata per una
-            // selezione stale ad ogni fetch/cambio filtro.
-            if (prev === STEAM_BIG_PICTURE_ID) return prev;
-            const stillExists = gamesData.some((g: any) => g.id === prev);
-            return stillExists ? prev : gamesData[0].id;
-          });
-        }
       } catch (err: any) {
         if (err.name === 'AbortError') return;
         console.error('Failed to fetch library:', err);
@@ -1505,7 +1596,7 @@ function MainApp() {
       controller.abort();
       clearInterval(interval);
     };
-  }, [activeStore, searchQuery, sortBy, sortOrder, selectedGenre, selectedCategory, buildLibraryCacheKey]);
+  }, [activeStore, searchQuery, sortBy, sortOrder, selectedGenre, selectedCategory, buildLibraryCacheKey, refreshGamesList]);
 
   // v0.99.35 — quando un task passa a 'completed', programma la sua
   // rimozione dalla visualizzazione locale dopo 6s. scheduledTimersRef
@@ -2068,12 +2159,12 @@ function MainApp() {
       // arrivi mai al server, quindi quel percorso non scattava.
       pushNotification({
         type: 'warning',
-        title: `Avvio bloccato — ${game.title}`,
-        body: `Il plugin ${game.store} è disabilitato e richiede DRM per l'avvio. Riattivalo nelle Impostazioni → Plugins.`,
+        title: t('dashboard:notif.launchBlockedTitle', { title: game.title }),
+        body: t('dashboard:notif.launchBlockedBody', { store: game.store }),
         gameId: game.id,
         gameTitle: game.title,
         source: 'system',
-        primaryAction: { label: 'Vai ai Plugin', handler: 'open_section', params: { section: 'plugins' } },
+        primaryAction: { label: t('dashboard:notif.goToPlugins'), handler: 'open_section', params: { section: 'plugins' } },
       });
       return;
     }
@@ -2153,13 +2244,17 @@ Vuoi provare ad avviarlo comunque?`);
         // Avvia polling — l'utente sta completando il login nel browser
         setAuthPolling(storeId);
       } else if (result.success) {
-        // Login completato subito (es. Steam)
-        const [storesData, gamesData] = await Promise.all([
-          fetch('/api/stores').then(r => r.json()),
-          fetch(`/api/games?store=${activeStore}`).then(r => r.json()),
-        ]);
+        // Login completato subito (es. Steam).
+        // Step 18 (v1.1.37) — niente più fetch esplicito di /api/games
+        // qui: `gameManager.loginToStore()` lato server chiama già
+        // `refreshLibrary()` internamente, che emette l'evento SSE
+        // 'library-updated' PRIMA ancora che questa risposta HTTP
+        // torni — l'handler SSE (che passa da refreshGamesList())
+        // farà il fetch aggiornato da solo. Resta solo /api/stores,
+        // che l'evento 'library-updated' non copre (è specifico ai
+        // giochi, non allo stato di connessione).
+        const storesData = await fetch('/api/stores').then(r => r.json());
         setStores(storesData);
-        setGames(gamesData);
         setAuthMessage(prev => ({ ...prev, [storeId]: '✅ Connesso.' }));
         play('launch');
       } else {
@@ -2181,22 +2276,17 @@ Vuoi provare ad avviarlo comunque?`);
       });
       const result = await res.json();
       if (result.success) {
-        // Richiede sempre i dati per LO STORE DISCONNESSO (storeId), non per
-        // activeStore: l'utente può essere in Manage Accounts mentre la
-        // Dashboard sottostante ha un activeStore completamente diverso
-        // (es. 'All' di default), il che faceva richiedere e visualizzare
-        // dati del tutto slegati dallo store appena disconnesso.
-        const [storesData, gamesData] = await Promise.all([
-          fetch('/api/stores').then(r => r.json()),
-          fetch(`/api/games?store=${storeId}`).then(r => r.json()),
-        ]);
+        // Step 18 (v1.1.37) — niente più fetch esplicito di /api/games
+        // qui (vedi commento gemello in handleLogin): `logoutFromStore()`
+        // lato server chiama già `refreshLibrary()`, che emette
+        // 'library-updated' — l'handler SSE aggiorna la libreria da solo,
+        // rispettando qualunque filtro l'utente stia guardando in quel
+        // momento. Il vecchio fetch mirato allo storeId disconnesso (con
+        // merge manuale nello stato) non protegge nulla che non sia già
+        // coperto da `allGamesForAccountCounts` (i conteggi per store in
+        // questo stesso pannello usano quello, non `games`) — rimosso.
+        const storesData = await fetch('/api/stores').then(r => r.json());
         setStores(storesData);
-        // Aggiorna solo i giochi di QUESTO store nello stato globale,
-        // lasciando intatti quelli degli altri store già caricati.
-        setGames(prev => [
-          ...prev.filter(g => g.store !== storeId),
-          ...gamesData,
-        ]);
         setAuthMessage(prev => ({ ...prev, [storeId]: `✅ ${result.message}` }));
       } else {
         setAuthMessage(prev => ({ ...prev, [storeId]: `❌ ${result.message}` }));
@@ -2467,10 +2557,8 @@ Vuoi provare ad avviarlo comunque?`);
           }
           pushNotification({
             type: 'info',
-            title: next ? 'Voce "Kiosk" abilitata nel menu' : 'Voce "Kiosk" rimossa dal menu',
-            body: next
-              ? 'Ora disponibile ciclando Display Mode (Window → Fullscreen → Kiosk).'
-              : 'Tornata nascosta — riattivabile con Ctrl+Alt+K.',
+            title: next ? t('dashboard:notif.kioskEnabledTitle') : t('dashboard:notif.kioskRemovedTitle'),
+            body: next ? t('dashboard:notif.kioskEnabledBody') : t('dashboard:notif.kioskRemovedBody'),
             source: 'system',
           });
           return next;
@@ -2649,11 +2737,17 @@ Vuoi provare ad avviarlo comunque?`);
         if (noLogin) return null; // nessun controllo interattivo su questa card
         return first.isConnected ? `store-unlink-${first.id}` : `store-connect-${first.id}`;
       }
-      case 'engine': {
-        if (availableRunners[0]) return `runner-uninstall-${availableRunners[0].id}`;
-        if (installableRunners[0]) return `runner-install-${installableRunners[0].id}`;
-        return 'system-tools-area';
-      }
+      case 'engine':
+        // Step 19b (v1.1.38) — il selettore di lingua è ora il primo
+        // elemento reale della tab (vedi il blocco che lo renderizza più
+        // sotto in App.tsx), sempre presente indipendentemente da
+        // availableRunners/installableRunners. Prima di questo fix questa
+        // funzione restituiva ancora il vecchio primo elemento (lista
+        // runner): sia entrando dalla tab bar sia con L1/R1 il focus
+        // saltava il selettore, atterrando direttamente sui runner — da lì
+        // "su" tornava al pulsante di chiusura invece che al selettore,
+        // stesso bug segnalato in test.
+        return 'settings-language-toggle';
       case 'plugins':
         return pluginRegistry[0] ? `plugin-toggle-${pluginRegistry[0].id}` : null;
       case 'input':
@@ -2663,7 +2757,7 @@ Vuoi provare ad avviarlo comunque?`);
       default:
         return null;
     }
-  }, [stores, availableRunners, installableRunners, pluginRegistry, inputPlugins, ollamaModels]);
+  }, [stores, pluginRegistry, inputPlugins, ollamaModels]);
 
   // Ref sincronizzato con getFirstFocusableForSettingsTab: stesso motivo di
   // activeStoreRef/focusedIdRef. Qualunque cambio in stores/pluginRegistry/
@@ -2702,6 +2796,87 @@ Vuoi provare ad avviarlo comunque?`);
     setTimeout(() => setFocusedId(target ?? nextId), 50);
   }, [cycleSequential, play, setFocusedId]);
 
+  // Step 19b (v1.1.38) — solo due lingue per ora (vedi appConfig.ts):
+  // un toggle binario, non serve una vera "direzione" come cycleSettingsTab
+  // (rimasta come nome per coerenza col pattern, ma ignorata nella scelta
+  // del prossimo valore). Persistita in app.conf con lo stesso meccanismo
+  // già in uso per displayMode/aiMonthlyTokenBudget (PATCH /api/config).
+  const cycleUiLanguage = useCallback(() => {
+    // v1.1.49 — segnala all'effetto di boot (vedi commento esteso lì) che
+    // l'utente ha già scelto manualmente: se il fetch di /api/config
+    // risolve DOPO questo punto (boot a freddo lento), non deve più
+    // sovrascrivere questa scelta con il valore persistito precedente.
+    userChangedLanguageRef.current = true;
+    const next: 'it' | 'en' = i18n.language === 'it' ? 'en' : 'it';
+    i18n.changeLanguage(next);
+    fetch('/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: next }),
+    }).catch(() => {});
+    play('select');
+  }, [i18n, play]);
+
+  // Step 19b (v1.1.42) — segnalato dall'utente in test: le descrizioni dei
+  // plugin store/input restavano in italiano cambiando lingua, perché sono
+  // dati letti dal backend (steamPlugin.ts, XInputPlugin.ts, ecc.), non
+  // stringhe scritte in App.tsx — il grep usato per individuare il testo
+  // da tradurre nelle tab precedenti non le trovava. Invece di spostare
+  // l'i18n lato backend (un lavoro distinto, plugin non ancora pensati per
+  // restituire chiavi anziché testo), le traduzioni vivono qui nel
+  // frontend, indicizzate per id plugin — con fallback al testo originale
+  // del backend per qualunque plugin non presente in queste chiavi (es.
+  // un plugin di terze parti futuro, coerente con l'idea di "pacchetti
+  // caricabili" del resto del sistema i18n: un plugin senza traduzione
+  // mostra il proprio testo invece di rompersi o mostrare una chiave
+  // grezza). I punti (Battle.net) non sono validi in una chiave i18next
+  // (keySeparator di default è '.'), quindi l'id viene sanificato prima
+  // della lookup.
+  const translateStorePluginDescription = useCallback((pluginId: string, fallback: string) => {
+    const key = pluginId.replace(/[^a-zA-Z0-9]/g, '_');
+    return t(`storePluginDescriptions.${key}`, fallback);
+  }, [t]);
+  const translateInputPluginDescription = useCallback((pluginId: string, fallback: string) => {
+    return t(`inputPluginDescriptions.${pluginId}`, fallback);
+  }, [t]);
+  // Solo il fallback "Controller Generico" ha un vero nome da tradurre —
+  // gli altri (Xbox / XInput, DualShock 4, DualSense) sono nomi di
+  // prodotto, identici in entrambe le lingue, quindi non hanno bisogno di
+  // una chiave: il fallback li restituisce invariati.
+  const translateInputPluginName = useCallback((pluginId: string, fallback: string) => {
+    return t(`inputPluginNames.${pluginId}`, fallback);
+  }, [t]);
+  // CLOUD_PROVIDERS è una costante di App.tsx (non dati da backend come i
+  // plugin store/input), ma stessa idea di fallback: se in futuro un
+  // provider venisse aggiunto senza aggiornare le chiavi di traduzione,
+  // mostra comunque la nota invece di una chiave grezza o testo mancante.
+  const translateCloudProviderNote = useCallback((providerId: string, fallback: string) => {
+    return t(`cloudProviderNotes.${providerId}`, fallback);
+  }, [t]);
+  // Step 19b (v1.1.49) — game.status è testo scritto letteralmente in
+  // inglese nel DB da ciascun plugin store ('Ready to Launch'/'Not
+  // Installed'/'Playing' — vedi db.ts/steamPlugin.ts/gogPlugin.ts/
+  // epicPlugin.ts/classicPlugin.ts), non un dato variabile per titolo:
+  // stesso principio già usato per le descrizioni plugin, mappa
+  // valore→traduzione con fallback al testo originale per qualunque
+  // valore di stato non ancora mappato (nuovi plugin futuri inclusi).
+  // Namespace 'dashboard', non 'settings' (il default di `t` qui) — da
+  // cui il prefisso esplicito.
+  const translateGameStatus = useCallback((status: string, fallback: string) => {
+    const key = status.replace(/[^a-zA-Z0-9]/g, '_');
+    return t(`dashboard:gameStatus.${key}`, fallback);
+  }, [t]);
+  // "Classic Console" (e futuri nomi coniati dal progetto, non brand di
+  // terzi come Steam/GOG/Epic/Battle.net/Amazon) è un nome descrittivo
+  // scelto da X-Launcher stesso, non un marchio — quindi va tradotto,
+  // a differenza degli altri nomi store. Fallback al nome originale per
+  // qualunque store non presente in questa mappa (tutti gli altri, che
+  // sono brand e restano SEMPRE invariati per scelta, non per lacuna).
+  const translateStorePluginName = useCallback((storeId: string, fallback: string) => {
+    const key = storeId.replace(/[^a-zA-Z0-9]/g, '_');
+    return t(`dashboard:storePluginNames.${key}`, fallback);
+  }, [t]);
+
   useEffect(() => {
     // Se il focus è congelato (gioco in esecuzione) ignora tutto l'input
     if (isFocusFrozen) return;
@@ -2727,8 +2902,19 @@ Vuoi provare ad avviarlo comunque?`);
 
     if (isJustPressed('Up'))    moveFocus('up');
     if (isJustPressed('Down'))  moveFocus('down');
-    if (isJustPressed('Left'))  moveFocus('left');
-    if (isJustPressed('Right')) moveFocus('right');
+    // Step 19b (v1.1.38) — stesso principio del blocco L1/R1 poco più
+    // sotto (isolare un controllo dal resto della navigazione stick):
+    // mentre il selettore di lingua ha il focus, sinistra/destra ne
+    // cambiano il valore invece di spostare il focus altrove. Controllato
+    // qui, PRIMA della dispatch generica a moveFocus, non dopo — altrimenti
+    // moveFocus('left'/'right') sposterebbe comunque il focus nello stesso
+    // frame.
+    if (focusedIdRef.current === 'settings-language-toggle' && activeGroup === 'settings') {
+      if (isJustPressed('Left') || isJustPressed('Right')) cycleUiLanguage();
+    } else {
+      if (isJustPressed('Left'))  moveFocus('left');
+      if (isJustPressed('Right')) moveFocus('right');
+    }
 
     // L1/R1 → ciclo store bar con wrap-around — PRIORITÀ ASSOLUTA (v0.99.6).
     //
@@ -2982,7 +3168,7 @@ Vuoi provare ad avviarlo comunque?`);
       showDownloads, showSettings, showNotifications, selectedGameId,
       showGameOptions, showAvatarLibrary, handlePlay, setFocusedId, toggleSearch,
       setActiveGroup, openGameOptions, closeGameOptions, showKeyboard, activeField, closeKeyboard,
-      activeGroup, cycleStore, triggerFocusedAction, cycleSettingsTab]);
+      activeGroup, cycleStore, triggerFocusedAction, cycleSettingsTab, cycleUiLanguage]);
 
   // v1.1.10 — timer indipendente per "tieni premuto B per uscire"
   // dall'area di test controller. Deliberatamente NON agganciato a
@@ -3223,15 +3409,15 @@ Vuoi provare ad avviarlo comunque?`);
           clearInterval(iv);
           setAuthPolling(null);
           setAuthMessage(prev => ({ ...prev, [authPolling]: '✅ Autenticato con successo!' }));
-          // Fix: forza sync libreria dopo auth (tutti gli store, non solo Epic)
+          // Forza sync libreria dopo auth (tutti gli store, non solo Epic).
+          // Step 18 (v1.1.37) — questa chiamata da sola già scatena
+          // `refreshLibrary()` lato server → evento SSE 'library-updated'
+          // → l'handler SSE aggiorna `games` da solo (via
+          // refreshGamesList()): niente più fetch esplicito di
+          // /api/games qui, resta solo /api/stores.
           await fetch('/api/library/refresh', { method: 'POST' }).catch(() => {});
-          // Re-sync stores e libreria
-          const [storesData, gamesData] = await Promise.all([
-            fetch('/api/stores').then(r => r.json()),
-            fetch(`/api/games?store=${activeStore}`).then(r => r.json()),
-          ]);
+          const storesData = await fetch('/api/stores').then(r => r.json());
           setStores(storesData);
-          setGames(gamesData);
           play('launch');
         }
       } catch {}
@@ -3282,7 +3468,7 @@ Vuoi provare ad avviarlo comunque?`);
 
     const labels: Record<typeof next, string> = {
       kiosk: 'Fullscreen',
-      window: 'Finestra',
+      window: t('dashboard:windowed'),
       borderless: 'Kiosk',
     };
     // v1.1.28 — messaggio corretto: verificato che questa funzione fa
@@ -3296,8 +3482,8 @@ Vuoi provare ad avviarlo comunque?`);
     // da test su hardware reale.
     pushNotification({
       type: 'info',
-      title: `Modalità: ${labels[next]}`,
-      body: 'Preferenza salvata — sarà attiva al prossimo riavvio della Dashboard.',
+      title: t('dashboard:notif.displayModeTitle', { mode: labels[next] }),
+      body: t('dashboard:notif.displayModeBody'),
       source: 'system',
     });
   };
@@ -3330,8 +3516,8 @@ Vuoi provare ad avviarlo comunque?`);
   const switchToDesktop = () => {
     pushNotification({
       type: 'info',
-      title: 'Passaggio al Desktop',
-      body: 'X-Launcher resta in esecuzione in background — torna qui dal menu utente di XFCE.',
+      title: t('dashboard:notif.switchToDesktopTitle'),
+      body: t('dashboard:notif.switchToDesktopBody'),
       source: 'system',
     });
     fetch('/api/system/switch-session', { method: 'POST', body: JSON.stringify({ target: 'desktop' }), headers: { 'Content-Type': 'application/json' } }).catch(() => {});
@@ -3436,7 +3622,7 @@ Vuoi provare ad avviarlo comunque?`);
                 activeStore === 'All' ? "text-blue-500 border-blue-500" : "opacity-50 border-transparent",
                 isFocused && "scale-110 opacity-100 border-blue-400"
               )}>
-                All Games
+                {t('dashboard:allGames')}
               </button>
             )}
           </Focusable>
@@ -3448,7 +3634,7 @@ Vuoi provare ad avviarlo comunque?`);
                   activeStore === store.id ? "text-blue-500 border-blue-500" : "opacity-50 border-transparent",
                   isFocused && "scale-110 opacity-100 border-blue-400"
                 )}>
-                  {store.name}
+                  {translateStorePluginName(store.id, store.name)}
                 </button>
               )}
             </Focusable>
@@ -3458,11 +3644,11 @@ Vuoi provare ad avviarlo comunque?`);
         <div className="ml-auto flex items-center gap-6">
           <div className="flex flex-col items-end gap-0.5">
             <span className="text-[10px] font-bold text-blue-500 uppercase tracking-tighter">
-              {isGamescope ? "Gamescope Standalone" : (hostname || '—')}
+              {isGamescope ? t('dashboard:gamescopeStandalone') : (hostname || '—')}
             </span>
             <div className="flex items-center gap-2">
               <span className="text-[10px] opacity-50 uppercase tracking-widest">
-                {isGamescope ? "Wayland Native" : (
+                {isGamescope ? t('dashboard:waylandNative') : (
                   // v0.99.38 — legato allo stato reale della Dashboard invece
                   // del testo fisso "HTPC Mode". 'kiosk' e 'window' sono le
                   // due modalità attualmente funzionanti (fullscreen
@@ -3472,9 +3658,9 @@ Vuoi provare ad avviarlo comunque?`);
                   // background, da implementare a parte) — qui mostra già
                   // l'etichetta definitiva anche se il comportamento reale
                   // dietro non è ancora quello finale.
-                  displayMode === 'window' ? 'Windowed' :
-                  displayMode === 'borderless' ? 'Console Mode' :
-                  'Full Screen'
+                  displayMode === 'window' ? t('dashboard:windowed') :
+                  displayMode === 'borderless' ? t('dashboard:consoleMode') :
+                  t('dashboard:fullScreen')
                 )}
               </span>
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
@@ -3536,9 +3722,9 @@ Vuoi provare ad avviarlo comunque?`);
                     : <User size={26} className="opacity-40" />}
                 </div>
                 <div>
-                  <h2 className="text-2xl font-black italic tracking-tighter uppercase">Avatar Library</h2>
+                  <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('avatarLibrary:title')}</h2>
                   <p className={cn("text-[10px] font-mono mt-0.5 select-all", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
-                    {avatarDir} · jpg · png · webp
+                    {avatarDir} · {t('avatarLibrary:fileTypes')}
                   </p>
                 </div>
               </div>
@@ -3561,7 +3747,7 @@ Vuoi provare ad avviarlo comunque?`);
                         )}
                       >
                         <Trash2 size={13} />
-                        <span className="hidden md:inline">Rimuovi</span>
+                        <span className="hidden md:inline">{t('avatarLibrary:remove')}</span>
                       </button>
                     )}
                   </Focusable>
@@ -3585,7 +3771,7 @@ Vuoi provare ad avviarlo comunque?`);
                       )}
                     >
                       <Settings size={13} />
-                      <span className="hidden md:inline">Account</span>
+                      <span className="hidden md:inline">{t('avatarLibrary:account')}</span>
                     </button>
                   )}
                 </Focusable>
@@ -3599,7 +3785,7 @@ Vuoi provare ad avviarlo comunque?`);
                           ? "bg-blue-600 border-blue-600 text-white scale-110"
                           : theme === 'dark' ? "border-white/10 hover:bg-blue-600 hover:border-blue-600 hover:text-white" : "border-gray-300 hover:bg-blue-600 hover:border-blue-600 hover:text-white"
                       )}
-                      title="Ricarica"
+                      title={t('avatarLibrary:reload')}
                     >
                       <RotateCcw size={16} />
                     </button>
@@ -3627,9 +3813,9 @@ Vuoi provare ad avviarlo comunque?`);
             {avatarFiles.length === 0 ? (
               <div className="flex-1 flex flex-col items-center justify-center opacity-30">
                 <User size={64} className="mb-6" />
-                <h3 className="text-xl font-black italic uppercase tracking-widest">Cartella vuota</h3>
+                <h3 className="text-xl font-black italic uppercase tracking-widest">{t('avatarLibrary:emptyFolderTitle')}</h3>
                 <p className="text-sm font-medium mt-2 text-center max-w-xs">
-                  Aggiungi immagini .jpg .png .webp in<br />
+                  {t('avatarLibrary:emptyFolderDesc')}<br />
                   <code className="font-mono text-xs">~/.local/share/x-launcher/avatars/</code>
                 </p>
               </div>
@@ -3677,7 +3863,7 @@ Vuoi provare ad avviarlo comunque?`);
                           />
                           {avatarImage === file.url && (
                             <div className="absolute inset-0 bg-blue-600/20 flex items-end p-2">
-                              <span className="text-[8px] font-black uppercase tracking-widest text-white bg-blue-600 px-1.5 py-0.5 rounded-full shadow-lg">● Attivo</span>
+                              <span className="text-[8px] font-black uppercase tracking-widest text-white bg-blue-600 px-1.5 py-0.5 rounded-full shadow-lg">{t('avatarLibrary:activeBadge')}</span>
                             </div>
                           )}
                         </div>
@@ -3717,10 +3903,10 @@ Vuoi provare ad avviarlo comunque?`);
           <div className="flex flex-col mb-10 px-2 transition-all">
             <div className="flex justify-between items-end mb-6">
               <h2 className="text-4xl font-extralight italic tracking-tight uppercase">
-                {activeStore === 'All' ? 'Collection' : `${activeStore}`}
+                {activeStore === 'All' ? t('dashboard:collectionTitle') : translateStorePluginName(activeStore, activeStore)}
               </h2>
               <div className="flex items-center gap-4">
-                <span className="text-[10px] font-mono opacity-40 uppercase tracking-[0.3em] font-black">{games.length} Titles Synced</span>
+                <span className="text-[10px] font-mono opacity-40 uppercase tracking-[0.3em] font-black">{t('dashboard:titlesSynced', { count: games.length })}</span>
                 <div className="h-4 w-[1px] bg-blue-500/20" />
                 {/* FIX v0.99.4 — la lente non è più un Focusable: non deve
                     essere selezionabile/attivabile da D-pad/stick/A del
@@ -3758,7 +3944,7 @@ Vuoi provare ad avviarlo comunque?`);
                          type="text" 
                          value={searchQuery}
                          onChange={(e) => setSearchQuery(e.target.value)}
-                         placeholder={activeStore === 'All' ? "Search across all libraries..." : `Search in ${activeStore}...`}
+                         placeholder={activeStore === 'All' ? t('dashboard:searchAllLibraries') : t('dashboard:searchInStore', { store: activeStore })}
 className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 transition-all", theme === 'dark' ? "bg-white/5 border border-white/10" : "bg-white border border-gray-400 text-gray-900")}
                        />
                        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
@@ -3813,10 +3999,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                          onChange={(e) => setSortBy(e.target.value as any)}
   className={cn("text-[10px] font-black uppercase italic tracking-widest px-4 py-2 outline-none cursor-pointer rounded-lg", theme === 'dark' ? "bg-[#1a1d27] text-white border border-white/10" : "bg-gray-100 text-gray-900 border border-gray-300")}
                        >
-                         <option value="title">By Title</option>
-                         <option value="playTime">By Play Time</option>
-                         <option value="rating">By Rating</option>
-                         <option value="installDate">By Install Date</option>
+                         <option value="title">{t('dashboard:sortByTitle')}</option>
+                         <option value="playTime">{t('dashboard:sortByPlayTime')}</option>
+                         <option value="rating">{t('dashboard:sortByRating')}</option>
+                         <option value="installDate">{t('dashboard:sortByInstallDate')}</option>
                        </select>
                     </div>
                   </div>
@@ -3833,7 +4019,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       )}
                     >
                       <Download size={9} />
-                      Installati
+                      {t('dashboard:installedFilter')}
                     </button>
                     <div className="w-px h-6 bg-white/10 self-center mx-1" />
                     {/* Genres — derivati dai giochi reali */}
@@ -3842,7 +4028,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       if (genres.length === 0) return null;
                       return (
                         <div className="flex items-center gap-2 mr-4">
-                          <span className="text-[8px] font-black uppercase tracking-[0.2em] opacity-40 italic">Genres</span>
+                          <span className="text-[8px] font-black uppercase tracking-[0.2em] opacity-40 italic">{t('dashboard:genres')}</span>
                           <div className="flex flex-wrap gap-1">
                             {genres.map(genre => (
                               <button
@@ -3866,7 +4052,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       if (cats.length === 0) return null;
                       return (
                         <div className="flex items-center gap-2">
-                          <span className="text-[8px] font-black uppercase tracking-[0.2em] opacity-40 italic">Categories</span>
+                          <span className="text-[8px] font-black uppercase tracking-[0.2em] opacity-40 italic">{t('dashboard:categories')}</span>
                           <div className="flex flex-wrap gap-1">
                             {cats.map(cat => (
                               <button
@@ -3900,13 +4086,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 className="col-span-4 py-20 flex flex-col items-center justify-center opacity-30"
               >
                 <Search size={64} className="mb-6" />
-                <h3 className="text-2xl font-black italic uppercase tracking-widest">No matching titles found</h3>
-                <p className="text-sm font-medium mt-2">Try adjusting your filters or search keywords</p>
+                <h3 className="text-2xl font-black italic uppercase tracking-widest">{t('dashboard:noMatchingTitles')}</h3>
+                <p className="text-sm font-medium mt-2">{t('dashboard:tryAdjustingFilters')}</p>
                 <button 
                   onClick={() => { setSearchQuery(''); setSelectedGenre(''); setSelectedCategory(''); setOnlyInstalled(activeStore === 'All'); }}
                   className="mt-8 px-8 py-3 bg-white/10 rounded-xl text-xs font-black uppercase italic tracking-widest hover:bg-white/20 transition-all pointer-events-auto"
                 >
-                  Clear All Filters
+                  {t('dashboard:clearAllFilters')}
                 </button>
               </motion.div>
             ) : (
@@ -3968,7 +4154,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         {game.verified && (
                           <div
                             className="absolute top-2 right-2 z-10 bg-black/60 rounded-full p-1 backdrop-blur-sm"
-                            title={`Verificato${game.verificationMethod ? ` (${game.verificationMethod})` : ''}`}
+                            title={game.verificationMethod ? t('dashboard:sidebar.verifiedWithMethod', { method: game.verificationMethod }) : t('dashboard:sidebar.verified')}
                           >
                             <CheckCircle2 size={16} className="text-green-400" />
                           </div>
@@ -3983,11 +4169,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             const blocked = ps && !ps.enabled && !ps.drmFree && game.isInstalled;
                             return blocked ? (
                               <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-yellow-400 italic">
-                                Plugin disattivato
+                                {t('dashboard:sidebar.pluginDisabled')}
                               </p>
                             ) : (
                               <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-blue-400 italic">
-                                {game.status}
+                                {translateGameStatus(game.status, game.status)}
                               </p>
                             );
                           })()}
@@ -4048,11 +4234,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             posto del badge di stato installazione. */}
                         {selectedGame.isBigPictureLauncher ? (
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest bg-[#66c0f4] text-[#0b1118]">
-                            Steam Client
+                            {t('dashboard:sidebar.steamClient')}
                           </span>
                         ) : (
                           <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest", selectedGame.isInstalled ? "bg-blue-600" : "bg-red-600")}>
-                            {selectedGame.isInstalled ? "Installed" : "Not Installed"}
+                            {selectedGame.isInstalled ? t('dashboard:sidebar.installed') : t('dashboard:sidebar.notInstalled')}
                           </span>
                         )}
                       </div>
@@ -4072,9 +4258,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                 {/* Info rapide */}
                 <div className="flex flex-wrap gap-3 items-center shrink-0">
-                  {selectedGame.rating && <span className="text-[10px] font-black uppercase text-green-500 tracking-widest italic">Rating {selectedGame.rating}%</span>}
-                  {selectedGame.hltbHours && <span className="text-[10px] font-black uppercase text-blue-400 tracking-widest italic border-l border-white/10 pl-3">HLTB {selectedGame.hltbHours.main}h</span>}
-                  <span className="text-[10px] font-black uppercase text-white/40 tracking-widest italic border-l border-white/10 pl-3">{selectedGame.store}</span>
+                  {selectedGame.rating && <span className="text-[10px] font-black uppercase text-green-500 tracking-widest italic">{t('dashboard:sidebar.rating', { pct: selectedGame.rating })}</span>}
+                  {selectedGame.hltbHours && <span className="text-[10px] font-black uppercase text-blue-400 tracking-widest italic border-l border-white/10 pl-3">{t('dashboard:sidebar.hltb', { hours: selectedGame.hltbHours.main })}</span>}
+                  <span className="text-[10px] font-black uppercase text-white/40 tracking-widest italic border-l border-white/10 pl-3">{translateStorePluginName(selectedGame.store, selectedGame.store)}</span>
                   <span className="text-[10px] font-black uppercase text-white/40 tracking-widest italic border-l border-white/10 pl-3">{selectedGame.runner}</span>
                 </div>
 
@@ -4091,7 +4277,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 {/* Ore di gioco — reali dal DB */}
                 <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/5 shrink-0">
                   <Clock size={14} className="text-blue-400 shrink-0" />
-                  <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Playtime</span>
+                  <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{t('dashboard:sidebar.playtime')}</span>
                   <span className="ml-auto text-sm font-black italic">
                     {selectedGame.playTimeHours > 0
                       ? `${selectedGame.playTimeHours.toFixed(1)}h`
@@ -4155,7 +4341,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               // quindi va mostrato il benvenuto, non "sta caricando".
               <div className="flex flex-col items-center justify-center h-full opacity-30 text-center px-6">
                 <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mb-4" />
-                <p className="text-sm font-black uppercase tracking-widest">Caricamento libreria…</p>
+                <p className="text-sm font-black uppercase tracking-widest">{t('dashboard:sidebar.loadingLibrary')}</p>
               </div>
             ) : (
               // v0.99.38 — pannello di benvenuto vero e proprio (prima era
@@ -4170,21 +4356,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <Sparkles size={28} className="text-blue-400" />
                 </div>
                 <p className="text-lg font-black italic uppercase tracking-tight mb-1">
-                  {hostname ? `Bentornato, ${hostname}` : 'Bentornato'}
+                  {hostname ? t('dashboard:sidebar.welcomeBackNamed', { name: hostname }) : t('dashboard:sidebar.welcomeBack')}
                 </p>
                 <p className="text-xs opacity-50 font-medium leading-relaxed max-w-[240px] mb-6">
-                  Seleziona un gioco dalla libreria per vederne i dettagli, oppure premi Play per avviarlo direttamente.
+                  {t('dashboard:sidebar.welcomeHint')}
                 </p>
                 {games.length > 0 && (
                   <div className="flex items-center gap-4 text-[10px] font-bold uppercase tracking-widest opacity-40">
                     <span className="flex items-center gap-1.5">
                       <LayoutGrid size={12} />
-                      {games.length} {games.length === 1 ? 'titolo' : 'titoli'}
+                      {t('dashboard:sidebar.titleCount', { count: games.length })}
                     </span>
                     {games.some((g: any) => g.verified) && (
                       <span className="flex items-center gap-1.5">
                         <CheckCircle2 size={12} className="text-green-400" />
-                        {games.filter((g: any) => g.verified).length} verificati
+                        {t('dashboard:sidebar.verifiedCount', { count: games.filter((g: any) => g.verified).length })}
                       </span>
                     )}
                   </div>
@@ -4337,15 +4523,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
               )}
             >
-              <div className="flex items-center justify-between mb-10">
-                 <div className="flex items-center gap-3">
-                   <Download size={20} className="text-blue-500" />
-                   <h2 className="text-2xl font-black italic tracking-tighter uppercase">Deployment Manager</h2>
+              <div className="flex items-center justify-between gap-4 mb-10">
+                 {/* Step 19b (v1.1.45) — stesso fix del Quick Menu: vedi
+                     commento esteso lì. */}
+                 <div className="flex items-center gap-3 flex-1 min-w-0">
+                   <Download size={20} className="text-blue-500 shrink-0" />
+                   <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('downloads:title')}</h2>
                  </div>
                  <Focusable group="downloads" id="downloads-close" fallbackPriority={-1} onEnter={() => { setShowDownloads(false); setActiveGroup(null); setFocusedId('footer-downloads'); }}>
                    {(isFocused) => (
                      <div className={cn(
-                       "w-8 h-8 rounded-full border flex items-center justify-center transition-all",
+                       "w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0",
                        isFocused && "scale-110 bg-red-600 border-red-600 text-white"
                      )}>
                        <X size={16} />
@@ -4360,15 +4548,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 {pendingAction && (
                   <div className="p-5 rounded-2xl border-2 border-blue-500/40 bg-blue-500/5">
                     <p className="text-[10px] font-black uppercase tracking-widest text-blue-400 mb-2">
-                      {pendingAction.type === 'install' ? 'Conferma installazione' : 'Conferma disinstallazione'}
+                      {pendingAction.type === 'install' ? t('downloads:confirmInstall') : t('downloads:confirmUninstall')}
                     </p>
                     <p className="text-sm font-black italic uppercase tracking-tighter mb-5">
                       {pendingAction.gameTitle}
                     </p>
                     <p className="text-xs opacity-50 mb-6">
                       {pendingAction.type === 'install'
-                        ? 'Il gioco verrà scaricato e installato. Assicurati di avere abbastanza spazio su disco.'
-                        : 'Tutti i file del gioco verranno rimossi dal disco. Questa operazione non è reversibile.'}
+                        ? t('downloads:installConfirmDesc')
+                        : t('downloads:uninstallConfirmDesc')}
                     </p>
                     <div className="flex gap-3">
                       <Focusable group="downloads" id="pending-confirm" onEnter={async () => {
@@ -4430,8 +4618,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             if (!res.ok || data?.success === false) {
                               pushNotification({
                                 type:   'error',
-                                title:  'Installazione non avviata',
-                                body:   data?.message ?? 'Errore sconosciuto',
+                                title:  t('downloads:installNotStarted'),
+                                body:   data?.message ?? t('downloads:unknownError'),
                                 gameId: action.gameId,
                                 gameTitle: action.gameTitle,
                                 source: 'system',
@@ -4440,7 +4628,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           } catch (err) {
                             pushNotification({
                               type:   'error',
-                              title:  'Installazione non avviata',
+                              title:  t('downloads:installNotStarted'),
                               body:   String(err),
                               gameId: action.gameId,
                               gameTitle: action.gameTitle,
@@ -4463,8 +4651,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             if (!res.ok || data?.success === false) {
                               pushNotification({
                                 type:   'error',
-                                title:  'Disinstallazione non riuscita',
-                                body:   data?.message ?? 'Errore sconosciuto',
+                                title:  t('downloads:uninstallFailed'),
+                                body:   data?.message ?? t('downloads:unknownError'),
                                 gameId: action.gameId,
                                 gameTitle: action.gameTitle,
                                 source: 'system',
@@ -4473,7 +4661,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           } catch (err) {
                             pushNotification({
                               type:   'error',
-                              title:  'Disinstallazione non riuscita',
+                              title:  t('downloads:uninstallFailed'),
                               body:   String(err),
                               gameId: action.gameId,
                               gameTitle: action.gameTitle,
@@ -4489,7 +4677,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               ? isFocused ? "bg-blue-500 text-white scale-105" : "bg-blue-600 hover:bg-blue-500 text-white"
                               : isFocused ? "bg-red-500 text-white scale-105" : "bg-red-600 hover:bg-red-500 text-white"
                           )}>
-                            {pendingAction.type === 'install' ? '⬇ Installa' : '🗑 Disinstalla'}
+                            {pendingAction.type === 'install' ? t('downloads:installActionConfirm') : t('downloads:uninstallActionConfirm')}
                           </button>
                         )}
                       </Focusable>
@@ -4498,7 +4686,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <button className={cn(
                             "flex-1 py-3 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all",
                             isFocused ? "bg-white/25 scale-105" : "bg-white/10 hover:bg-white/20"
-                          )}>Annulla</button>
+                          )}>{t('downloads:cancel')}</button>
                         )}
                       </Focusable>
                     </div>
@@ -4508,7 +4696,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 {downloads.filter((t: any) => !hiddenCompletedIds.has(t.gameId)).length === 0 && !pendingAction ? (
                   <div className="h-full flex flex-col items-center justify-center opacity-20 text-center">
                     <Download size={48} className="mb-4" />
-                    <p className="font-black italic uppercase tracking-widest text-xs">No active transfers</p>
+                    <p className="font-black italic uppercase tracking-widest text-xs">{t('downloads:noActiveTransfers')}</p>
                   </div>
                 ) : (
                   downloads.filter((t: any) => !hiddenCompletedIds.has(t.gameId)).map(task => (
@@ -4516,7 +4704,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       <div className="flex justify-between items-start mb-4">
                         <div>
                            <span className="text-[10px] font-black italic text-blue-500 uppercase tracking-widest block mb-1">
-                             {task.phaseLabel || (task.status === 'downloading' ? 'Download in corso...' : task.status.toUpperCase())}
+                             {task.phaseLabel || (task.status === 'downloading' ? t('downloads:downloadInProgress') : task.status.toUpperCase())}
                            </span>
                            <h4 className="text-sm font-black italic uppercase tracking-tighter">{task.gameTitle}</h4>
                         </div>
@@ -4532,7 +4720,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       </div>
                       
                       <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-bold opacity-40 uppercase tracking-widest italic">{task.progress.toFixed(0)}% Complete</span>
+                        <span className="text-[10px] font-bold opacity-40 uppercase tracking-widest italic">{t('downloads:percentComplete', { pct: task.progress.toFixed(0) })}</span>
                         <div className="flex gap-2">
                           {confirmCancelDownloadId === task.gameId ? (
                             <>
@@ -4553,7 +4741,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
                                     isFocused ? "bg-red-600 text-white" : "bg-red-600/60 text-white"
                                   )}>
-                                    Conferma
+                                    {t('downloads:confirm')}
                                   </button>
                                 )}
                               </Focusable>
@@ -4567,7 +4755,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
                                     isFocused ? "bg-white/25 text-white" : "bg-white/10 opacity-60"
                                   )}>
-                                    Indietro
+                                    {t('downloads:back')}
                                   </button>
                                 )}
                               </Focusable>
@@ -4588,7 +4776,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
                                     isFocused ? "bg-blue-600 text-white" : "bg-white/10 opacity-60"
                                   )}>
-                                    {task.status === 'paused' ? 'Resume' : 'Pause'}
+                                    {task.status === 'paused' ? t('downloads:resume') : t('downloads:pause')}
                                   </button>
                                 )}
                               </Focusable>
@@ -4609,7 +4797,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
                                     isFocused ? "bg-red-600 text-white" : "bg-white/10 opacity-60"
                                   )}>
-                                    Cancel
+                                    {t('downloads:cancel')}
                                   </button>
                                 )}
                               </Focusable>
@@ -4625,8 +4813,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               <div className="mt-10 p-6 rounded-2xl bg-blue-500/5 border border-blue-500/10 flex items-center gap-4">
                 <Activity size={20} className="text-blue-500 shrink-0" />
                 <div className="flex flex-col">
-                  <span className="text-[9px] font-black opacity-30 uppercase tracking-widest leading-none mb-1">Peer Hash Cache</span>
-                  <span className="text-xs font-black italic">SHA-256 Checksum Verification Active</span>
+                  <span className="text-[9px] font-black opacity-30 uppercase tracking-widest leading-none mb-1">{t('downloads:peerHashCache')}</span>
+                  <span className="text-xs font-black italic">{t('downloads:checksumVerification')}</span>
                 </div>
               </div>
             </motion.div>
@@ -4644,7 +4832,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
             )}
             style={{ opacity: 0, animation: 'fadeInOut 4s ease forwards' }}
           >
-            🎮 Premi un tasto sul controller per attivare l&apos;input
+            {t('downloads:gamepadHint')}
           </div>
         )}
 
@@ -4660,42 +4848,53 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
               )}
             >
-              <div className="flex items-center justify-between mb-8">
-                <div className="flex items-center gap-3">
-                  {unreadCount > 0 ? <BellDot size={20} className="text-blue-400" /> : <Bell size={20} className="text-blue-400" />}
-                  <h2 className="text-2xl font-black italic tracking-tighter uppercase">Notifiche</h2>
+              <div className="flex items-center justify-between gap-4 mb-2">
+                {/* Step 19b (v1.1.64) — segnalato dall'utente: "Notifiche"/
+                    "Notifications" è una singola parola, senza spazi —
+                    non può andare a capo per fare spazio, quindi flex-1
+                    min-w-0 sul contenitore (v1.1.45) non bastava: se badge
+                    + "Pulisci storico" + chiusura insieme non ci stavano
+                    più nella riga, il titolo la sovrapponeva comunque,
+                    invece di restringersi (non può, è una parola sola).
+                    Pulisci storico spostato su una riga propria sotto
+                    l'header, così titolo e chiusura restano solo in due
+                    sulla riga principale — molto più margine, e Pulisci
+                    storico non compete mai più con nessuno. */}
+                <div className="flex items-center gap-3 min-w-0">
+                  {unreadCount > 0 ? <BellDot size={20} className="text-blue-400 shrink-0" /> : <Bell size={20} className="text-blue-400 shrink-0" />}
+                  <h2 className="text-2xl font-black italic tracking-tighter uppercase truncate">{t('notifications:title')}</h2>
                   {unreadCount > 0 && (
-                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-blue-600 text-white">{unreadCount}</span>
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-blue-600 text-white shrink-0">{unreadCount}</span>
                   )}
                 </div>
-                <div className="flex items-center gap-3">
-                  {notifications.some(n => n.status === 'dismissed' || n.status === 'resolved' || n.status === 'failed') && (
-                    <Focusable group="notifications" id="notifications-clear" onEnter={() => setNotifications(prev => prev.filter(n => n.status === 'pending' || n.status === 'applied'))}>
-                      {(isFocused) => (
-                        <button
-                          className={cn(
-                            "text-[10px] font-black uppercase tracking-widest transition-opacity",
-                            isFocused ? "opacity-100 text-red-400" : "opacity-30 hover:opacity-80"
-                          )}
-                        >↺ Pulisci storico</button>
-                      )}
-                    </Focusable>
+                <Focusable group="notifications" id="notifications-close" fallbackPriority={-1} onEnter={() => { setShowNotifications(false); setActiveGroup(null); setFocusedId('footer-notifications'); }}>
+                  {(isFocused) => (
+                    <div className={cn(
+                      "w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0",
+                      isFocused && "scale-110 bg-red-600 border-red-600 text-white"
+                    )}><X size={16} /></div>
                   )}
-                  <Focusable group="notifications" id="notifications-close" fallbackPriority={-1} onEnter={() => { setShowNotifications(false); setActiveGroup(null); setFocusedId('footer-notifications'); }}>
+                </Focusable>
+              </div>
+              {notifications.some(n => n.status === 'dismissed' || n.status === 'resolved' || n.status === 'failed') && (
+                <div className="flex justify-end mb-6">
+                  <Focusable group="notifications" id="notifications-clear" onEnter={() => setNotifications(prev => prev.filter(n => n.status === 'pending' || n.status === 'applied'))}>
                     {(isFocused) => (
-                      <div className={cn(
-                        "w-8 h-8 rounded-full border flex items-center justify-center transition-all",
-                        isFocused && "scale-110 bg-red-600 border-red-600 text-white"
-                      )}><X size={16} /></div>
+                      <button
+                        className={cn(
+                          "text-[10px] font-black uppercase tracking-widest transition-opacity whitespace-nowrap",
+                          isFocused ? "opacity-100 text-red-400" : "opacity-30 hover:opacity-80"
+                        )}
+                      >{t('notifications:clearHistory')}</button>
                     )}
                   </Focusable>
                 </div>
-              </div>
+              )}
               <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pr-2 space-y-3">
                 {notifications.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center opacity-20 text-center gap-4">
                     <Bell size={48} />
-                    <p className="font-black italic uppercase tracking-widest text-xs">Nessuna notifica</p>
+                    <p className="font-black italic uppercase tracking-widest text-xs">{t('notifications:noNotifications')}</p>
                   </div>
                 ) : (
                   notifications.map(notif => {
@@ -4718,9 +4917,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             <p className={cn("text-[10px] font-mono mt-0.5", theme === 'dark' ? "opacity-30" : "text-gray-400")}>
                               {new Date(notif.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                               {notif.gameTitle && ` · ${notif.gameTitle}`}
-                              {notif.status === 'applied' && ' · in attesa di conferma'}
-                              {notif.status === 'resolved' && ' · ✅ risolto'}
-                              {notif.status === 'failed' && ' · ❌ non risolto'}
+                              {notif.status === 'applied' && ` · ${t('notifications:waitingConfirmation')}`}
+                              {notif.status === 'resolved' && ` · ${t('notifications:resolved')}`}
+                              {notif.status === 'failed' && ` · ${t('notifications:notResolved')}`}
                             </p>
                           </div>
                           {!isDone && (
@@ -4744,7 +4943,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   isFocused ? "opacity-100" : "opacity-40"
                                 )}>
                                   <ChevronDown size={10} className={cn("transition-transform", expandedNotifId === notif.id && "rotate-180")} />
-                                  Log tecnico
+                                  {t('notifications:technicalLog')}
                                 </button>
                               )}
                             </Focusable>
@@ -4762,7 +4961,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     <button className={cn(
                                       "flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all",
                                       isFocused ? "bg-green-500 scale-[1.03]" : "bg-green-600"
-                                    )}>✅ Ha funzionato</button>
+                                    )}>{t('notifications:itWorked')}</button>
                                   )}
                                 </Focusable>
                                 <Focusable group="notifications" id={`notif-ko-${notif.id}`} onEnter={() => resolveNotification(notif.id, false)}>
@@ -4770,7 +4969,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     <button className={cn(
                                       "flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all",
                                       isFocused ? "bg-red-600 scale-[1.03]" : "bg-red-700/60"
-                                    )}>❌ Non ha funzionato</button>
+                                    )}>{t('notifications:itDidNotWork')}</button>
                                   )}
                                 </Focusable>
                               </>
@@ -4805,7 +5004,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     <button className={cn(
                                       "flex-1 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all",
                                       isFocused ? "bg-white/25" : "bg-white/10"
-                                    )}>{notif.secondaryAction?.label ?? 'Chiudi'}</button>
+                                    )}>{notif.secondaryAction?.label ?? t('notifications:close')}</button>
                                   )}
                                 </Focusable>
                               </>
@@ -4833,41 +5032,65 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 theme === 'dark' ? "bg-[#0b0c0f] border-white/10" : "bg-white border-gray-200"
               )}
             >
-              <div className="flex items-center justify-between mb-16">
-                 <div className="flex items-center gap-3">
-                   <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
-                     <Settings size={20} className="text-white" />
+              <div className="flex items-center justify-between gap-4 mb-16">
+                 {/* Step 19b (v1.1.45) — flex-1 min-w-0 sul gruppo icona+
+                     titolo, shrink-0 sul pulsante di chiusura: senza,
+                     un titolo tradotto più lungo dell'italiano ("Settings"
+                     è più corto di "Impostazioni", ma altre lingue future
+                     potrebbero non esserlo) si sovrapponeva al pulsante
+                     rosso invece di andare a capo. Segnalato dall'utente
+                     in test — stesso principio applicato di seguito agli
+                     header di Downloads e Notifiche, stesso bug identico
+                     in tutti e tre. */}
+                 {/* Step 19b (v1.1.46) — badge icona e titolo erano già,
+                     nel codice originale, più grandi di quelli di
+                     Downloads/Notifiche (text-3xl + w-10 h-10 qui, contro
+                     text-2xl + w-8 h-8 negli altri due) — una discrepanza
+                     preesistente, mascherata finché "IMPOSTAZIONI" si
+                     sovrapponeva alla X (v1.1.45 l'ha resa visibile, non
+                     creata). Segnalato dall'utente in test: sembrava "più
+                     grande di prima" — in realtà è la stessa dimensione
+                     di sempre, solo non più nascosta dalla sovrapposizione.
+                     Allineato qui alla stessa scala degli altri due
+                     overlay invece di introdurre un meccanismo di
+                     ridimensionamento percentuale nuovo — tre pannelli
+                     identici nella struttura meritano la stessa scala,
+                     non tre scale diverse "giustificate" a parole. */}
+                 <div className="flex items-center gap-3 flex-1 min-w-0">
+                   <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
+                     <Settings size={16} className="text-white" />
                    </div>
-                   <h2 className="text-3xl font-black italic tracking-tighter uppercase">Settings</h2>
+                   <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('quickMenu:title')}</h2>
                  </div>
                  <Focusable group="quick-menu" id="quick-menu-close" fallbackPriority={-1} onEnter={() => { setViewState('library'); setActiveGroup(null); }}>
                    {(isFocused) => (
                      <div className={cn(
-                       "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
+                       "w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0",
                        isFocused && "scale-110 bg-red-600 border-red-600 text-white"
                      )}>
-                       <X size={20} />
+                       <X size={16} />
                      </div>
                    )}
                  </Focusable>
               </div>
 
               <div className="space-y-4">
-                <OptionItem group="quick-menu" id="opt-accounts" icon={Gamepad2} label="Manage Accounts" onClick={() => { setShowSettings(true); setActiveGroup('settings'); setActiveSettingsTab('accounts'); setFocusedId(null); setTimeout(() => setFocusedId('settings-tab-accounts'), 80); }} />
-                <OptionItem group="quick-menu" id="opt-avatar" icon={User} label="Avatar" onClick={() => { setShowAvatarLibrary(true); setActiveGroup('avatar-library'); setTimeout(() => setFocusedId('avatar-0'), 80); }} />
-                <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label="Gamescope Mode" value={isGamescope ? "On" : "Off"} onClick={() => { setIsGamescope(!isGamescope); play('select'); }} />
-                <OptionItem group="quick-menu" id="opt-theme" icon={theme === 'dark' ? Sun : Moon} label="Toggle Theme" value={theme} onClick={toggleTheme} />
+                <OptionItem group="quick-menu" id="opt-accounts" icon={Gamepad2} label={t('quickMenu:manageAccounts')} onClick={() => { setShowSettings(true); setActiveGroup('settings'); setActiveSettingsTab('accounts'); setFocusedId(null); setTimeout(() => setFocusedId('settings-tab-accounts'), 80); }} />
+                <OptionItem group="quick-menu" id="opt-avatar" icon={User} label={t('quickMenu:avatar')} onClick={() => { setShowAvatarLibrary(true); setActiveGroup('avatar-library'); setTimeout(() => setFocusedId('avatar-0'), 80); }} />
+                <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label={t('quickMenu:gamescopeMode')} value={isGamescope ? t('quickMenu:on') : t('quickMenu:off')} onClick={() => { setIsGamescope(!isGamescope); play('select'); }} />
+                <OptionItem group="quick-menu" id="opt-theme" icon={theme === 'dark' ? Sun : Moon} label={t('quickMenu:toggleTheme')} value={theme} onClick={toggleTheme} />
                 {dedicatedSession ? (
-                  <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label="Console Mode" value="Torna al Desktop" onClick={switchToDesktop} />
+                  <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label={t('quickMenu:consoleMode')} value={t('quickMenu:backToDesktop')} onClick={switchToDesktop} />
                 ) : (
-                  <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label="Display Mode" value={displayMode === 'window' ? 'Windowed' : displayMode === 'borderless' ? 'Console Mode' : 'Full Screen'} onClick={cycleDisplayMode} />
+                  <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label={t('quickMenu:displayMode')} value={displayMode === 'window' ? t('quickMenu:windowed') : displayMode === 'borderless' ? t('quickMenu:consoleMode') : t('quickMenu:fullScreen')} onClick={cycleDisplayMode} />
                 )}
                 <OptionItem
                   group="quick-menu"
                   id="opt-exit"
                   icon={Power}
-                  label="Exit"
-                  value={pendingExit ? "Confirm A" : ""}
+                  label={t('quickMenu:exit')}
+                  value={pendingExit ? t('quickMenu:confirmA') : ""}
+                  pending={pendingExit}
                   onClick={() => {
                     if (pendingExit) {
                       setPendingExit(false);
@@ -4923,7 +5146,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
                           activeSettingsTab === 'accounts' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
-                        )}>Store Accounts</button>
+                        )}>{t('tabs.accounts')}</button>
                       )}
                     </Focusable>
                     <Focusable group="settings-tabs" id="settings-tab-engine" onEnter={() => {
@@ -4935,7 +5158,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
                           activeSettingsTab === 'engine' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
-                        )}>System</button>
+                        )}>{t('tabs.system')}</button>
                       )}
                     </Focusable>
                     <Focusable group="settings-tabs" id="settings-tab-plugins" onEnter={() => {
@@ -4947,7 +5170,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
                           activeSettingsTab === 'plugins' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
-                        )}>Plugins</button>
+                        )}>{t('tabs.plugins')}</button>
                       )}
                     </Focusable>
                     <Focusable group="settings-tabs" id="settings-tab-input" onEnter={() => {
@@ -4959,7 +5182,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
                           activeSettingsTab === 'input' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
-                        )}>Input</button>
+                        )}>{t('tabs.input')}</button>
                       )}
                     </Focusable>
                     {/* v0.99.90 — Step 15d: tab visibile solo se Ollama è
@@ -4977,7 +5200,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <button className={cn(
                             "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
                             activeSettingsTab === 'ai-models' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
-                          )}>AI Advisor</button>
+                          )}>{t('tabs.aiAdvisor')}</button>
                         )}
                       </Focusable>
                     )}
@@ -4994,9 +5217,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   // store) — 'accounts' resta non coperta, invariata.
                   let firstTabContentId: string | undefined;
                   if (activeSettingsTab === 'engine') {
-                    firstTabContentId = availableRunners.length > 0
-                      ? `runner-uninstall-${(availableRunners[0] as any).id || availableRunners[0]}`
-                      : 'runners-refresh';
+                    // Step 19b (v1.1.38) — il selettore di lingua è ora il
+                    // primo elemento reale della tab (vedi sotto), prima di
+                    // "Runner installati": aggiornato di conseguenza,
+                    // altrimenti il pulsante di chiusura punterebbe sempre
+                    // a un elemento più in basso, saltando il nuovo primo.
+                    firstTabContentId = 'settings-language-toggle';
                   } else if (activeSettingsTab === 'plugins') {
                     firstTabContentId = pluginRegistry.length > 0 ? `plugin-toggle-${pluginRegistry[0].id}` : undefined;
                   } else if (activeSettingsTab === 'input') {
@@ -5082,22 +5308,22 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <Gamepad2 size={20} />
                               </div>
                               <div>
-                                <h4 className="text-lg font-black italic uppercase tracking-tighter">{store.name}</h4>
+                                <h4 className="text-lg font-black italic uppercase tracking-tighter">{translateStorePluginName(store.id, store.name)}</h4>
                                 <span className={cn(
                                   "text-[10px] font-black uppercase tracking-widest italic",
                                   store.isConnected ? "text-green-400"
                                     : isWaiting    ? "text-blue-400"
                                     : "text-red-400"
                                 )}>
-                                  {store.isConnected ? `Session Active · Synced: ${syncedCount} · Installed: ${installedCount}`
-                                    : isWaiting    ? "In attesa del browser..."
-                                    : "Disconnected"}
+                                  {store.isConnected ? t('accounts.sessionActive', { synced: syncedCount, installed: installedCount })
+                                    : isWaiting    ? t('accounts.waitingBrowser')
+                                    : t('accounts.disconnected')}
                                 </span>
                               </div>
                             </div>
                             {store.isConnected && (
                               <div className="px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full text-[9px] font-black text-green-400 uppercase tracking-widest italic">
-                                Synced
+                                {t('accounts.synced')}
                               </div>
                             )}
                           </div>
@@ -5106,7 +5332,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           {isWaiting && (
                             <div className="flex items-center gap-3 mb-4 px-3 py-3 bg-blue-500/10 rounded-xl border border-blue-500/20">
                               <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                              <span className="text-[10px] text-blue-300 font-mono">In attesa del completamento da terminale…</span>
+                              <span className="text-[10px] text-blue-300 font-mono">{t('accounts.waitingTerminal')}</span>
                             </div>
                           )}
 
@@ -5126,12 +5352,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div className="mt-auto">
                             {noLogin ? (
                               <div className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center opacity-40 cursor-default", theme === 'dark' ? "bg-white/5" : "bg-gray-100")}>
-                                No login required
+                                {t('accounts.noLoginRequired')}
                               </div>
                             ) : store.isConnected ? (
                               noLogout ? (
                                 <div className="w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center bg-green-500/10 text-green-400 border border-green-500/20">
-                                  ✓ Linked Account
+                                  {t('accounts.linkedAccount')}
                                 </div>
                               ) : (
                                 <Focusable
@@ -5158,7 +5384,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                           ? "bg-green-500/20 text-green-300 border-green-400"
                                           : "bg-green-500/10 text-green-400 border-green-500/20"
                                     )}>
-                                      {pendingUnlink === store.id ? 'Confermi disconnessione? Premi A' : '✓ Linked Account'}
+                                      {pendingUnlink === store.id ? t('accounts.confirmDisconnect') : t('accounts.linkedAccount')}
                                     </button>
                                   )}
                                 </Focusable>
@@ -5168,7 +5394,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
                                     isFocused ? "bg-red-600 text-white" : theme === 'dark' ? "bg-white/5" : "bg-gray-100 text-gray-800"
-                                  )}>Annulla</button>
+                                  )}>{t('accounts.cancel')}</button>
                                 )}
                               </Focusable>
                             ) : (
@@ -5176,7 +5402,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
                                     isFocused ? "bg-blue-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
-                                  )}>Connect Store</button>
+                                  )}>{t('accounts.connectStore')}</button>
                                 )}
                               </Focusable>
                             )}
@@ -5209,15 +5435,59 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     const systemToolsUpNeighbor = lastInstallableFocusableId
                       ?? (availableRunners.length > 0 ? `runner-uninstall-${availableRunners[availableRunners.length - 1].id}` : undefined);
 
+                    // Step 19b (v1.1.38) — stesso id già usato calcolando
+                    // firstTabContentId per il pulsante di chiusura più
+                    // sopra: il selettore di lingua, non più la lista
+                    // runner, è ora il vero primo elemento della tab, quindi
+                    // scende verso quello che PRIMA era il primo elemento.
+                    const firstRunnerContentId = availableRunners.length > 0
+                      ? `runner-uninstall-${(availableRunners[0] as any).id || availableRunners[0]}`
+                      : 'runners-refresh';
+
                     return (
                   <div className="space-y-10">
 
+                    {/* Selettore lingua (Step 19b, v1.1.38) — UN SOLO
+                        Focusable, non uno per lingua: su/giù lo raggiunge
+                        come qualunque altra riga, sinistra/destra ne
+                        cambia il valore mentre è focalizzato (intercettati
+                        nell'effetto gamepad principale, stesso schema già
+                        usato per L1/R1 sul cambio tab — vedi
+                        cycleUiLanguage). Due Focusable separati (versione
+                        precedente) competevano con la normale navigazione
+                        su/giù del resto della tab, raggiungibili solo per
+                        caso muovendo lo stick. */}
+                    <div>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('language.label')}</h3>
+                      <Focusable
+                        group="settings"
+                        id="settings-language-toggle"
+                        neighbors={{ down: firstRunnerContentId }}
+                        onEnter={() => cycleUiLanguage()}
+                      >
+                        {(isFocused) => (
+                          <div className={cn(
+                            "flex p-1 rounded-2xl w-fit transition-all",
+                            isFocused ? "ring-2 ring-blue-400" : "",
+                            theme === 'dark' ? "bg-white/5" : "bg-gray-100"
+                          )}>
+                            {(['it', 'en'] as const).map(lng => (
+                              <div key={lng} className={cn(
+                                "px-6 py-2 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
+                                i18n.language === lng ? "bg-blue-600 text-white shadow-lg" : "opacity-40"
+                              )}>{t(`language.${lng}`)}</div>
+                            ))}
+                          </div>
+                        )}
+                      </Focusable>
+                    </div>
+
                     {/* Runner installati */}
                     <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Runner installati</h3>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('system.installedRunners')}</h3>
                       <div className="space-y-2">
                         {availableRunners.length === 0 && (
-                          <p className="text-xs opacity-40 italic">Nessun runner Proton trovato in ~/.local/share/Steam/</p>
+                          <p className="text-xs opacity-40 italic">{t('system.noRunnersFound')}</p>
                         )}
                         {availableRunners.map((r: any, idx: number) => {
                           const isPendingConfirm = pendingRunnerAction?.id === r.id && pendingRunnerAction.action === 'uninstall';
@@ -5230,6 +5500,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           // salta sempre, essendo piccolo e defilato a
                           // destra nell'header sottostante.
                           const isLastInstalled = idx === availableRunners.length - 1;
+                          // Step 19b (v1.1.38) — stesso principio di
+                          // isLastInstalled/down sopra, mirror per "su":
+                          // il selettore di lingua è stretto e allineato a
+                          // sinistra, la riga runner è larga — lo scoring
+                          // geometrico normale valuta "sinistra" più vicino
+                          // di "su" (dx grande, dy piccolo) e ci porta lì
+                          // invece che al selettore, il bug segnalato in
+                          // test. Esplicito qui, non lasciato allo scoring.
+                          const isFirstInstalled = idx === 0;
                           return (
                             <div key={r.id} className={cn(
                               "rounded-xl overflow-hidden transition-all",
@@ -5243,7 +5522,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <Focusable
                                   group="settings"
                                   id={`runner-uninstall-${r.id}`}
-                                  neighbors={isLastInstalled ? { down: 'runners-refresh' } : undefined}
+                                  neighbors={{
+                                    ...(isFirstInstalled ? { up: 'settings-language-toggle' } : {}),
+                                    ...(isLastInstalled ? { down: 'runners-refresh' } : {}),
+                                  }}
                                   onEnter={() => {
                                     if (isUninstalling) return;
                                     if (isPendingConfirm) {
@@ -5274,7 +5556,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         <span className="absolute inset-y-0 bg-red-500/40 animate-[runnerProgressRtl_1.2s_ease-in-out_infinite]" />
                                       )}
                                       <span className="relative z-10">
-                                        {isUninstalling ? 'removing…' : isPendingConfirm ? 'Confirm A' : 'installed'}
+                                        {isUninstalling ? t('system.removing') : isPendingConfirm ? t('system.confirmA') : t('system.installedBadge')}
                                       </span>
                                     </button>
                                   )}
@@ -5296,13 +5578,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     {/* Runner installabili */}
                     <div>
                       <div className="flex items-center gap-3 mb-3">
-                        <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30">Runner installabili</h3>
+                        <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30">{t('system.installableRunners')}</h3>
                         <Focusable
                           group="settings"
                           id="runners-refresh"
                           neighbors={{
                             down: installableRunners[0] ? `runner-install-${installableRunners[0].id}` : undefined,
-                            up:   availableRunners.length > 0 ? `runner-uninstall-${availableRunners[availableRunners.length - 1].id}` : undefined,
+                            // Step 19b (v1.1.38) — quando non ci sono
+                            // runner installati, questo pulsante È il primo
+                            // elemento reale della tab (vedi
+                            // firstRunnerContentId più sopra): "su" deve
+                            // tornare al selettore di lingua, non cadere
+                            // sullo scoring geometrico.
+                            up: availableRunners.length > 0 ? `runner-uninstall-${availableRunners[availableRunners.length - 1].id}` : 'settings-language-toggle',
                           }}
                           onEnter={() => {
                             fetch('/api/runners/installable').then(r => r.json()).then(setInstallableRunners).catch(() => {});
@@ -5318,7 +5606,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   : theme === 'dark' ? "text-white/30 hover:bg-red-600/20 hover:text-red-400" : "text-gray-400 hover:bg-red-600/20 hover:text-red-400"
                               )}
                             >
-                              ↻ Aggiorna
+                              {t('system.refresh')}
                             </button>
                           )}
                         </Focusable>
@@ -5332,9 +5620,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-green-500/5 border border-green-500/20">
                             <div className="w-2 h-2 rounded-full bg-green-500 shrink-0" />
                             <div>
-                              <p className="text-[10px] font-black text-green-400">ProtonUp-Qt e Lutris rilevati</p>
+                              <p className="text-[10px] font-black text-green-400">{t('system.protonupLutris.title')}</p>
                               <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                I runner verranno installati via <span className={cn(theme === 'dark' ? "text-white/60" : "text-gray-600")}>protonup</span> · Lutris disponibile per gestione avanzata
+                                {t('system.protonupLutris.prefix')}<span className={cn(theme === 'dark' ? "text-white/60" : "text-gray-600")}>protonup</span>{t('system.protonupLutris.suffix')}
                               </p>
                             </div>
                           </div>
@@ -5343,11 +5631,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
                             <div className="w-2 h-2 rounded-full bg-blue-400 shrink-0" />
                             <div>
-                              <p className={cn("text-[10px] font-black", theme === 'dark' ? "text-blue-300" : "text-blue-600")}>ProtonUp-Qt rilevato</p>
+                              <p className={cn("text-[10px] font-black", theme === 'dark' ? "text-blue-300" : "text-blue-600")}>{t('system.protonupOnly.title')}</p>
                               <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                Runner installati via <span className="text-white/60">protonup</span> ·{' '}
-                                Lutris non trovato —{' '}
-                                <code className="text-yellow-400/80">yay -S lutris</code> per gestione avanzata
+                                {t('system.protonupOnly.prefix')}<span className="text-white/60">protonup</span>{t('system.protonupOnly.middle')}
+                                <code className="text-yellow-400/80">yay -S lutris</code>{t('system.protonupOnly.suffix')}
                               </p>
                             </div>
                           </div>
@@ -5356,10 +5643,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
                             <div className="w-2 h-2 rounded-full bg-blue-400 shrink-0" />
                             <div>
-                              <p className="text-[10px] font-black text-blue-300">Lutris rilevato · ProtonUp-Qt non trovato</p>
+                              <p className="text-[10px] font-black text-blue-300">{t('system.lutrisOnly.title')}</p>
                               <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                Download runner via GitHub Releases (fallback) ·{' '}
-                                <code className="text-yellow-400/80">yay -S protonup-qt</code> per gestione ottimale
+                                {t('system.lutrisOnly.prefix')}<code className="text-yellow-400/80">yay -S protonup-qt</code>{t('system.lutrisOnly.suffix')}
                               </p>
                             </div>
                           </div>
@@ -5370,17 +5656,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             <div className="w-2 h-2 rounded-full bg-yellow-400 shrink-0 mt-1" />
                             <div className="space-y-2">
                               <p className="text-[10px] font-black text-yellow-300">
-                                ProtonUp-Qt e Lutris non trovati
+                                {t('system.neitherFound.title')}
                               </p>
                               <p className={cn("text-[9px] font-mono leading-relaxed", theme === 'dark' ? "text-white/50" : "text-gray-600")}>
-                                X-Launcher userà GitHub Releases come fallback, ma l'installazione potrebbe essere più lenta.
-                                Per la gestione ottimale dei runner installa almeno uno dei due:
+                                {t('system.neitherFound.desc')}
                               </p>
                               <div className="flex flex-col gap-1 mt-1">
                                 <div className="flex items-center gap-2">
                                   <span className={cn("text-[8px] uppercase font-black w-16", theme === 'dark' ? "text-white/30" : "text-gray-500")}>ProtonUp</span>
                                   <code className="text-[9px] font-mono text-green-400/80 bg-black/30 px-2 py-0.5 rounded">yay -S protonup-qt</code>
-                                  <span className="text-[8px] text-white/25 italic">— consigliato</span>
+                                  <span className="text-[8px] text-white/25 italic">{t('system.neitherFound.recommended')}</span>
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <span className={cn("text-[8px] uppercase font-black w-16", theme === 'dark' ? "text-white/30" : "text-gray-500")}>Lutris</span>
@@ -5393,7 +5678,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       })()}
                       <div className="space-y-2">
                         {installableRunners.length === 0 && (
-                          <p className="text-xs opacity-40 italic">Caricamento versioni disponibili…</p>
+                          <p className="text-xs opacity-40 italic">{t('system.loadingVersions')}</p>
                         )}
                         {installableRunners.map((r: any, idx: number) => {
                           const isInst  = r.installed || availableRunners.some((a: any) => a.id === r.id);
@@ -5424,7 +5709,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   via {r.source}
                                 </span>
                                 {isInst ? (
-                                  <span className="px-2 py-0.5 rounded-full bg-green-500/10 border border-green-500/20 text-[8px] font-black text-green-400 uppercase">installed</span>
+                                  <span className="px-2 py-0.5 rounded-full bg-green-500/10 border border-green-500/20 text-[8px] font-black text-green-400 uppercase">{t('system.installedBadge')}</span>
                                 ) : (
                                   <Focusable
                                     group="settings"
@@ -5465,7 +5750,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                           <span className="absolute inset-y-0 bg-blue-500/40 animate-[runnerProgressLtr_1.2s_ease-in-out_infinite]" />
                                         )}
                                         <span className="relative z-10">
-                                          {isThisInstalling ? 'installing…' : isPendingConfirm ? 'Confirm A' : 'Installa'}
+                                          {isThisInstalling ? t('system.installing') : isPendingConfirm ? t('system.confirmA') : t('system.installAction')}
                                         </span>
                                       </button>
                                     )}
@@ -5507,7 +5792,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           // a ciò che si può davvero attivare con A.
                           "rounded-2xl transition-all p-1"
                         )}>
-                          <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Tool di sistema</h3>
+                          <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('system.systemTools')}</h3>
                           <div className="grid grid-cols-3 gap-3">
                             {([
                               ['wine',      'Wine'],
@@ -5546,7 +5831,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     {/* Spazio disco */}
                     <div>
                       <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30">Spazio disco</h3>
+                        <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30">{t('system.diskSpace')}</h3>
                         <Focusable
                           group="settings"
                           id="disk-usage-refresh"
@@ -5557,7 +5842,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             <button className={cn(
                               "text-[9px] font-black uppercase tracking-widest transition-opacity",
                               isFocused ? "opacity-100 text-blue-400" : "opacity-30 hover:opacity-80"
-                            )}>↻ Aggiorna</button>
+                            )}>{t('system.refresh')}</button>
                           )}
                         </Focusable>
                       </div>
@@ -5577,9 +5862,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   <Monitor size={16} className="text-blue-400 shrink-0" />
                                   <div className="flex-1 min-w-0">
                                     <div className="flex justify-between items-baseline mb-1">
-                                      <p className="text-sm font-black">{diskUsage.freeHuman} liberi</p>
+                                      <p className="text-sm font-black">{t('system.freeSpace', { free: diskUsage.freeHuman })}</p>
                                       <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                        {diskUsage.usedPercent}% usato · {diskUsage.totalHuman} totali
+                                        {t('system.usedPercentTotal', { percent: diskUsage.usedPercent, total: diskUsage.totalHuman })}
                                       </p>
                                     </div>
                                     <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
@@ -5599,12 +5884,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   </div>
                                 </div>
                                 <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/25" : "text-gray-400")}>
-                                  ~/Games: {diskUsage.usedHuman !== '—' ? diskUsage.usedHuman : 'cartella non ancora creata'}
+                                  ~/Games: {diskUsage.usedHuman !== '—' ? diskUsage.usedHuman : t('system.folderNotCreated')}
                                 </p>
                               </div>
                             ) : (
                               <div className="px-5 py-4 rounded-xl bg-white/5 border border-white/5">
-                                <p className="text-[10px] font-mono opacity-40">Lettura in corso...</p>
+                                <p className="text-[10px] font-mono opacity-40">{t('system.loadingEllipsis')}</p>
                               </div>
                             )}
                           </div>
@@ -5618,7 +5903,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   /* ── Plugins tab ── */
                   <div className="space-y-6">
                     <p className={cn("text-[10px] font-mono mb-8", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
-                      Attiva o disattiva i plugin store. I giochi installati rimangono visibili anche con il plugin disattivato, ma quelli con DRM non potranno essere avviati.
+                      {t('plugins.intro')}
                     </p>
                     {pluginLoadError ? (
                       <div className="flex flex-col gap-3">
@@ -5626,15 +5911,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <button
                           onClick={loadPluginRegistry}
                           className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-white/20 hover:bg-white/10 transition-all"
-                        >↻ Riprova</button>
+                        >{t('plugins.retry')}</button>
                       </div>
                     ) : pluginRegistry.length === 0 ? (
                       <div className="flex flex-col gap-3">
-                        <p className="text-xs opacity-40 italic">Caricamento plugin...</p>
+                        <p className="text-xs opacity-40 italic">{t('plugins.loadingPlugins')}</p>
                         <button
                           onClick={loadPluginRegistry}
                           className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-white/20 hover:bg-white/10 transition-all"
-                        >↻ Ricarica</button>
+                        >{t('plugins.reload')}</button>
                       </div>
                     ) : (
                       <div className="grid grid-cols-2 gap-5">
@@ -5652,19 +5937,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             <div className="flex items-start justify-between gap-3">
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-1">
-                                  <span className="text-sm font-black truncate">{plugin.name}</span>
+                                  <span className="text-sm font-black truncate">{translateStorePluginName(plugin.id, plugin.name)}</span>
                                   {plugin.drmFree ? (
-                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 shrink-0">DRM-free</span>
+                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 shrink-0">{t('plugins.drmFree')}</span>
                                   ) : (
-                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 border border-yellow-500/20 shrink-0">DRM</span>
+                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 border border-yellow-500/20 shrink-0">{t('plugins.drm')}</span>
                                   )}
                                 </div>
                                 <p className={cn("text-[10px] leading-relaxed", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                  {plugin.description}
+                                  {translateStorePluginDescription(plugin.id, plugin.description)}
                                 </p>
                                 {plugin.requiredTool && (
                                   <p className={cn("text-[9px] font-mono mt-1", theme === 'dark' ? "text-white/20" : "text-gray-400")}>
-                                    richiede: {plugin.requiredTool}
+                                    {t('plugins.requires', { tool: plugin.requiredTool })}
                                   </p>
                                 )}
                               </div>
@@ -5711,14 +5996,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div className="space-y-10">
                     {/* Dispositivi connessi */}
                     <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Dispositivi connessi</h3>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('input.connectedDevices')}</h3>
                       {connectedDevices.length === 0 ? (
                         <div className={cn(
                           "flex items-center gap-3 px-5 py-4 rounded-xl border text-sm opacity-50",
                           theme === 'dark' ? "bg-white/5 border-white/5" : "bg-gray-50 border-gray-200"
                         )}>
                           <Gamepad size={16} />
-                          <span className="text-xs font-medium">Nessun controller rilevato</span>
+                          <span className="text-xs font-medium">{t('input.noControllerDetected')}</span>
                         </div>
                       ) : (
                         <div className="space-y-3">
@@ -5731,12 +6016,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs font-black truncate">{dev.id}</p>
                                 <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
-                                  Plugin assegnato: {dev.pluginId}
+                                  {t('input.assignedPlugin', { plugin: dev.pluginId })}
                                   {dev.vendorId ? ` · VID: 0x${dev.vendorId.toString(16).padStart(4,'0').toUpperCase()}` : ''}
                                 </p>
                               </div>
                               <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
-                                connesso
+                                {t('input.connected')}
                               </span>
                             </div>
                           ))}
@@ -5746,7 +6031,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                     {/* Plugin input */}
                     <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Plugin input</h3>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('input.inputPlugins')}</h3>
                       <div className="grid grid-cols-2 gap-4">
                         {inputPlugins.map(plugin => {
                           const isRowFocused = focusedId === `input-plugin-toggle-${plugin.id}`;
@@ -5761,9 +6046,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           )}>
                             <Gamepad size={18} className={plugin.enabled ? "text-blue-400" : "opacity-30"} />
                             <div className="flex-1 min-w-0">
-                              <p className="text-xs font-black">{plugin.name}</p>
+                              <p className="text-xs font-black">{translateInputPluginName(plugin.id, plugin.name)}</p>
                               <p className={cn("text-[9px] mt-0.5 leading-relaxed", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
-                                {plugin.description}
+                                {translateInputPluginDescription(plugin.id, plugin.description)}
                               </p>
                             </div>
                             <Focusable group="settings" id={`input-plugin-toggle-${plugin.id}`} onEnter={() => {
@@ -5797,13 +6082,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         })}
                       </div>
                       <p className={cn("text-[9px] font-mono mt-4 opacity-50", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
-                        Il plugin Generico è il fallback per controller non riconosciuti e non dovrebbe essere disabilitato.
+                        {t('input.genericFallbackNote')}
                       </p>
                     </div>
 
                     {/* Test input live */}
                     <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Test controller</h3>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('input.testController')}</h3>
                       {/* v1.1.8 — resa selezionabile su richiesta: quando
                           ha il focus, il loop di polling principale
                           (vedi useEffect più sopra) sospende ogni
@@ -5844,14 +6129,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       theme === 'dark' ? "bg-purple-500/10 border border-purple-500/20" : "bg-purple-50 border border-purple-200"
                     )}>
                       <Sparkles size={14} className="text-purple-400 shrink-0" />
-                      <p className="text-[10px] font-black uppercase tracking-widest text-purple-400">Experimental</p>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-purple-400">{t('aiAdvisor.experimental')}</p>
                       <p className={cn("text-[10px] font-mono ml-2", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                        L'AI Advisor è in fase di test — le risposte possono richiedere debug manuale.
+                        {t('aiAdvisor.experimentalNote')}
                       </p>
                     </div>
 
                     <p className={cn("text-[10px] font-mono mb-8", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
-                      Modelli Ollama già scaricati su questa macchina. Seleziona quale usare per l'AI Advisor quando la Knowledge Base locale non trova una soluzione nota — modelli più piccoli rispondono prima e pesano meno sulla GPU condivisa coi giochi, modelli più grandi possono dare risposte più accurate.
+                      {t('aiAdvisor.modelsIntro')}
                     </p>
 
                     {/* v0.99.90 — Step 15d: contatore budget token, condiviso
@@ -5859,14 +6144,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         perché è l'unica tab AI esistente finora, non perché
                         sia specifico di Ollama. */}
                     <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Budget token mensile</h3>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('aiAdvisor.monthlyBudget')}</h3>
                       <div className={cn(
                         "rounded-xl p-4",
                         theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
                       )}>
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-xs font-mono">
-                            {aiUsage.totalTokens.toLocaleString('it-IT')} / {aiUsage.budget.toLocaleString('it-IT')} token questo mese
+                            {t('aiAdvisor.tokensThisMonth', { used: aiUsage.totalTokens.toLocaleString(i18n.language), budget: aiUsage.budget.toLocaleString(i18n.language) })}
                           </span>
                           <span className={cn(
                             "text-[9px] font-black uppercase tracking-widest",
@@ -5885,14 +6170,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           />
                         </div>
                         <div className="flex items-center gap-2">
-                          <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0">Imposta budget</span>
+                          <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0">{t('aiAdvisor.setBudget')}</span>
                           <Focusable
                             group="settings"
                             id="ai-budget-input"
                             neighbors={{ down: ollamaModels[0] ? `ollama-model-select-${ollamaModels[0].name}` : undefined }}
                             onEnter={() => openKeyboardForField(
                               'ai-budget-input',
-                              'Budget Token Mensile',
+                              t('aiAdvisor.budgetFieldLabel'),
                               String(aiUsage.budget),
                               async (val) => {
                                 const n = parseInt(val, 10);
@@ -5922,16 +6207,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               />
                             )}
                           </Focusable>
-                          <span className="text-[9px] font-mono opacity-30 shrink-0">token/mese</span>
+                          <span className="text-[9px] font-mono opacity-30 shrink-0">{t('aiAdvisor.tokensPerMonth')}</span>
                         </div>
                       </div>
                     </div>
 
                     <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Modelli installati</h3>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('aiAdvisor.installedModels')}</h3>
                       <div className="space-y-2">
                         {ollamaModels.length === 0 && (
-                          <p className="text-xs opacity-40 italic">Nessun modello trovato — scaricane uno da terminale con 'ollama pull &lt;nome&gt;'.</p>
+                          <p className="text-xs opacity-40 italic">{t('aiAdvisor.noModelsFound')}</p>
                         )}
                         {ollamaModels.map((m, idx) => {
                           const isActive = activeOllamaModel === m.name && ollamaEnabled;
@@ -5940,7 +6225,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           // abbiamo un modo affidabile di leggere la VRAM
                           // libera da qui, quindi resta un proxy approssimativo
                           // del peso computazionale, non un'analisi hardware reale.
-                          const weightLabel = sizeGB < 2 ? 'Leggero' : sizeGB < 5 ? 'Medio' : sizeGB < 10 ? 'Pesante' : 'Molto pesante';
+                          const weightLabel = sizeGB < 2 ? t('aiAdvisor.weight.light') : sizeGB < 5 ? t('aiAdvisor.weight.medium') : sizeGB < 10 ? t('aiAdvisor.weight.heavy') : t('aiAdvisor.weight.veryHeavy');
                           const weightColor = sizeGB < 2 ? 'text-green-400' : sizeGB < 5 ? 'text-blue-400' : sizeGB < 10 ? 'text-orange-400' : 'text-red-400';
                           // v0.99.90 — vicini espliciti su/giù invece di
                           // affidarsi solo allo scoring geometrico: stesso
@@ -6005,7 +6290,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         ? "bg-purple-500/20 border-purple-400 text-purple-300"
                                         : "bg-white/5 border-white/10 opacity-60"
                                   )}>
-                                    {isActive ? 'attivo' : 'seleziona'}
+                                    {isActive ? t('aiAdvisor.active') : t('aiAdvisor.select')}
                                   </button>
                                 )}
                               </Focusable>
@@ -6020,7 +6305,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         c'entra — sono API remote), solo enable + API key
                         + test connessione. */}
                     <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">Provider cloud</h3>
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('aiAdvisor.cloudProviders')}</h3>
                       <div className="space-y-3">
                         {CLOUD_PROVIDERS.map((cp, idx) => {
                           const state = cloudProviderState[cp.id] ?? { enabled: false, hasStoredKey: false, apiKeyDraft: '', testing: false, testResult: null };
@@ -6069,7 +6354,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   "text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full shrink-0",
                                   cp.requiresPaidAccount ? "bg-orange-500/10 text-orange-400" : "bg-green-500/10 text-green-400"
                                 )}>
-                                  {cp.requiresPaidAccount ? 'A pagamento' : 'Gratuito/economico'}
+                                  {cp.requiresPaidAccount ? t('aiAdvisor.paid') : t('aiAdvisor.freeCheap')}
                                 </span>
                                 <Focusable
                                   group="settings"
@@ -6091,16 +6376,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                           ? "bg-purple-500/20 border-purple-400 text-purple-300"
                                           : "bg-white/5 border-white/10 opacity-60"
                                     )}>
-                                      {state.enabled ? 'attivo' : 'disattivo'}
+                                      {state.enabled ? t('aiAdvisor.active') : t('aiAdvisor.inactive')}
                                     </button>
                                   )}
                                 </Focusable>
                               </div>
-                              <p className={cn("text-[9px] font-mono leading-relaxed mb-3", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{cp.note}</p>
+                              <p className={cn("text-[9px] font-mono leading-relaxed mb-3", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{translateCloudProviderNote(cp.id, cp.note)}</p>
 
                               {state.enabled && (
                                 <div className="flex items-center gap-2">
-                                  <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0">API Key</span>
+                                  <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0">{t('aiAdvisor.apiKey')}</span>
                                   <Focusable
                                     group="settings"
                                     id={`cloud-provider-key-${cp.id}`}
@@ -6117,7 +6402,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     chainAxis="horizontal"
                                     onEnter={() => openKeyboardForField(
                                       `cloud-provider-key-${cp.id}`,
-                                      `${cp.name} — API Key`,
+                                      `${cp.name} — ${t('aiAdvisor.apiKey')}`,
                                       state.apiKeyDraft,
                                       (val) => {
                                         setCloudProviderState(prev => ({ ...prev, [cp.id]: { ...prev[cp.id], apiKeyDraft: val, hasStoredKey: val ? true : prev[cp.id]?.hasStoredKey } }));
@@ -6130,8 +6415,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       <input
                                         type="text"
                                         readOnly
-                                        value={state.apiKeyDraft ? '•'.repeat(Math.min(state.apiKeyDraft.length, 24)) : (state.hasStoredKey ? '•••••••• (salvata)' : '')}
-                                        placeholder="Incolla/digita l'API key…"
+                                        value={state.apiKeyDraft ? '•'.repeat(Math.min(state.apiKeyDraft.length, 24)) : (state.hasStoredKey ? t('aiAdvisor.apiKeyStoredPlaceholder') : '')}
+                                        placeholder={t('aiAdvisor.apiKeyPlaceholder')}
                                         className={cn(
                                           "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
                                           theme === 'dark' ? "bg-black/40" : "bg-white",
@@ -6153,7 +6438,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border shrink-0 transition-all",
                                         isFocused ? "bg-blue-500/20 border-blue-400 text-blue-300" : "bg-white/5 border-white/10 opacity-70"
                                       )}>
-                                        {state.testing ? 'test…' : 'Testa connessione'}
+                                        {state.testing ? t('aiAdvisor.testing') : t('aiAdvisor.testConnection')}
                                       </button>
                                     )}
                                   </Focusable>
@@ -6173,7 +6458,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                           "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border shrink-0 transition-all",
                                           isFocused ? "bg-red-500/20 border-red-400 text-red-300" : "bg-white/5 border-white/10 text-red-400/70 opacity-70"
                                         )}>
-                                          Rimuovi key
+                                          {t('aiAdvisor.removeKey')}
                                         </button>
                                       )}
                                     </Focusable>
@@ -6246,7 +6531,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div>
                     <h2 className="text-3xl font-black uppercase tracking-tighter italic leading-none mb-2">{selectedGame.title}</h2>
                     <div className="flex gap-2 flex-wrap items-center">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-blue-400">{selectedGame.store}</span>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-blue-400">{translateStorePluginName(selectedGame.store, selectedGame.store)}</span>
                       <span className={cn("text-[10px] font-black uppercase tracking-widest", theme === 'dark' ? "text-white/30" : "text-gray-400")}>·</span>
                       <span className={cn("text-[10px] font-black uppercase tracking-widest", theme === 'dark' ? "text-white/50" : selectedGame.runner === 'Wine-Lutris' ? "text-yellow-600" : "text-gray-600")}>{selectedGame.runner}</span>
                       {runnerVersion && runnerVersion !== selectedGame.runner && (
@@ -6260,7 +6545,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           ? "text-green-400 bg-green-400/10 border-green-400/20"
                           : "text-yellow-400 bg-yellow-400/10 border-yellow-400/20"
                       )}>
-                        {selectedGame.isInstalled ? '✓ installato' : '⬇ non installato'}
+                        {selectedGame.isInstalled ? t('gameOptions:installed') : t('gameOptions:notInstalled')}
                       </span>
                     </div>
                   </div>
@@ -6316,7 +6601,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
                   <div className="flex items-center gap-3 mb-4">
                     <Cpu size={16} className="text-blue-400" />
-                    <span className="text-[10px] font-black uppercase tracking-widest">Runner Bridge</span>
+                    <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:runnerBridge')}</span>
                     {runnerVersion && (
                       <span className={cn(
                         "ml-auto text-[9px] font-mono px-2 py-0.5 rounded-full border",
@@ -6413,7 +6698,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {/* Badge "attivo" quando è il runner corrente */}
                                 {isActive && (
                                   <span className="text-[9px] font-black uppercase tracking-widest text-blue-400 shrink-0">
-                                    Attivo
+                                    {t('gameOptions:active')}
                                   </span>
                                 )}
                                 {/* Switch */}
@@ -6455,17 +6740,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Activity size={16} className="text-blue-400" />
-                      <span className="text-[10px] font-black uppercase tracking-widest">RetroArch Core</span>
+                      <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:retroarchCore')}</span>
                       {retroarchAvailable === false && (
-                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-red-400">Non installato</span>
+                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-red-400">{t('gameOptions:notInstalledStatus')}</span>
                       )}
                       {retroarchAvailable === true && (
-                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-green-400">Disponibile</span>
+                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-green-400">{t('gameOptions:available')}</span>
                       )}
                     </div>
                     {retroarchAvailable === false ? (
                       <div className="space-y-3">
-                        <p className="text-xs opacity-60 leading-relaxed">RetroArch non è installato. Installalo per avviare le ROM.</p>
+                        <p className="text-xs opacity-60 leading-relaxed">{t('gameOptions:retroarchNotInstalledDesc')}</p>
                         <code className={cn("block text-[10px] font-mono p-3 rounded-xl text-green-400", theme === 'dark' ? "bg-black/40 border border-white/5" : "bg-gray-800 border border-gray-600")}>
                           sudo pacman -S retroarch
                         </code>
@@ -6550,7 +6835,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     <p className="text-[11px] font-black uppercase tracking-widest truncate">{core.name}</p>
                                   </div>
                                   {isActive && (
-                                    <span className="text-[9px] font-black uppercase tracking-widest text-blue-400 shrink-0">Attivo</span>
+                                    <span className="text-[9px] font-black uppercase tracking-widest text-blue-400 shrink-0">{t('gameOptions:active')}</span>
                                   )}
                                   <div className={cn(
                                     "w-10 h-5 rounded-full transition-all relative shrink-0",
@@ -6568,19 +6853,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         })}
                         {retroarchDefaultCore && (
                           <p className="text-[9px] font-mono opacity-30 pt-1">
-                            Default per questo sistema: {retroarchDefaultCore}
+                            {t('gameOptions:defaultForSystem', { name: retroarchDefaultCore })}
                           </p>
                         )}
                       </div>
                     ) : (
-                      <p className="text-xs opacity-60">Nessun core compatibile trovato per questo sistema.</p>
+                      <p className="text-xs opacity-60">{t('gameOptions:noCoreCompatible')}</p>
                     )}
                   </div>
                 ) : selectedGame.store !== 'Classic Console' ? (
                   <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Activity size={16} className="text-blue-400" />
-                      <span className="text-[10px] font-black uppercase tracking-widest">Compatibility Layer</span>
+                      <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:compatibilityLayer')}</span>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       {([
@@ -6670,7 +6955,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   </div>
                 ) : (
                   <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
-                    <p className="text-xs opacity-40 italic">Nessuna opzione di compatibilità aggiuntiva per questo runner.</p>
+                    <p className="text-xs opacity-40 italic">{t('gameOptions:noAdditionalCompatOptions')}</p>
                   </div>
                 )}
 
@@ -6686,12 +6971,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Executable Path</span>
                         {localGameConfig.executablePath && (
                           <span className="text-[9px] font-black uppercase tracking-widest text-green-400 bg-green-400/10 border border-green-400/20 px-1.5 py-0.5 rounded-full">
-                            ✓ configurato
+                            {t('gameOptions:configured')}
                           </span>
                         )}
                         {!localGameConfig.executablePath && (selectedGame.store === 'Epic Games' || selectedGame.store === 'GOG Galaxy') && selectedGame.isInstalled && (
                           <span className="text-[9px] font-black uppercase tracking-widest text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 px-1.5 py-0.5 rounded-full">
-                            ⚠ richiesto per avviare
+                            {t('gameOptions:requiredToLaunch')}
                           </span>
                         )}
                       </div>
@@ -6885,7 +7170,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     )}
                     {selectedGame.runner === 'RetroArch' && (
                       <label className="block">
-                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">Libretro Core Path (manuale)</span>
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">{t('gameOptions:libretroCorePathManual')}</span>
                         <Focusable
                           group="game-options"
                           id="field-libretroCore"
@@ -6927,8 +7212,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Package size={16} className="text-blue-400" />
-                      <span className="text-[10px] font-black uppercase tracking-widest">Dipendenze Wine</span>
-                      <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">salvate per questo gioco</span>
+                      <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:wineDependencies')}</span>
+                      <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:savedForThisGame')}</span>
                     </div>
                     <div className="space-y-1">
                       {[...DEFAULT_WINE_VERBS, ...OPTIONAL_WINE_VERBS].map((verb, verbIdx, verbsArr) => {
@@ -6983,10 +7268,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 </div>
                                 <span className="text-xs font-mono flex-1">{verb}</span>
                                 {DEFAULT_WINE_VERBS.includes(verb) && (
-                                  <span className="text-[9px] opacity-30 uppercase tracking-widest">consigliato</span>
+                                  <span className="text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:recommended')}</span>
                                 )}
                                 {verb === 'dotnet48' && (
-                                  <span className="text-[9px] text-yellow-400/60 uppercase tracking-widest">lento · solo se richiesto</span>
+                                  <span className="text-[9px] text-yellow-400/60 uppercase tracking-widest">{t('gameOptions:slowOnlyIfNeeded')}</span>
                                 )}
                               </div>
                             )}
@@ -7009,7 +7294,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div className="flex items-center gap-3 mb-4">
                     <Terminal size={16} className="text-blue-400" />
                     <span className="text-[10px] font-black uppercase tracking-widest">Custom Env Variables</span>
-                    <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">KEY=VALUE per riga</span>
+                    <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:keyValuePerLine')}</span>
                   </div>
 
                   {/* v1.1.0 — un solo campo editabile per riga (prima KEY e
@@ -7093,7 +7378,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             neighbors={{ right: `envvar-persist-${idx}` }}
                             onEnter={() => openKeyboardForField(
                               `envvar-${idx}`,
-                              `Variabile #${idx + 1} — KEY=VALUE`,
+                              `${t('gameOptions:envVarKeyboardLabel', { n: idx + 1 })}`,
                               line,
                               (newLine) => {
                                 const oldKey = k.trim();
@@ -7169,7 +7454,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   ? (isFocused ? "border-blue-400 bg-blue-500/20 text-blue-300" : "border-white/10 bg-white/5 text-blue-300/70")
                                   : (isFocused ? "border-amber-400 bg-amber-500/20 text-amber-300" : "border-amber-500/30 bg-amber-500/5 text-amber-400/80")
                               )}>
-                                {isPersistent ? 'Persistente' : 'Solo install.'}
+                                {isPersistent ? t('gameOptions:persistent') : t('gameOptions:installOnly')}
                               </div>
                             )}
                           </Focusable>
@@ -7208,8 +7493,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           isPersistent ? "text-white/25" : "text-amber-400/70"
                         )}>
                           {isPersistent
-                            ? 'Salvata: verrà applicata anche a ogni lancio futuro del gioco.'
-                            : 'Non salvata: verrà applicata solo alla prossima installazione, poi dimenticata.'}
+                            ? t('gameOptions:persistentCaption')
+                            : t('gameOptions:notPersistentCaption')}
                         </p>
                         </div>
                       );
@@ -7232,7 +7517,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           "flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border border-dashed",
                           isFocused ? "border-blue-500 bg-blue-500/10 text-blue-400" : "border-white/10 text-white/30"
                         )}>
-                          + Aggiungi variabile
+                          {t('gameOptions:addVariable')}
                         </div>
                       )}
                     </Focusable>
@@ -7268,7 +7553,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       )}>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-[11px] font-black uppercase tracking-widest">
-                            Disabilita sync NT veloce
+                            {t('gameOptions:disableWineSyncLabel')}
                           </span>
                           <div className={cn(
                             "w-11 h-6 rounded-full transition-all relative shrink-0",
@@ -7281,10 +7566,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           </div>
                         </div>
                         <p className="text-[10px] opacity-50 mt-2 leading-relaxed">
-                          Attiva solo se l'installazione si blocca durante la creazione
-                          dell'ambiente Wine senza un motivo apparente. Rallenta
-                          leggermente la sincronizzazione interna di Wine, ma evita
-                          un blocco noto su alcuni sistemi durante questa fase.
+                          {t('gameOptions:disableWineSyncDesc')}
                         </p>
                       </div>
                     )}
@@ -7325,7 +7607,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       )}>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-[11px] font-black uppercase tracking-widest">
-                            Usa Known Fixes (Heroic)
+                            {t('gameOptions:useKnownFixesLabel')}
                           </span>
                           <div className={cn(
                             "w-11 h-6 rounded-full transition-all relative shrink-0",
@@ -7338,11 +7620,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           </div>
                         </div>
                         <p className="text-[10px] opacity-50 mt-2 leading-relaxed">
-                          Cerca dipendenze note per questo gioco nel database
-                          pubblico di Heroic Games Launcher prima dell'installazione.
-                          Se trovate, sostituiscono i verb configurati qui sotto.
-                          Se il gioco non è coperto, riceverai una notifica e
-                          verranno usati i verb di default.
+                          {t('gameOptions:useKnownFixesDesc')}
                         </p>
                       </div>
                     )}
@@ -7364,7 +7642,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         "w-full py-5 rounded-2xl font-black text-xl italic transition-all flex items-center justify-center gap-3 shadow-2xl",
                         isFocused ? "bg-red-500 text-white scale-[1.02]" : "bg-red-700/80 hover:bg-red-600 text-white"
                       )}>
-                        <Trash2 size={24} /> DISINSTALLA
+                        <Trash2 size={24} /> {t('gameOptions:uninstall')}
                       </button>
                     )}
                   </Focusable>
@@ -7402,7 +7680,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         "w-full py-5 rounded-2xl font-black text-xl italic transition-all flex items-center justify-center gap-3 shadow-2xl",
                         isFocused ? "bg-green-500 text-white scale-[1.02]" : "bg-green-700 hover:bg-green-600 text-white"
                       )}>
-                        <Download size={24} /> INSTALLA
+                        <Download size={24} /> {t('gameOptions:install')}
                       </button>
                     )}
                   </Focusable>
@@ -7458,7 +7736,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   )}>
                     {(activeField ? activeField.value : searchQuery) || (
                       <span className="opacity-20 italic font-normal text-lg">
-                        {activeField ? 'Vuoto…' : 'Inizia a digitare...'}
+                        {activeField ? t('dashboard:keyboard.emptyField') : t('dashboard:keyboard.startTyping')}
                       </span>
                     )}
                   </div>
@@ -7519,17 +7797,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
       )}>
         {inputDevice === 'controller' ? (
           <>
-            <Hint icon="A" color="bg-green-500" label="Select" theme={theme} />
-            <Hint icon="B" color="bg-red-500" label="Back" theme={theme} />
-            <Hint icon="X" color="bg-blue-500" label="Quick Actions" theme={theme} />
-            <Hint icon="Y" color="bg-yellow-500" label="Global Search" theme={theme} />
+            <Hint icon="A" color="bg-green-500" label={t('dashboard:footer.select')} theme={theme} />
+            <Hint icon="B" color="bg-red-500" label={t('dashboard:footer.back')} theme={theme} />
+            <Hint icon="X" color="bg-blue-500" label={t('dashboard:footer.quickActions')} theme={theme} />
+            <Hint icon="Y" color="bg-yellow-500" label={t('dashboard:footer.globalSearch')} theme={theme} />
             <div className="h-6 w-[1px] bg-blue-500/20" />
             <div className="flex items-center gap-4">
               <div className="flex gap-1.5">
                 <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">L1</div>
                 <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">R1</div>
               </div>
-              <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">Jump Store</span>
+              <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">{t('dashboard:footer.jumpStore')}</span>
             </div>
             <div className="h-6 w-[1px] bg-blue-500/20" />
             {/* v1.0.0 — L2/R2: stesso stile a "pill" rettangolare di L1/R1
@@ -7542,24 +7820,24 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-1.5">
                 <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">L2</div>
-                <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">Download</span>
+                <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">{t('dashboard:footer.download')}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">R2</div>
-                <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">Notifications</span>
+                <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">{t('dashboard:footer.notifications')}</span>
               </div>
             </div>
           </>
         ) : (
           <>
-            <Hint icon="⏎" color="bg-gray-500" label="Execute" theme={theme} />
-            <Hint icon="⎋" color="bg-gray-500" label="Exit View" theme={theme} />
-            <Hint icon="TAB" color="bg-blue-500" label="Next Group" theme={theme} />
-            <Hint icon="/" color="bg-yellow-500" label="Spotlight" theme={theme} />
+            <Hint icon="⏎" color="bg-gray-500" label={t('dashboard:footer.execute')} theme={theme} />
+            <Hint icon="⎋" color="bg-gray-500" label={t('dashboard:footer.exitView')} theme={theme} />
+            <Hint icon="TAB" color="bg-blue-500" label={t('dashboard:footer.nextGroup')} theme={theme} />
+            <Hint icon="/" color="bg-yellow-500" label={t('dashboard:footer.spotlight')} theme={theme} />
           </>
         )}
         
-        <div className="ml-auto flex items-center gap-8">
+        <div className="ml-auto flex items-center gap-8 shrink-0">
           {/* Download indicator */}
           <Focusable group="footer-bar" id="footer-downloads" onEnter={() => {
             setShowDownloads(p => {
@@ -7573,9 +7851,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
             {(isFocused) => (
               <button className={cn("flex items-center gap-4 transition-all", isFocused ? "opacity-100 scale-105" : "hover:opacity-80 opacity-70")}>
                 <Activity size={18} className={cn("transition-colors", downloads.some(d => d.status === 'downloading') ? "text-green-500 animate-pulse" : "text-blue-500")} />
-                <div className="flex flex-col text-left">
-                  <span className="text-[9px] font-black opacity-30 uppercase tracking-[0.2em] leading-none">Net Bridge</span>
-                  <span className="text-sm font-mono font-black italic text-blue-500 leading-none">
+                {/* Step 19b (v1.1.59) — segnalato dall'utente: in italiano
+                    questo blocco arrivava a spezzarsi su 4 righe (Net /
+                    Bridge / 0.0 / MB/s) invece delle 2 attese, perché
+                    nessuno spanno qui aveva whitespace-nowrap né shrink-0
+                    — l'intera riga <footer> è un flex senza wrap
+                    esplicito, e le etichette italiane della legenda a
+                    sinistra (collettivamente un po' più larghe di quelle
+                    inglesi) bastavano a far scattare lo shrink di default
+                    su QUESTO blocco, il più a destra e quindi il primo a
+                    cedere spazio. whitespace-nowrap blocca lo scenario
+                    "una parola per riga"; shrink-0 sul contenitore (sotto)
+                    impedisce che l'intero blocco venga compresso. */}
+                <div className="flex flex-col text-left shrink-0">
+                  <span className="text-[9px] font-black opacity-30 uppercase tracking-[0.2em] leading-none whitespace-nowrap">{t('dashboard:footer.netBridge')}</span>
+                  <span className="text-sm font-mono font-black italic text-blue-500 leading-none whitespace-nowrap">
                     {downloads.find(d => d.status === 'downloading')?.speed || "0.0 MB/s"}
                   </span>
                 </div>
@@ -7622,20 +7912,43 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
   );
 }
 
-function OptionItem({ id, group, icon: Icon, label, value, onClick }: any) {
+function OptionItem({ id, group, icon: Icon, label, value, onClick, pending }: any) {
   const { play } = useAudio();
   return (
     <Focusable id={id} group={group} onEnter={() => { onClick?.(); play('select'); }}>
       {(isFocused) => (
         <div className={cn(
-          "w-full p-4 rounded-xl flex items-center justify-between transition-all border",
-          isFocused ? "bg-blue-600 border-blue-500 text-white scale-105 shadow-xl shadow-blue-500/30" : "bg-white/5 border-transparent opacity-60"
+          "w-full p-4 rounded-xl flex items-center justify-between gap-3 transition-all border",
+          // Step 19b (v1.1.57) — segnalato dall'utente: il pulsante Esci
+          // restava blu anche mentre chiedeva conferma ("Confirm A"),
+          // indistinguibile dalle altre righe con focus normale. `pending`
+          // (passato solo per Esci, quando `pendingExit` è true) lo rende
+          // rosso finché in attesa — A conferma, B annulla e torna blu
+          // (comportamento già corretto, era solo l'aspetto a non
+          // rifletterlo).
+          pending ? "bg-red-600 border-red-500 text-white scale-105 shadow-xl shadow-red-500/30"
+            : isFocused ? "bg-blue-600 border-blue-500 text-white scale-105 shadow-xl shadow-blue-500/30" : "bg-white/5 border-transparent opacity-60"
         )}>
-          <div className="flex items-center gap-4">
-            <Icon size={18} strokeWidth={3} />
+          {/* Step 19b (v1.1.45) — flex-1 min-w-0 qui, non prima: senza
+              min-w-0 un figlio flex non si restringe mai sotto la
+              larghezza del proprio contenuto (stesso principio già visto
+              per overflow-y-auto in v1.1.4/v1.1.7), quindi un'etichetta
+              tradotta più lunga (es. "Modalità Gamescope" in inglese)
+              invece di andare a capo si sovrapponeva al valore a destra.
+              Segnalato dall'utente in test: "Modalità Schermo" andava a
+              capo correttamente per puro caso (il suo value "Schermo
+              Intero" è abbastanza lungo da forzare comunque lo shrink),
+              "Modalità Gamescope" no. */}
+          <div className="flex items-center gap-4 flex-1 min-w-0">
+            <Icon size={18} strokeWidth={3} className="shrink-0" />
             <span className="font-black italic uppercase text-sm tracking-tight">{label}</span>
           </div>
-          <span className="font-mono text-xs font-bold opacity-70">{value}</span>
+          {/* shrink-0: il valore (es. "Schermo Intero", "Confirm A") non
+              deve mai essere schiacciato da un'etichetta lunga — resta
+              sempre alla propria larghezza naturale; è l'etichetta a
+              restringersi/andare a capo per fargli spazio, mai il
+              contrario. */}
+          <span className="font-mono text-xs font-bold opacity-70 text-right shrink-0">{value}</span>
         </div>
       )}
     </Focusable>
@@ -7677,7 +7990,7 @@ function Hint({ icon, color, label, theme }: { icon: string, color: string, labe
         {icon}
       </div>
       <span className={cn(
-        "text-xs font-black opacity-40 group-hover:opacity-100 transition-opacity uppercase tracking-[0.2em] italic",
+        "text-xs font-black opacity-40 group-hover:opacity-100 transition-opacity uppercase tracking-[0.2em] italic whitespace-nowrap",
         theme === 'dark' ? "text-white" : "text-black"
       )}>{label}</span>
     </div>

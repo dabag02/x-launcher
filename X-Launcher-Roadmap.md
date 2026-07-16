@@ -1185,13 +1185,13 @@ Nuovo tab nel pannello Settings (accanto a Plugins e Input):
 
 -----
 
-## Step 18 — Consolidamento fetch libreria giochi (refactor pianificato)
+## ✅ Step 18 — Consolidamento fetch libreria giochi [OK — v1.1.37]
 
 **Contesto**: durante la diagnosi dei bug v1.1.20→v1.1.23 (card che "dimentica" lo stato installato/disinstallato) è emerso che il frontend chiama `GET /api/games` da almeno cinque punti indipendenti — login store, logout store, polling autenticazione OAuth, evento SSE `library-updated`, cambio store/filtro — ciascuno con la propria chiamata `fetch` e il proprio `setGames(...)`, senza alcun coordinamento tra loro. Il guard di sequenza (`librarySeqRef`, v1.1.22) risolve la corsa fra risposte fuori ordine, ma è un cerotto sopra la duplicazione, non una sua eliminazione — ogni nuovo punto che in futuro chiamasse `/api/games` per conto proprio rischierebbe di reintrodurre la stessa classe di bug.
 
 **Obiettivo**: una singola funzione condivisa (es. `refreshGamesList()`), che incapsuli fetch + guard di sequenza + aggiornamento cache + `setGames`, richiamata da tutti e cinque i punti invece che ciascuno duplichi la propria versione. L'API `/api/games` resta la stessa — è un refactor del lato chiamante, non un nuovo endpoint.
 
-**Non ancora iniziato** — da riprendere appena possibile, dopo conferma su hardware reale che i fix v1.1.20→v1.1.23 hanno chiuso il problema che l'ha fatto emergere.
+**Completato in v1.1.37**: nuova funzione condivisa `refreshGamesList()`. Durante l'analisi è emerso che tre dei cinque punti (login, logout, polling OAuth) erano non solo da consolidare ma del tutto ridondanti — `loginToStore()`/`logoutFromStore()`/`POST /api/library/refresh` scatenano già `refreshLibrary()` lato server, che notifica l'evento SSE `library-updated` prima che la risposta HTTP torni al frontend. Rimossi come chiamanti diretti di `/api/games`: restano solo l'handler SSE e l'effetto legato ad activeStore/filtri, entrambi ora sulla funzione condivisa. Dettaglio completo in CHANGELOG.md, v1.1.37. Da confermare su hardware reale nell'uso quotidiano (nessuna regressione attesa: `tsc --noEmit` pulito rispetto al baseline).
 
 -----
 
@@ -1203,13 +1203,15 @@ Definita dopo la chiusura del ciclo di affidabilità libreria/Epic/screensaver (
 
 Un URI scheme unico (`xlaunch://<store>/<id>` o simile) per lanciare un gioco da fuori la Dashboard — link diretti da un browser, script esterni, o altre integrazioni — indipendentemente dallo store di provenienza. Da valutare: registrazione del protocollo a livello di sistema (`xdg-mime`/`.desktop` con `MimeType=x-scheme-handler/xlaunch`), e come risolvere l'id gioco in modo univoco fra store diversi che potrebbero avere convenzioni di id differenti (già visto in questa sessione: `gog-<slug>`, `epic-<appName esadecimale>`, `classic-<slug>-<hash>`).
 
-### 19b — Supporto multilingua (Italiano/Inglese built-in + sistema di traduzioni caricabili)
+### 19b — Supporto multilingua (Italiano/Inglese built-in + sistema di traduzioni caricabili) [🟡 IN CORSO — fondamenta v1.1.38]
 
-**Problema attuale, confermato dall'utente**: l'interfaccia mescola italiano e inglese in modo incoerente — alcune stringhe sono in un lingua, altre nell'altra, senza un criterio. Da costruire:
-- Sistema di stringhe centralizzato (i18n) invece di testo cablato sparso nei componenti — probabilmente il lavoro più esteso dei quattro, dato il numero di stringhe già scritte direttamente in JSX in tutta l'app
-- Due lingue built-in complete (Italiano, Inglese)
-- Meccanismo per caricare pacchetti di traduzione aggiuntivi (file esterni, non ricompilazione) per altre lingue
-- Autorilevamento della lingua di sistema all'avvio, con possibilità di override manuale nelle Impostazioni
+**Problema attuale, confermato dall'utente**: l'interfaccia mescola italiano e inglese in modo incoerente — alcune stringhe sono in un lingua, altre nell'altra, senza un criterio.
+
+**Fatto in v1.1.38**: motore `i18next`/`react-i18next`/`i18next-http-backend` scelto e configurato (`src/i18n/i18n.ts`), un namespace JSON per sezione principale in `public/locales/<lingua>/<namespace>.json` (caricati a runtime, non ricompilati — soddisfa il requisito "pacchetti caricabili" nativamente). Prima sezione migrata come prova: tab bar di Settings + tab Store Accounts per intero. Dettaglio in CHANGELOG.md, v1.1.38.
+
+**Step 19b — CHIUSO.** Restava solo l'autorilevamento della lingua di sistema, fatto in v1.1.63. v1.1.64 — fix minore post-chiusura: overlap "Pulisci storico"/titolo in Notifiche (titolo su una singola parola non può andare a capo, spostato il pulsante su una riga propria). Rimangono solo due elementi fuori scope, deliberatamente deprioritizzati e documentati: Debug Console (strumento di sviluppo) e due punti minori con `game.store` grezzo in frasi runtime (vedi CHANGELOG.md v1.1.54).
+
+**Fatto**: v1.1.38-43 — tutte e cinque le tab di Settings, selettore di lingua incluso. v1.1.44 — Quick Menu (namespace `quickMenu`). v1.1.45/46 — fix layout responsivo. v1.1.47 — header Dashboard, ricerca, ordinamento, filtri (namespace `dashboard`). v1.1.48 — sidebar dettagli gioco. v1.1.49 — fix corsa selettore lingua al boot + status gioco + nome store non-brand. v1.1.50/51 — overlay Game Options completo (namespace `gameOptions`). v1.1.52 — contenuto interno di Downloads e Notifiche (namespace `downloads`/`notifications`). v1.1.53/54 — fix intestazione libreria e nome store nella sidebar dettagli gioco. v1.1.55 — barra footer + placeholder tastiera virtuale. v1.1.56 — fix titoli header "Deployment Manager"/"Notifiche". v1.1.57 — Avatar Library (namespace `avatarLibrary`) + fix "Confirm A" + pulsante ESCI rosso in attesa di conferma. v1.1.58 — Knowledge Base dell'AI Advisor bilingue (34 voci). v1.1.59 — fix wrap Net Bridge nel footer. v1.1.60 — prompt di sistema AI Advisor parametrizzato sulla lingua UI. v1.1.61 — fix pulsante Incolla nella tastiera virtuale (layout fisico dei tasti resta indipendente). v1.1.62 — audit completo del contenuto delle notifiche. v1.1.63 — **autorilevamento lingua di sistema al primo avvio**, con messaggio multilingua (spagnolo/tedesco/francese/cinese semplificato, più fallback inglese) per chi ha una lingua non ancora supportata.
 
 ### 19c — Plugin store: Amazon Games e itch.io
 

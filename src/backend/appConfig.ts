@@ -30,6 +30,14 @@ mkdirSync(DATA_DIR, { recursive: true });
 // non presente nel file, e mantenuto in scrittura perché kiosk-launch.sh di
 // installazioni precedenti potrebbe ancora leggerlo prima dell'update.
 export type DisplayMode = 'kiosk' | 'window' | 'borderless';
+// Step 19b (v1.1.38) — solo le due lingue built-in per ora. Un pacchetto di
+// traduzione caricato a runtime (vedi src/i18n/i18n.ts) non richiede una
+// modifica qui: questo campo resta un enum stretto perché il selettore in
+// Settings deve comunque offrire un elenco chiuso di opzioni valide — un
+// domani, se i pacchetti caricabili aggiungeranno lingue reali, l'elenco
+// andrà generato dinamicamente da quali file sono presenti in
+// public/locales/, non hardcoded qui.
+export type Language = 'it' | 'en';
 
 export interface AppConfig {
   fullscreen: boolean;
@@ -40,6 +48,10 @@ export interface AppConfig {
   // indipendentemente da quale provider stia effettivamente rispondendo
   // in un dato momento (fallback silenzioso tra più provider abilitati).
   aiMonthlyTokenBudget: number;
+  // Step 19b (v1.1.38) — lingua UI scelta manualmente in Settings. Nessun
+  // autorilevamento della lingua di sistema ancora implementato (roadmap):
+  // il default resta 'it' finché quella parte non viene costruita.
+  language: Language;
 }
 
 const DEFAULTS: AppConfig = {
@@ -49,6 +61,7 @@ const DEFAULTS: AppConfig = {
   // costi) — 50.000 permette circa 10 sessioni al mese prima di avvicinarsi
   // al limite, un default ragionevole senza essere arbitrariamente basso.
   aiMonthlyTokenBudget: 50_000,
+  language: 'it',
 };
 
 function parseConfFile(raw: string): Partial<AppConfig> {
@@ -67,6 +80,9 @@ function parseConfFile(raw: string): Partial<AppConfig> {
     if (key === 'aiMonthlyTokenBudget') {
       const n = parseInt(val, 10);
       if (!isNaN(n) && n >= 0) out.aiMonthlyTokenBudget = n;
+    }
+    if (key === 'language' && (val === 'it' || val === 'en')) {
+      out.language = val;
     }
   }
   return out;
@@ -91,6 +107,25 @@ export function readAppConfig(): AppConfig {
   }
 }
 
+// Step 19b (v1.1.63) — autorilevamento lingua di sistema al primo avvio.
+// readAppConfig() da solo non permette di distinguere "language non è mai
+// stato scritto nel file" da "è stato scritto esplicitamente 'it'" — il
+// merge con DEFAULTS appiattisce i due casi allo stesso valore. Questa
+// funzione rilegge il file grezzo (stesso parsing di readAppConfig, non
+// duplicato: richiama parseConfFile) e restituisce true solo se la chiave
+// `language=` è già presente — il frontend la usa per decidere se questo
+// è il primissimo avvio (autorilevare dal browser) o un avvio successivo
+// (rispettare quanto già persistito, anche se è il default 'it').
+export function hasLanguageBeenSet(): boolean {
+  if (!existsSync(CONFIG_PATH)) return false;
+  try {
+    const raw = readFileSync(CONFIG_PATH, 'utf-8');
+    return parseConfFile(raw).language !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 export function writeAppConfig(partial: Partial<AppConfig>): AppConfig {
   const current = readAppConfig();
   const next = { ...current, ...partial };
@@ -104,6 +139,7 @@ export function writeAppConfig(partial: Partial<AppConfig>): AppConfig {
     `fullscreen=${next.fullscreen}`,
     `displayMode=${next.displayMode}`,
     `aiMonthlyTokenBudget=${next.aiMonthlyTokenBudget}`,
+    `language=${next.language}`,
     '',
   ].join('\n');
   writeFileSync(CONFIG_PATH, body, 'utf-8');

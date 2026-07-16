@@ -1,5 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
+import { useTranslation } from 'react-i18next';
 import { Focusable, useFocus } from './FocusProvider';
 import { Delete, Space, CornerDownLeft, ArrowBigUp, Languages, ClipboardPaste } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -190,6 +191,14 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
   onSuggestionFocus,
 }) => {
   const { focusedId } = useFocus();
+  // Step 19b (v1.1.61) — namespace 'dashboard', per le sole etichette UI
+  // di questo componente (pulsante Incolla, messaggi clipboard). Nessun
+  // legame con `layoutId` qui sotto: quello è il LAYOUT FISICO dei tasti
+  // (ITA/EN-US, quali lettere/accenti compaiono), scelto indipendentemente
+  // dalla lingua dell'interfaccia — un utente può benissimo voler
+  // digitare con layout italiano pur avendo scelto l'inglese come lingua
+  // della UI. Richiesta esplicita dell'utente: NON accoppiare le due cose.
+  const { t } = useTranslation('dashboard');
   const [isShift, setIsShift] = React.useState(false);
   const [layoutId, setLayoutId] = React.useState<'it' | 'en'>(lastLayoutId);
   const layout = LAYOUTS[layoutId];
@@ -439,7 +448,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
             non serve. */}
         {pasteStatus !== 'idle' && (
           <p className="text-center text-[9px] font-black uppercase tracking-widest text-red-400 -mb-0.5">
-            {pasteStatus === 'empty' ? 'Clipboard vuota' : 'Clipboard non disponibile'}
+            {pasteStatus === 'empty' ? t('dashboard:keyboard.clipboardEmpty') : t('dashboard:keyboard.clipboardUnavailable')}
           </p>
         )}
         <div className="flex justify-center items-stretch gap-1 md:gap-1.5 mt-0.5">
@@ -483,7 +492,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
                     : 'bg-white/5 opacity-80'
               )}>
                 <ClipboardPaste size={13} />
-                Incolla
+                {t('dashboard:keyboard.paste')}
               </div>
             )}
           </Focusable>

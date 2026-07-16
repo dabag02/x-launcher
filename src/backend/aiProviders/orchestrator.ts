@@ -62,7 +62,12 @@ export async function runAdvisor(
   }
 
   const pastAttempts = attemptTracker.getPastAttempts(gameId, cleanedErrorText);
-  const context: ErrorContext = { errorText: cleanedErrorText, gameTitle, pastAttempts };
+  // Step 19b (v1.1.60) — lingua corrente della UI, propagata a ogni
+  // provider tramite ErrorContext.language invece di lasciare "in
+  // italiano" fisso nel prompt di sistema (vedi buildSystemPrompt in
+  // base.ts).
+  const language = readAppConfig().language;
+  const context: ErrorContext = { errorText: cleanedErrorText, gameTitle, pastAttempts, language };
 
   let lastResponse: AIResponse | null = null;
   let lastProviderName: string | undefined;

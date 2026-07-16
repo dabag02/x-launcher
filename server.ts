@@ -10,7 +10,7 @@ import { notificationEngine } from './src/backend/notificationEngine';
 import { knowledgeBase } from './src/backend/knowledgeBase';
 import * as db from './src/backend/db';
 import * as attemptTracker from './src/backend/aiProviders/attemptTracker';
-import { readAppConfig, writeAppConfig } from './src/backend/appConfig';
+import { readAppConfig, writeAppConfig, hasLanguageBeenSet } from './src/backend/appConfig';
 import fs from 'fs';
 import os from 'os';
 import { spawn, execSync } from 'child_process';
@@ -674,6 +674,12 @@ async function startServer() {
     res.json({
       ...readAppConfig(),
       dedicatedSession: process.env.X_LAUNCHER_DEDICATED_SESSION === 'true',
+      // Step 19b (v1.1.63) — autorilevamento lingua di sistema: distingue
+      // "language non è mai stato scritto nel file" (primo avvio mai, il
+      // frontend deve autorilevare da navigator.language) da "è già stato
+      // scritto, anche solo il default 'it'" (avvio successivo, rispetta
+      // quanto persistito) — vedi hasLanguageBeenSet() in appConfig.ts.
+      languageIsUserSet: hasLanguageBeenSet(),
     });
   });
 
