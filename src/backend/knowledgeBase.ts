@@ -292,7 +292,7 @@ function loadSeed(store: KnowledgeStore): void {
     }
   } catch (e) {
     // Seed malformato — non blocca il boot
-    console.error('[KB] Errore caricamento seed:', e);
+    console.error('[KB] Seed loading error:', e);
   }
 }
 

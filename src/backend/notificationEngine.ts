@@ -202,7 +202,7 @@ class NotificationEngine {
         // gratuito e ci protegge da qualunque svista futura — un
         // fallimento in questo percorso in background non deve mai
         // propagarsi oltre un log.
-        console.error('[AI] tryAIAdvisor fallito inaspettatamente:', err);
+        console.error('[AI] tryAIAdvisor failed unexpectedly:', err);
       });
     }
   }
@@ -354,7 +354,7 @@ class NotificationEngine {
       // console.error invece di writeLog (logger.ts) per non introdurre
       // un nuovo accoppiamento tra moduli solo per un percorso di
       // fallback così raro.
-      console.error(`[NOTIFY] Scrittura notifica fallita:`, err);
+      console.error(`[NOTIFY] Failed to write notification:`, err);
       return;
     }
     this.broadcast?.('notification', complete);

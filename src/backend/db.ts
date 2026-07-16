@@ -250,7 +250,7 @@ if (brokenStatusCount > 0) {
   db.exec(
     "UPDATE games SET status = 'Ready to Launch' WHERE is_installed = 1 AND status = 'Not Installed'"
   );
-  console.log(`[DB] Migrazione status: corretti ${brokenStatusCount} giochi installati con status='Not Installed' → 'Ready to Launch'`);
+  console.log(`[DB] Status migration: fixed ${brokenStatusCount} installed games with status='Not Installed' → 'Ready to Launch'`);
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +420,7 @@ export function upsertGame(game: Game): void {
       const beforeInstalled = Boolean(before.is_installed);
       const afterInstalled  = Boolean(game.isInstalled);
       if (beforeInstalled !== afterInstalled || (before.executable_path ?? '') !== (game.executablePath ?? '')) {
-        writeLog('system', `[DB] upsertGame "${game.title}": isInstalled ${beforeInstalled}→${afterInstalled} | executablePath "${before.executable_path ?? '(vuoto)'}"→"${game.executablePath ?? '(vuoto)'}"`);
+        writeLog('system', `[DB] upsertGame "${game.title}": isInstalled ${beforeInstalled}→${afterInstalled} | executablePath "${before.executable_path ?? '(empty)'}"→"${game.executablePath ?? '(empty)'}"`);
       }
     }
   } catch { /* diagnostica opzionale, non deve mai far fallire la scrittura reale */ }
@@ -505,7 +505,7 @@ export function updateGameStatus(id: string, isInstalled: boolean, status: Game[
     UPDATE games SET is_installed = ?, status = ?, updated_at = datetime('now')
     WHERE id = ?
   `).run(isInstalled ? 1 : 0, status, id);
-  writeLog('system', `[DB] updateGameStatus "${before?.title ?? id}": isInstalled ${before?.is_installed ? 'true' : 'false'}→${isInstalled} | executablePath invariato="${before?.executable_path ?? '(vuoto)'}"`);
+  writeLog('system', `[DB] updateGameStatus "${before?.title ?? id}": isInstalled ${before?.is_installed ? 'true' : 'false'}→${isInstalled} | executablePath unchanged="${before?.executable_path ?? '(empty)'}"`);
 }
 
 /**

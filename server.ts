@@ -40,7 +40,7 @@ async function startServer() {
 
   writeLog(
     'system',
-    `[AVATAR] Directory avatar: ${AVATAR_DIR}`
+    `[AVATAR] Avatar directory: ${AVATAR_DIR}`
   );
   // In AI Studio NODE_ENV veniva iniettato automaticamente dalla piattaforma.
   // Su Linux locale si imposta qui come fallback sicuro.
@@ -123,9 +123,9 @@ async function startServer() {
         gameManager.addLog('[STEAM] Libreria aggiornata.', 'system');
       }, 8000);
     });
-    writeLog('system', `Watcher attivo su ${steamappsPath}`);
+    writeLog('system', `Watcher active on ${steamappsPath}`);
   } else {
-    writeLog('system', 'Cartella steamapps non trovata — watcher disabilitato.');
+    writeLog('system', 'steamapps folder not found — watcher disabled.');
   }
 
   // Step 3 — Watcher sulla cartella ROM
@@ -146,9 +146,9 @@ async function startServer() {
         gameManager.addLog('[CLASSIC] Libreria aggiornata.', 'system');
       }, 2000);
     });
-    writeLog('system', `Watcher ROM attivo su ${romsPath}`);
+    writeLog('system', `ROM watcher active on ${romsPath}`);
   } else {
-    writeLog('system', `Cartella ROM non trovata (${romsPath}) — crea ~/Roms/ o imposta ROMS_PATH nel .env`);
+    writeLog('system', `ROM folder not found (${romsPath}) — create ~/Roms/ or set ROMS_PATH in .env`);
   }
 
   // Step 3 — Cerca core RetroArch installati nel sistema
@@ -234,7 +234,7 @@ async function startServer() {
     }, 30000);
 
     sseClients.add(res);
-    writeLog('system', `[SSE] Client connesso (totale: ${sseClients.size})`);
+    writeLog('system', `[SSE] Client connected (total: ${sseClients.size})`);
 
     req.on('close', () => {
       clearInterval(heartbeat);
@@ -325,7 +325,7 @@ async function startServer() {
       }
       const { execSync } = require('child_process') as typeof import('child_process');
       execSync(`legendary auth --code "${authCode}"`, { encoding: 'utf-8', timeout: 20000 });
-      writeLog('auth', '[Epic] auth-code: autenticazione completata via authorization code');
+      writeLog('auth', '[Epic] auth-code: authentication completed via authorization code');
       res.json({ success: true, message: 'Autenticazione Epic completata.' });
     } catch (e: any) {
       writeLog('error', `[Epic] auth-code error: ${e.message}`);
@@ -693,7 +693,7 @@ async function startServer() {
   app.patch('/api/config', (req, res) => {
     try {
       const next = writeAppConfig(req.body ?? {});
-      writeLog('system', `[CONFIG] Preferenze aggiornate: ${JSON.stringify(next)}`);
+      writeLog('system', `[CONFIG] Preferences updated: ${JSON.stringify(next)}`);
       res.json(next);
     } catch (e: any) {
       res.status(500).json({ success: false, message: e.message });
@@ -963,7 +963,7 @@ async function startServer() {
   // fetch lato frontend fallirebbe con un errore di connessione invece di
   // un successo pulito.
   app.post('/api/system/exit', (_req, res) => {
-    writeLog('system', '[SYSTEM] Richiesta di chiusura ricevuta — arresto in corso...');
+    writeLog('system', '[SYSTEM] Shutdown request received — stopping...');
 
     // v0.99.90 — termina anche il demone tray Python, se attivo. Prima di
     // questo fix, in sessioni di sviluppo successive le modifiche al
@@ -974,7 +974,7 @@ async function startServer() {
     // al prossimo avvio da kiosk-launch.sh) carichi il codice aggiornato.
     try {
       execSync('pkill -f "tray.py"', { stdio: 'ignore' });
-      writeLog('system', '[SYSTEM] Demone tray Python terminato.');
+      writeLog('system', '[SYSTEM] Python tray daemon terminated.');
     } catch {
       // pkill esce con codice diverso da 0 se non trova nessun processo
       // da terminare — non è un errore, significa solo che il tray non
@@ -1000,21 +1000,21 @@ async function startServer() {
   // il nome reale differisse su un sistema specifico.
   app.post('/api/system/switch-session', (req, res) => {
     if (!binaryExists('dm-tool')) {
-      writeLog('warning', '[SYSTEM] switch-session richiesto ma dm-tool non è disponibile — installa il pacchetto lightdm (già presente se LightDM è il display manager attivo) o verifica il PATH.');
+      writeLog('warning', '[SYSTEM] switch-session requested but dm-tool is not available — install the lightdm package (already present if LightDM is the active display manager) or check the PATH.');
       res.status(501).json({ success: false, message: 'dm-tool non disponibile su questo sistema.' });
       return;
     }
     const username = process.env.USER || process.env.LOGNAME || '';
     const targetSession = process.env.X_LAUNCHER_DESKTOP_SESSION || 'xfce';
     if (!username) {
-      writeLog('error', '[SYSTEM] switch-session: impossibile determinare lo username corrente (env USER/LOGNAME assenti).');
+      writeLog('error', '[SYSTEM] switch-session: could not determine the current username (USER/LOGNAME env vars missing).');
       res.status(500).json({ success: false, message: 'Username non determinabile.' });
       return;
     }
-    writeLog('system', `[SYSTEM] Switch di sessione richiesto: ${username} → ${targetSession}`);
+    writeLog('system', `[SYSTEM] Session switch requested: ${username} → ${targetSession}`);
     res.json({ success: true, message: 'Switch di sessione in corso.' });
     const proc = spawn('dm-tool', ['switch-to-user', username, targetSession], { stdio: 'ignore' });
-    proc.on('error', (e) => writeLog('error', `[SYSTEM] dm-tool switch-to-user fallito: ${e.message}`));
+    proc.on('error', (e) => writeLog('error', `[SYSTEM] dm-tool switch-to-user failed: ${e.message}`));
   });
 
   // POST /api/system/steam-bigpicture — passa a Steam Big Picture (v0.99.32).
@@ -1029,15 +1029,15 @@ async function startServer() {
   // se il binario non esiste, spawn fallisce e l'errore viene loggato,
   // comportamento già sufficiente — non serve bloccare la richiesta prima.
   app.post('/api/system/steam-bigpicture', (_req, res) => {
-    writeLog('system', '[SYSTEM] Passaggio a Steam Big Picture richiesto.');
+    writeLog('system', '[SYSTEM] Switch to Steam Big Picture requested.');
     res.json({ success: true, message: 'Apertura Steam Big Picture in corso.' });
     const proc = spawn('steam', ['steam://open/bigpicture'], { stdio: 'ignore' });
-    proc.on('error', (e) => writeLog('error', `[SYSTEM] Avvio Steam Big Picture fallito: ${e.message} — Steam è installato?`));
+    proc.on('error', (e) => writeLog('error', `[SYSTEM] Failed to launch Steam Big Picture: ${e.message} — is Steam installed?`));
   });
 
   app.listen(PORT, "0.0.0.0", () => {
-    writeLog('system', `Daemon avviato su http://0.0.0.0:${PORT}`);
-    writeLog('system', `Log su file: ${LOG_PATH_EXPORT}`);
+    writeLog('system', `Daemon started on http://0.0.0.0:${PORT}`);
+    writeLog('system', `Log file: ${LOG_PATH_EXPORT}`);
   });
 }
 

@@ -146,10 +146,45 @@
             "files": [
                 "src/backend/downloadManager.ts"
             ]
+        },
+        {
+            "id": "step19b-i18n-complete",
+            "description": "Step 18 (consolidamento fetch libreria in refreshGamesList(), con scoperta che login/logout/polling OAuth erano fetch ridondanti oltre che da unificare) seguito da Step 19b completo: i18next/react-i18next con backend HTTP per pacchetti di lingua caricabili in public/locales/, otto namespace di traduzione (settings, quickMenu, dashboard, gameOptions, downloads, notifications, avatarLibrary + il modulo a parte unsupportedLanguageNotices per lingue non ancora supportate), selettore di lingua manuale persistito in app.conf, autorilevamento della lingua di sistema al primo avvio (navigator.languages, fallback inglese con avviso multilingua ES/DE/FR/ZH). Knowledge Base dell'AI Advisor bilingue (colonna solution_en, 34 voci tradotte) e prompt di sistema AI (buildSystemPrompt) parametrizzato sulla lingua invece di 'in italiano' fisso. Audit completo del contenuto delle notifiche generate in giro per il codice. Fix di layout responsivo ricorrenti (flex-1 min-w-0/shrink-0, titoli su parola singola che non può andare a capo) e una race condition sul selettore di lingua al primo boot a freddo. Log di debug (writeLog/console.*) uniformati in sola lingua inglese in tutto il backend, per convenzione permanente da questa milestone in poi.",
+            "appliedAt": "2026-07-16T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "server.ts",
+                "src/i18n/i18n.ts",
+                "src/i18n/unsupportedLanguageNotices.ts",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/GamepadTester.tsx",
+                "src/backend/appConfig.ts",
+                "src/backend/knowledgeBase.ts",
+                "src/backend/notificationEngine.ts",
+                "src/backend/aiProviders/base.ts",
+                "src/backend/aiProviders/orchestrator.ts",
+                "src/backend/aiProviders/ollama.ts",
+                "src/backend/aiProviders/claude.ts",
+                "src/backend/aiProviders/gemini.ts",
+                "src/backend/aiProviders/openaiCompatible.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/metadataManager.ts",
+                "src/backend/downloadManager.ts",
+                "src/backend/runners/implementations.ts",
+                "src/backend/plugins/steamPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "kb-seed.json",
+                "package.json",
+                "metadata.json",
+                "X-Launcher-Roadmap.md"
+            ]
         }
     ],
-    "version": "1.1.35-rc.2",
-    "milestone": "v1.1.35-rc.2 — MILESTONE DI CHIUSURA PRIMO CICLO DI SVILUPPO. Modello di navigazione controller unificato (sequentialChain/chainAxis, tastiera virtuale ristrutturata), affidabilità completa di libreria/installazione (card sempre coerenti, lancio Epic via legendary con velocità di download corretta, inibizione screensaver durante il gioco). Tutti gli obiettivi prefissati per questo ciclo raggiunti.",
-    "date": "2026-07-12",
-    "notes": "Sessione estesa in due parti. Prima parte: razionalizzazione del sistema di navigazione controller a partire da un modello concettuale (SNI) fornito dall'utente, con generalizzazione progressiva del meccanismo (sequentialChain, poi chainAxis con la variante 'flow' per liste a capo imprevedibile) via via che nuovi casi reali lo richiedevano — pattern ricorrente: un fix per un caso specifico rivela un principio più generale, applicato retroattivamente. Seconda parte: diagnosi approfondita di un bug di persistenza libreria che ha richiesto cinque tentativi progressivi prima della causa radice reale (cache di metadataManager) — ogni tentativo indirizzava una causa reale e verificata nel codice, non ipotesi infondate, ma nessuno era quello finale finché i log diretti dell'utente non hanno reso possibile isolarla con certezza. Lezione esplicita: quando l'analisi statica del codice non basta più dopo diversi fix reali falliti, strumentare con log mirati batte continuare a ipotizzare. Aggiunto anche supporto Epic Games via legendary launch (SIFU e titoli EOS-severi, incluso il fix della velocità di download) e inibizione screensaver per sessioni di gioco prolungate da controller.\n\n--- CHIUSURA PRIMO CICLO DI SVILUPPO ---\nTutti gli step prefissati per il primo ciclo sono stati raggiunti e verificati su hardware reale. v1.1.35-rc.2 è la milestone di riferimento.\n\n--- APERTURA SECONDO CICLO DI SVILUPPO ---\nDue filoni paralleli: (1) espansione della roadmap concordata — Step 18 (consolidamento fetch libreria), Step 19a-d (protocollo xlaunch://, multilingua IT/EN con autorilevamento, plugin Amazon Games/itch.io, launcher di terze parti condivisi Ubisoft/EA/Rockstar/Battle.net), Step 20 (sessione Wayland/gamescope indipendente in modalità console) — vedi X-Launcher-Roadmap.md per il piano di sviluppo ordinato con motivazioni; (2) bugfix che emergeranno dall'uso quotidiano, gestiti man mano che si presentano."
+    "version": "1.1.65-rc.3",
+    "milestone": "v1.1.65-rc.3 — MILESTONE: INTERFACCIA INTERAMENTE BILINGUE IT/EN (Step 19b completo) + BUGFIX. Fondamenta i18next/react-i18next con pacchetti caricabili (public/locales/), otto namespace (settings, quickMenu, dashboard, gameOptions, downloads, notifications, avatarLibrary, unsupportedLanguageNotices), selettore di lingua manuale in Settings, autorilevamento della lingua di sistema al primo avvio con fallback inglese e avviso multilingua (ES/DE/FR/ZH) per lingue non ancora supportate. Knowledge Base dell'AI Advisor bilingue (34 voci) e prompt di sistema AI parametrizzato sulla lingua invece di \"in italiano\" fisso. Log di debug (writeLog/console.*) unificati in sola lingua inglese in tutto il backend — non più bilingue, per convenzione da qui in avanti. Numerosi fix di layout responsivo e bug di navigazione emersi durante la migrazione, tutti verificati su hardware reale. Precede questa milestone lo Step 18 (consolidamento fetch libreria giochi).",
+    "date": "2026-07-16",
+    "notes": "Sessione molto estesa in due parti principali. Prima parte: Step 18, consolidamento dei cinque punti di fetch della libreria giochi in una singola funzione condivisa (refreshGamesList()) — scoperta in corso d'opera che tre di quei cinque punti (login/logout/polling OAuth) erano non solo da consolidare ma del tutto ridondanti, perché il backend scatena comunque l'evento SSE library-updated per le stesse azioni. Seconda parte, la più estesa: Step 19b, i18n completo dell'intera dashboard. Approccio a sezioni successive (stessa strategia già usata per Settings): tab di Settings, Quick Menu, header Dashboard/ricerca/filtri, sidebar dettagli gioco, overlay Game Options, Downloads e Notifiche, Avatar Library, barra footer, tastiera virtuale, Knowledge Base e prompt AI, fino all'audit completo del contenuto delle notifiche generate in giro per il codice. Pattern ricorrente: l'utente ha trovato con test reali su hardware diversi punti mancati o bug di layout non catturabili da un'analisi statica del codice (titoli h2 rimasti letterali nonostante due fix precedenti sullo stesso overlay, wrap di testo che va da 2 a 4 righe solo in italiano, una race condition sul selettore di lingua che si manifesta solo al primo boot a freddo) — ogni volta corretto e documentato puntualmente. Decisioni di design esplicite: layout della tastiera virtuale mantenuto indipendente dalla lingua della UI (un utente può digitare in layout italiano con interfaccia inglese); nomi tecnici di progetto (Runner Bridge, Peer Hash Cache, RetroArch Core) lasciati non tradotti, mentre nomi propri del progetto senza valore di brand (Classic Console, Controller Generico, Deployment Manager) tradotti; log di debug unificati in sola lingua inglese per convenzione permanente da questa milestone in poi, essendo la lingua franca dello sviluppo. Deprioritizzato e documentato come fuori scope: il Debug Console (strumento di sviluppo) e due punti minori con nome store grezzo in frasi di notifica costruite a runtime.\\n\\nNuova convenzione permanente adottata da questa sessione in poi: ogni nuova feature accompagnata da testo va realizzata in italiano E inglese per default, non più italiano-poi-tradotto-dopo."
 }

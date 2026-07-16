@@ -130,7 +130,7 @@ function getLibraryFromLgog(): Promise<Game[]> {
 
     const timer = setTimeout(() => {
       proc.kill();
-      writeLog('warning', '[GOG] lgogdownloader --list timeout (60s) — restituisco lista parziale');
+      writeLog('warning', '[GOG] lgogdownloader --list timeout (60s) — returning partial list');
       resolve(games);
     }, LGOG_TIMEOUT_MS);
 
@@ -252,7 +252,7 @@ export class GOGPlugin extends StorePlugin {
 
   async getLibrary(): Promise<Game[]> {
     if (!binaryExists('lgogdownloader')) {
-      writeLog('warning', '[GOG] lgogdownloader non trovato. Installa con: yay -S lgogdownloader');
+      writeLog('warning', '[GOG] lgogdownloader not found. Install with: yay -S lgogdownloader');
       return [];
     }
 
@@ -273,9 +273,9 @@ export class GOGPlugin extends StorePlugin {
       // lgogdownloader stesso, non una regressione di questo plugin.
       const stillAuthenticated = await this.isAuthenticated();
       if (stillAuthenticated) {
-        writeLog('warning', '[GOG] Login API valido ma --list non restituisce titoli: probabile problema di sessione/cookie del sito (non del token API) — comportamento noto di lgogdownloader. Prova: lgogdownloader --login da terminale, assicurandoti di completare il login per intero senza altre sessioni GOG attive nel browser nello stesso momento; se persiste, valuta di azzerare la cache lgogdownloader (~/.cache/lgogdownloader, ~/.config/lgogdownloader) prima di rifare il login.');
+        writeLog('warning', '[GOG] Valid API login but --list returns no titles: likely a session/cookie issue on the website (not the API token) — a known lgogdownloader behavior. Try: lgogdownloader --login from a terminal, making sure to complete the login fully with no other GOG sessions active in the browser at the same time; if it persists, consider clearing the lgogdownloader cache (~/.cache/lgogdownloader, ~/.config/lgogdownloader) before logging in again.');
       } else {
-        writeLog('warning', '[GOG] Nessun titolo trovato e login API non valido. Esegui: lgogdownloader --login');
+        writeLog('warning', '[GOG] No titles found and API login invalid. Run: lgogdownloader --login');
       }
       return [];
     }
@@ -300,7 +300,7 @@ export class GOGPlugin extends StorePlugin {
     }
 
     const installedCount = games.filter(g => g.isInstalled).length;
-    writeLog('info', `[GOG] ${games.length} titoli (${installedCount} installati)`);
+    writeLog('info', `[GOG] ${games.length} titles (${installedCount} installed)`);
     return games;
   }
 
@@ -364,7 +364,7 @@ export class GOGPlugin extends StorePlugin {
       if (renamed === 0) {
         return { success: true, message: 'Nessuna credenziale GOG trovata da disconnettere.' };
       }
-      writeLog('auth', `[GOG] logout: ${renamed} file di credenziali rinominati con suffisso .unlink`);
+      writeLog('auth', `[GOG] logout: ${renamed} credential files renamed with .unlink suffix`);
       return { success: true, message: 'Account GOG disconnesso. I file di credenziali sono stati rinominati, non cancellati.' };
     } catch (e: any) {
       writeLog('error', `[GOG] logout error: ${e.message}`);

@@ -208,7 +208,7 @@ export class EpicPlugin extends StorePlugin {
 
   async getLibrary(): Promise<Game[]> {
     if (!binaryExists('legendary')) {
-      writeLog('warning', '[Epic] legendary non trovato. Installa con: yay -S legendary-gl');
+      writeLog('warning', '[Epic] legendary not found. Install with: yay -S legendary-gl');
       return [];
     }
 
@@ -219,7 +219,7 @@ export class EpicPlugin extends StorePlugin {
     ]);
 
     if (rawGames.length === 0) {
-      writeLog('warning', '[Epic] Nessun titolo trovato. Hai eseguito legendary auth?');
+      writeLog('warning', '[Epic] No titles found. Have you run legendary auth?');
       return [];
     }
 
@@ -256,7 +256,7 @@ export class EpicPlugin extends StorePlugin {
     }
 
     const installedCount = games.filter(g => g.isInstalled).length;
-    writeLog('info', `[Epic] ${games.length} titoli (${installedCount} installati)`);
+    writeLog('info', `[Epic] ${games.length} titles (${installedCount} installed)`);
     return games;
   }
 
@@ -333,7 +333,7 @@ export class EpicPlugin extends StorePlugin {
     try {
       const { execSync } = require('child_process') as typeof import('child_process');
       const output = execSync('legendary auth --delete', { encoding: 'utf-8', timeout: 15000 });
-      writeLog('auth', `[Epic] logout: comando eseguito, output: ${JSON.stringify(output)}`);
+      writeLog('auth', `[Epic] logout: command executed, output: ${JSON.stringify(output)}`);
       return { success: true, message: 'Account Epic disconnesso.' };
     } catch (e: any) {
       writeLog('error', `[Epic] logout error: ${e.message} | stdout: ${e.stdout ?? 'n/a'} | stderr: ${e.stderr ?? 'n/a'}`);

@@ -62,7 +62,7 @@ function spawnDetached(bin: string, args: string[], env: Record<string, string> 
       // Se anche solo l'apertura del file fallisce (permessi, disco
       // pieno), non deve mai impedire il lancio del gioco stesso — si
       // ripiega sul comportamento precedente (scartato), non un crash.
-      writeLog('warning', `[LAUNCH] Impossibile aprire il log di lancio ${logPath}: ${e} — stdout/stderr non catturati per questo avvio.`);
+      writeLog('warning', `[LAUNCH] Could not open launch log ${logPath}: ${e} — stdout/stderr not captured for this launch.`);
       stdio = 'ignore';
     }
   }
@@ -175,7 +175,7 @@ export class WineRunner extends BaseRunner {
       }
       // Fallback finale: directory dell'exe
       if (!existsSync(cwd)) {
-        writeLog('warning', `[WINE] launchCwd non trovata: ${cwd} — uso directory exe`);
+        writeLog('warning', `[WINE] launchCwd not found: ${cwd} — using exe directory`);
         cwd = path.dirname(exePath);
       }
     } else {
@@ -201,7 +201,7 @@ export class WineRunner extends BaseRunner {
         env.MANGOHUD      = '1';
         env.MANGOHUD_DLSYM = '1';
       } else {
-        writeLog('warning', '[WINE] MangoHud richiesto ma non trovato — installa mangohud');
+        writeLog('warning', '[WINE] MangoHud requested but not found — install mangohud');
       }
     }
 
@@ -210,7 +210,7 @@ export class WineRunner extends BaseRunner {
       const eacPath = execSync('find /usr/share/steam /home -name "eac_runtime" -type d 2>/dev/null | head -1',
         { encoding: 'utf-8', timeout: 3000 }).trim();
       if (eacPath) env.PROTON_EAC_RUNTIME = eacPath;
-      else writeLog('warning', '[WINE] EAC runtime non trovato');
+      else writeLog('warning', '[WINE] EAC runtime not found');
     }
 
     // BattlEye runtime
@@ -218,13 +218,13 @@ export class WineRunner extends BaseRunner {
       const bePath = execSync('find /usr/share/steam /home -name "battleye_runtime" -type d 2>/dev/null | head -1',
         { encoding: 'utf-8', timeout: 3000 }).trim();
       if (bePath) env.PROTON_BATTLEYE_RUNTIME = bePath;
-      else writeLog('warning', '[WINE] BattlEye runtime non trovato');
+      else writeLog('warning', '[WINE] BattlEye runtime not found');
     }
 
     // GameMode — wrappa il lancio con gamemoderun
     const useGameMode = config?.gameMode && binaryExists('gamemoderun');
     if (config?.gameMode && !binaryExists('gamemoderun')) {
-      writeLog('warning', '[WINE] GameMode richiesto ma gamemoderun non trovato — installa gamemode');
+      writeLog('warning', '[WINE] GameMode requested but gamemoderun not found — install gamemode');
     }
 
     const launchBin  = useGameMode ? 'gamemoderun' : wineBin;
@@ -442,7 +442,7 @@ export class DOSBoxRunner extends BaseRunner {
 function findRetroarchBin(): string | null {
   // Prova prima nel PATH ereditato dal processo
   if (binaryExists('retroarch')) {
-    writeLog('launch', '[RETROARCH] Trovato nel PATH di sistema');
+    writeLog('launch', '[RETROARCH] Found in system PATH');
     return 'retroarch';
   }
 
@@ -458,7 +458,7 @@ function findRetroarchBin(): string | null {
   ];
   for (const p of absoluteCandidates) {
     if (existsSync(p)) {
-      writeLog('launch', `[RETROARCH] Trovato path assoluto: ${p}`);
+      writeLog('launch', `[RETROARCH] Found absolute path: ${p}`);
       return p;
     }
   }
@@ -466,12 +466,12 @@ function findRetroarchBin(): string | null {
   // Flatpak come ultima risorsa
   try {
     execSync('flatpak info org.libretro.RetroArch', { stdio: 'ignore' });
-    writeLog('launch', '[RETROARCH] Trovato come flatpak');
+    writeLog('launch', '[RETROARCH] Found as flatpak');
     return 'flatpak run org.libretro.RetroArch';
   } catch {}
 
   // Log diagnostico: mostra il PATH visto dal daemon
-  writeLog('warning', `[RETROARCH] Non trovato. PATH del daemon: ${process.env.PATH}`);
+  writeLog('warning', `[RETROARCH] Not found. Daemon's PATH: ${process.env.PATH}`);
   return null;
 }
 
@@ -518,11 +518,11 @@ export class RetroArchRunner extends BaseRunner {
     for (const dir of getCoreDirs()) {
       const candidate = path.join(dir, filename);
       if (existsSync(candidate)) {
-        writeLog('launch', `[RETROARCH] Core risolto: ${filename} → ${candidate}`);
+        writeLog('launch', `[RETROARCH] Core resolved: ${filename} → ${candidate}`);
         return candidate;
       }
     }
-    writeLog('warning', `[RETROARCH] Core non trovato: ${core} — passo il valore originale`);
+    writeLog('warning', `[RETROARCH] Core not found: ${core} — passing original value`);
     return expanded;
   }
 
@@ -534,7 +534,7 @@ export class RetroArchRunner extends BaseRunner {
 
     const resolvedCore = game.libretroCore ? this.resolveCore(game.libretroCore) : null;
     if (game.libretroCore && !resolvedCore) {
-      writeLog('warning', `[RETROARCH] Avvio senza core: ${game.libretroCore} non trovato`);
+      writeLog('warning', `[RETROARCH] Launching without core: ${game.libretroCore} not found`);
     }
 
     // flatpak run non accetta argomenti con spazi come singola stringa:
@@ -580,7 +580,7 @@ export class SteamNativeRunner extends BaseRunner {
     if (!game.steamAppId) {
       return { success: false, message: `Nessun Steam App ID per ${game.title}` };
     }
-    writeLog('launch', `[STEAM] Lancio via URI: steam://rungameid/${game.steamAppId}`);
+    writeLog('launch', `[STEAM] Launching via URI: steam://rungameid/${game.steamAppId}`);
     const { pid } = spawnDetached('steam', [`steam://rungameid/${game.steamAppId}`]);
     return { success: true, pid, message: `Steam: avvio ${game.title} (AppID ${game.steamAppId})` };
   }

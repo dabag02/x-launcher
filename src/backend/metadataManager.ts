@@ -334,10 +334,10 @@ class MetadataManager {
             enriched.previewImage = images.previewImage;
             writeLog('info', `[METADATA] ✅ Cover SGDB: ${searchTitle}`);
           } else {
-            writeLog('info', `[METADATA] ⚠ SGDB cover non trovata: ${searchTitle}`);
+            writeLog('info', `[METADATA] ⚠ SGDB cover not found: ${searchTitle}`);
           }
         } else {
-          writeLog('info', `[METADATA] ⚠ SGDB gioco non trovato: ${searchTitle}`);
+          writeLog('info', `[METADATA] ⚠ SGDB game not found: ${searchTitle}`);
         }
       }
 
@@ -345,7 +345,7 @@ class MetadataManager {
       if (!hasRealMetadata(game) && IGDB_CLIENT_ID) {
         const token = await getIgdbToken();
         if (!token) {
-          writeLog('warning', `[METADATA] ❌ IGDB token non ottenuto — verifica IGDB_CLIENT_ID e IGDB_CLIENT_SECRET`);
+          writeLog('warning', `[METADATA] ❌ IGDB token not obtained — check IGDB_CLIENT_ID and IGDB_CLIENT_SECRET`);
         } else {
           const igdbData = await igdbSearch(searchTitle);
           if (igdbData) {
@@ -353,9 +353,9 @@ class MetadataManager {
             if (!enriched.genres?.length && igdbData.genres?.length) enriched.genres = igdbData.genres.map(g => g.name);
             if (!enriched.description && igdbData.summary) enriched.description = igdbData.summary;
             if (!enriched.releaseDate && igdbData.first_release_date) enriched.releaseDate = new Date(igdbData.first_release_date * 1000).toISOString();
-            writeLog('info', `[METADATA] ✅ IGDB: ${game.title} — rating:${enriched.rating} generi:${enriched.genres?.join(',')}`);
+            writeLog('info', `[METADATA] ✅ IGDB: ${game.title} — rating:${enriched.rating} genres:${enriched.genres?.join(',')}`);
           } else {
-            writeLog('info', `[METADATA] ⚠ IGDB nessun risultato: ${game.title}`);
+            writeLog('info', `[METADATA] ⚠ IGDB no results: ${game.title}`);
           }
         }
       }
@@ -382,9 +382,9 @@ class MetadataManager {
 }
 
 // Log di avvio — conferma quali API sono configurate
-if (SGDB_KEY)                              writeLog('info', '[METADATA] SteamGridDB: ✅ API key configurata');
-else                                       writeLog('info', '[METADATA] SteamGridDB: ⚠ nessuna API key — cover placeholder');
-if (IGDB_CLIENT_ID && IGDB_CLIENT_SECRET)  writeLog('info', '[METADATA] IGDB: ✅ credenziali configurate');
-else                                       writeLog('info', '[METADATA] IGDB: ⚠ nessuna credenziale — metadati deterministici');
+if (SGDB_KEY)                              writeLog('info', '[METADATA] SteamGridDB: ✅ API key configured');
+else                                       writeLog('info', '[METADATA] SteamGridDB: ⚠ no API key — placeholder covers');
+if (IGDB_CLIENT_ID && IGDB_CLIENT_SECRET)  writeLog('info', '[METADATA] IGDB: ✅ credentials configured');
+else                                       writeLog('info', '[METADATA] IGDB: ⚠ no credentials — deterministic metadata');
 
 export const metadataManager = new MetadataManager();

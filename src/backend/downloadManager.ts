@@ -105,7 +105,7 @@ function fetchGogNumericId(slug: string): Promise<string | null> {
     let out = '';
     const timer = setTimeout(() => {
       proc.kill();
-      writeLog('warning', `[GOG] Lookup ID numerico per "${slug}" — timeout (30s), known-fixes saltato per questo titolo.`);
+      writeLog('warning', `[GOG] Numeric ID lookup for "${slug}" — timeout (30s), known-fixes skipped for this title.`);
       resolve(null);
     }, 30_000);
 
@@ -128,11 +128,11 @@ function fetchGogNumericId(slug: string): Promise<string | null> {
         if (id != null) {
           resolve(String(id));
         } else {
-          writeLog('warning', `[GOG] Lookup ID numerico per "${slug}" — JSON valido ma nessun campo id riconosciuto. Output grezzo: ${out.slice(0, 500)}`);
+          writeLog('warning', `[GOG] Numeric ID lookup for "${slug}" — valid JSON but no recognized id field. Raw output: ${out.slice(0, 500)}`);
           resolve(null);
         }
       } catch (e) {
-        writeLog('warning', `[GOG] Lookup ID numerico per "${slug}" fallito (parsing). Output grezzo: ${out.slice(0, 500)}`);
+        writeLog('warning', `[GOG] Numeric ID lookup for "${slug}" failed (parsing). Raw output: ${out.slice(0, 500)}`);
         resolve(null);
       }
     });
@@ -251,7 +251,7 @@ function filterVerbsForEnv(verbs: string[]): string[] {
   if (isVulkanAvailable()) return verbs;
   const skipped = verbs.filter(v => v === 'dxvk' || v === 'vkd3d');
   if (skipped.length > 0) {
-    writeLog('warning', `[WINETRICKS] Vulkan non disponibile — salto: ${skipped.join(', ')}`);
+    writeLog('warning', `[WINETRICKS] Vulkan not available — skipping: ${skipped.join(', ')}`);
   }
   return verbs.filter(v => v !== 'dxvk' && v !== 'vkd3d');
 }
@@ -681,8 +681,8 @@ class DownloadManager {
     // senso opposto (vedi gameManager.launchGame).
     if (this.runningGameChecker?.(gameId)) {
       const msg = `${title} è in esecuzione — chiudilo prima di reinstallare`;
-      writeLog('error', `[INSTALL] Bloccato — ${msg}`);
-      try { db.insertLog({ timestamp: new Date().toLocaleTimeString([], { hour12: false }), message: `[INSTALL] Bloccato — ${msg}`, type: 'error' }); } catch {}
+      writeLog('error', `[INSTALL] Blocked — ${msg}`);
+      try { db.insertLog({ timestamp: new Date().toLocaleTimeString([], { hour12: false }), message: `[INSTALL] Blocked — ${msg}`, type: 'error' }); } catch {}
       return { success: false, message: msg };
     }
 
@@ -771,12 +771,12 @@ class DownloadManager {
       if (resolvedBase.startsWith(resolvedRoot + path.sep) && existsSync(resolvedBase)) {
         try {
           rmSync(resolvedBase, { recursive: true, force: true });
-          writeLog('system', `[CANCEL] ${task.gameTitle}: dati parziali rimossi (${resolvedBase})`);
+          writeLog('system', `[CANCEL] ${task.gameTitle}: partial data removed (${resolvedBase})`);
         } catch (e) {
-          writeLog('error', `[CANCEL] ${task.gameTitle}: rimozione dati parziali fallita — ${e}`);
+          writeLog('error', `[CANCEL] ${task.gameTitle}: failed to remove partial data — ${e}`);
         }
       } else if (!resolvedBase.startsWith(resolvedRoot + path.sep)) {
-        writeLog('error', `[CANCEL] ${task.gameTitle}: path "${resolvedBase}" fuori da GAMES_ROOT — rimozione rifiutata per sicurezza.`);
+        writeLog('error', `[CANCEL] ${task.gameTitle}: path "${resolvedBase}" outside GAMES_ROOT — removal refused for safety.`);
       }
     }
   }

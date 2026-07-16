@@ -3075,3 +3075,17 @@ Fix: "Pulisci storico" spostato su una riga propria, sotto l'header, allineato a
 ### Verifica
 
 `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.65-rc.3 — MILESTONE: interfaccia interamente bilingue + unificazione log in inglese
+
+Due decisioni permanenti richieste dall'utente, valide da qui in avanti:
+1. Ogni nuova feature accompagnata da testo va realizzata in italiano E inglese per default — non più italiano-poi-tradotto-dopo.
+2. I log di debug (`writeLog`/`console.*`) restano **solo in inglese**, mai bilingue — la lingua franca dello sviluppo è l'inglese, tradurli o tenerli doppi non ha senso.
+
+**Unificazione log in inglese**: ~97 righe di log tradotte in 11 file del backend — `server.ts` (18), `runners/implementations.ts` (14), `metadataManager.ts` (9), `downloadManager.ts` (8), `plugins/gogPlugin.ts` (6), `plugins/epicPlugin.ts` (4), `plugins/classicPlugin.ts` (3), `aiProviders/orchestrator.ts` (3), `plugins/steamPlugin.ts` (3), `db.ts` (2), più 4 chiamate `console.error`/`console.log` sparse (`db.ts`, `knowledgeBase.ts`, `notificationEngine.ts` ×2). Verificato con un secondo giro di grep mirato su diacritici/parole italiane comuni: nessun residuo.
+
+**Chiusura milestone**: versione bump a `v1.1.65-rc.3` in `App.tsx`/`package.json`/`metadata.json` (che guadagna anche una nuova voce riassuntiva in `patches[]` e i campi `milestone`/`notes` aggiornati). Pacchetto ricreato come `X-Launcher_v1_1_65-rc_3.zip`, stesse esclusioni di `.gitignore` (`node_modules`, `dist`, file di stato/log locali, ecc.) — 132 file, 665KB.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. `metadata.json` validato. Zip verificato: `node_modules` assente, tutti i file chiave presenti (namespace i18n inclusi).

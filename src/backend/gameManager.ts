@@ -342,7 +342,7 @@ class GameManager {
         this.addLog(`[VALIDATE] ${before.gameTitle} chiuso — richiesta conferma funzionamento.`, 'system');
         notificationEngine.emit({ type: 'validation-prompt', gameId: before.gameId, gameTitle: before.gameTitle });
       } catch (err) {
-        writeLog('error', `[VALIDATE] Errore nel polling di chiusura: ${err instanceof Error ? err.message : String(err)}`);
+        writeLog('error', `[VALIDATE] Error while polling for close: ${err instanceof Error ? err.message : String(err)}`);
       }
     }, 4000);
   }

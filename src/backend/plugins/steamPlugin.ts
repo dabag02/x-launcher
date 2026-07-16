@@ -190,7 +190,7 @@ export class SteamPlugin extends StorePlugin {
   async getLibrary(): Promise<Game[]> {
     const steamRoot = findSteamRoot();
     if (!steamRoot) {
-      writeLog('info', '[STEAM] Client non trovato — restituisco array vuoto.');
+      writeLog('info', '[STEAM] Client not found — returning empty array.');
       return [];
     }
 
@@ -199,7 +199,7 @@ export class SteamPlugin extends StorePlugin {
     const steamId = process.env.STEAM_ID ?? getActiveSteamId(steamRoot) ?? '';
     let playtimeMap = new Map<string, number>();
     if (apiKey && steamId) {
-      writeLog('info', '[STEAM] Recupero ore di gioco via Web API...');
+      writeLog('info', '[STEAM] Fetching playtime via Web API...');
       playtimeMap = await fetchPlaytimeMap(steamId, apiKey);
     }
 
@@ -273,7 +273,7 @@ export class SteamPlugin extends StorePlugin {
       }
     }
 
-    writeLog('info', `[STEAM] ${games.length} titoli trovati in ${libraryPaths.length} librerie.`);
+    writeLog('info', `[STEAM] ${games.length} titles found across ${libraryPaths.length} libraries.`);
     return games;
   }
 

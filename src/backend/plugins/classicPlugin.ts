@@ -154,7 +154,7 @@ function ensureSystemFolders(romsRoot: string): void {
     try {
       mkdirSync(dir, { recursive: true });
     } catch (err) {
-      writeLog('warning', `[CLASSIC] Impossibile creare la cartella ${dir}: ${err}`);
+      writeLog('warning', `[CLASSIC] Could not create folder ${dir}: ${err}`);
     }
   }
 }
@@ -274,8 +274,8 @@ export class ClassicPlugin extends StorePlugin {
     mkdirSync(romsRoot, { recursive: true });
     ensureSystemFolders(romsRoot);
     if (justCreated) {
-      writeLog('info', `[CLASSIC] Cartella ROM creata: ${romsRoot}`);
-      writeLog('info', `[CLASSIC] Sottocartelle sistema generate — trascina le ROM in quella corrispondente.`);
+      writeLog('info', `[CLASSIC] ROM folder created: ${romsRoot}`);
+      writeLog('info', `[CLASSIC] System subfolders generated — drop ROMs into the matching one.`);
     }
 
     const games: Game[] = [];
@@ -304,7 +304,7 @@ export class ClassicPlugin extends StorePlugin {
       }
     }
 
-    writeLog('info', `[CLASSIC] ${games.length} ROM trovate in ${romsRoot}`);
+    writeLog('info', `[CLASSIC] ${games.length} ROMs found in ${romsRoot}`);
     for (const g of games) {
       writeLog('info', `[CLASSIC]   → ${g.id} | ${g.title} | ${g.runner} | core: ${g.libretroCore ?? 'auto'}`);
     }

@@ -39,7 +39,7 @@ export async function runAdvisor(
   const cleanedErrorText = deduplicateLog(errorText);
 
   if (!attemptTracker.canAttempt(gameId, cleanedErrorText)) {
-    writeLog('system', `[AI] Limite di ${MAX_AI_ATTEMPTS} tentativi già raggiunto per questo errore — nessuna nuova chiamata.`);
+    writeLog('system', `[AI] Limit of ${MAX_AI_ATTEMPTS} attempts already reached for this error — no new call.`);
     return {
       response: {
         kind: 'give_up',
@@ -88,7 +88,7 @@ export async function runAdvisor(
         'system',
         `[AI] ${provider.name}: ${response.kind}` +
         (response.kind === 'give_up' ? ` — ${response.reason}` : '') +
-        ` (${response.usage.inputTokens}+${response.usage.outputTokens} token)`
+        ` (${response.usage.inputTokens}+${response.usage.outputTokens} tokens)`
       );
 
       if (response.kind !== 'give_up') {
@@ -104,7 +104,7 @@ export async function runAdvisor(
       // base.ts) — difesa ulteriore comunque: un provider che viola il
       // contratto non deve interrompere il fallback verso gli altri, né
       // tantomeno far cadere il resto del daemon.
-      writeLog('error', `[AI] ${provider.name} ha violato il contratto askForFix (eccezione non gestita): ${err instanceof Error ? err.message : err}`);
+      writeLog('error', `[AI] ${provider.name} violated the askForFix contract (unhandled exception): ${err instanceof Error ? err.message : err}`);
     }
   }
 

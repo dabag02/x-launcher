@@ -22,6 +22,9 @@ __pycache__/
 .env.local
 *.local
 
+# File di backup (.bak, .bak0, .bak1, .bak2, ...)
+*.bak*
+
 # Editor/OS
 .vscode/
 .idea/
@@ -31,7 +34,3 @@ __pycache__/
 # Log locali
 *.log
 npm-debug.log*
-
-# File di backup (.bak, .bak0, .bak1, .bak2, ...) — aggiunto
-# automaticamente da upload-github.sh
-*.bak*
