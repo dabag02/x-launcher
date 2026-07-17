@@ -922,6 +922,12 @@ class GameManager {
     }
 
     this.addLog(`[DAEMON] Avvio ${game.title} via ${runner.name}`, 'system');
+    // v1.1.68 — registrato qui, non prima: tutti i controlli di blocco
+    // (non installato, lock installazione/gioco già attivo, plugin
+    // disabilitato) sono già stati superati a questo punto — un lancio
+    // bloccato non deve scavalcare un gioco realmente giocato di recente
+    // nella cronologia della tray.
+    db.recordGameLaunch(id);
 
     // Se il gioco ha una prefix e ci sono verbs nel profilo compat,
     // installa quelli eventualmente aggiunti post-installazione prima di avviare

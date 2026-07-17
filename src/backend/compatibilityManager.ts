@@ -1,8 +1,9 @@
 import { Game, CompatibilityProfile } from '../types';
 import { execSync, exec } from 'child_process';
-import { existsSync, readdirSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
+import { findSteamRoot, findAllLibraryPaths, parseVdf } from './plugins/steamPlugin';
 
 export interface CommunityFix {
   id: string;
@@ -23,13 +24,36 @@ export interface CommunityFix {
  */
 
 class CompatibilityManager {
-  // Cartelle dove Steam installa i build Proton
-  private readonly protonDirs = [
-    `${homedir()}/.steam/steam/steamapps/common`,
-    `${homedir()}/.local/share/Steam/steamapps/common`,
-    // Proton-GE via ProtonUp-Qt
-    `${homedir()}/.local/share/Steam/compatibilitytools.d`,
-  ];
+  // Bug segnalato dall'utente: un gioco Steam Windows-only (Limbo, senza
+  // versione nativa Linux) girava correttamente tramite Proton, eppure
+  // nessun runner Proton compariva né in Settings → System né nella
+  // sezione Runner Bridge dell'overlay. Causa: queste due cartelle
+  // coprono solo l'installazione DI DEFAULT di Steam — non le library
+  // folder aggiuntive (es. un secondo disco dedicato ai giochi, comune su
+  // un HTPC), dove Steam può installare la build Proton effettivamente
+  // usata per quel titolo. steamPlugin.ts aveva già la soluzione corretta
+  // per lo stesso identico problema applicato alla libreria giochi
+  // (findSteamRoot/findAllLibraryPaths, legge libraryfolders.vdf) — mai
+  // riusata qui, stesso bug in due punti diversi del codice. Calcolato a
+  // ogni chiamata (non in un campo di classe): l'elenco delle library
+  // folder può cambiare mentre l'app è in esecuzione (l'utente aggiunge/
+  // rimuove un disco da Steam), un valore calcolato una sola volta al
+  // costruttore l'avrebbe reso stantio.
+  private getProtonDirs(): string[] {
+    const steamRoot = findSteamRoot();
+    if (!steamRoot) {
+      // Fallback ai due percorsi storici se il rilevamento fallisce del
+      // tutto (Steam non trovato in nessuna delle posizioni note) — meglio
+      // di una lista vuota, comportamento identico a prima di questo fix.
+      return [
+        `${homedir()}/.steam/steam/steamapps/common`,
+        `${homedir()}/.local/share/Steam/steamapps/common`,
+        `${homedir()}/.local/share/Steam/compatibilitytools.d`,
+      ];
+    }
+    const commonDirs = findAllLibraryPaths(steamRoot).map(libPath => path.join(libPath, 'common'));
+    return [...commonDirs, path.join(steamRoot, 'compatibilitytools.d')];
+  }
 
   private communityFixes: CommunityFix[] = [
     {
@@ -55,12 +79,63 @@ class CompatibilityManager {
     },
   ];
 
+  // Step successivo a v1.1.66 — segnalato dall'utente: Steam elenca ogni
+  // Proton installato con un proprio appmanifest_<appid>.acf, ESATTAMENTE
+  // come fa per un gioco — non serve dedurne la presenza scansionando
+  // cartelle e cercando un file binario chiamato "proton" al suo interno
+  // (v1.1.66, ancora valido come fallback per Proton-GE via ProtonUp/
+  // download manuale, MAI tracciato da un appmanifest perché non
+  // "installato" da Steam stesso). steamPlugin.ts legge già questi stessi
+  // file per i giochi e SCARTA esplicitamente le voci che iniziano con
+  // "proton" (isSteamTool) — stesso dato, mai riusato qui finora.
+  private getInstalledProtonFromManifests(): Array<{ id: string; version: string; status: string }> {
+    const steamRoot = findSteamRoot();
+    if (!steamRoot) return [];
+    const found: Array<{ id: string; version: string; status: string }> = [];
+
+    for (const libPath of findAllLibraryPaths(steamRoot)) {
+      if (!existsSync(libPath)) continue;
+      let acfFiles: string[];
+      try {
+        acfFiles = readdirSync(libPath).filter(f => f.startsWith('appmanifest_') && f.endsWith('.acf'));
+      } catch { continue; }
+
+      for (const acfFile of acfFiles) {
+        try {
+          const parsed = parseVdf(readFileSync(path.join(libPath, acfFile), 'utf-8'));
+          const app    = parsed['AppState'] ?? parsed['appstate'] ?? {};
+          const name   = app['name'] ?? app['Name'] ?? '';
+          if (!name.toLowerCase().startsWith('proton')) continue;
+
+          // StateFlags: bit 2 (4) = completamente installato — stesso
+          // controllo già usato per i giochi in steamPlugin.ts.
+          const state = parseInt(app['StateFlags'] ?? '0', 10);
+          if ((state & 4) !== 4) continue;
+
+          found.push({ id: name, version: name, status: 'installed' });
+        } catch { /* .acf corrotto, saltiamo */ }
+      }
+    }
+    return found;
+  }
+
   /** Scansiona l'FS e restituisce i build Proton effettivamente installati */
   getAvailableRunners(): Array<{ id: string; version: string; status: string }> {
     const found: Array<{ id: string; version: string; status: string }> = [];
     const seen = new Set<string>();
 
-    for (const dir of this.protonDirs) {
+    // Prima gli ufficiali Steam, via appmanifest — canonico, copre il
+    // caso segnalato dall'utente.
+    for (const p of this.getInstalledProtonFromManifests()) {
+      if (seen.has(p.id)) continue;
+      seen.add(p.id);
+      found.push(p);
+    }
+
+    // Poi lo scan cartelle esistente — resta necessario per Proton-GE
+    // installato via ProtonUp-Qt o download manuale, che non genera mai
+    // un appmanifest.
+    for (const dir of this.getProtonDirs()) {
       if (!existsSync(dir)) continue;
       try {
         const entries = readdirSync(dir) as string[];
@@ -108,7 +183,11 @@ class CompatibilityManager {
     const geVersion = id.replace('Proton-GE-', 'GE-Proton');
     const tarName = `${geVersion}.tar.gz`;
     const url = `https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${geVersion}/${tarName}`;
-    const destDir = `${homedir()}/.local/share/Steam/compatibilitytools.d`;
+    // v1.1.66 — stessa correzione di getProtonDirs(): il percorso di
+    // Steam va rilevato, non assunto fisso su .local/share/Steam. Se
+    // findSteamRoot() non trova nulla, il fallback resta quello storico —
+    // comportamento identico a prima di questo fix in quel caso limite.
+    const destDir = path.join(findSteamRoot() ?? `${homedir()}/.local/share/Steam`, 'compatibilitytools.d');
 
     onLogging(`[COMPAT] Fetching: ${url}`);
     onLogging(`[COMPAT] Destinazione: ${destDir}`);
@@ -143,7 +222,8 @@ class CompatibilityManager {
    * è compito né responsabilità di questo comando.
    */
   async uninstallProton(id: string, onLogging: (msg: string) => void) {
-    const compatDir = `${homedir()}/.local/share/Steam/compatibilitytools.d`;
+    // v1.1.66 — stessa correzione di getProtonDirs()/downloadProton().
+    const compatDir = path.join(findSteamRoot() ?? `${homedir()}/.local/share/Steam`, 'compatibilitytools.d');
     const target = path.join(compatDir, id);
 
     if (!existsSync(target)) {

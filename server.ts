@@ -530,6 +530,14 @@ async function startServer() {
     res.json(result);
   });
 
+  // v1.1.68 — cronologia "ultimi giochi lanciati", consumata dal menu
+  // contestuale della tray (tray.py) per un lancio rapido col solo mouse.
+  // GET, non richiede stato: legge solo, non modifica nulla.
+  app.get("/api/games/recent", (req, res) => {
+    const limit = parseInt(String(req.query.limit ?? '3'), 10) || 3;
+    res.json(db.getRecentlyLaunched(limit));
+  });
+
   // Configurazione per-game (Step 1 — persiste su DB)
   app.patch("/api/games/:id/config", (req, res) => {
     const result = gameManager.updateGameConfig(req.params.id, req.body);

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=X-Launcher (gestore xlaunch://)
+Comment=Gestisce i link xlaunch://<id> per lanciare un gioco da fuori la Dashboard
+Exec=/opt/x-launcher/xlaunch-handler.sh %u
+Type=Application
+NoDisplay=true
+MimeType=x-scheme-handler/xlaunch;

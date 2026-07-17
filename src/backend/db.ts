@@ -91,6 +91,10 @@ db.exec(`
     verified              INTEGER NOT NULL DEFAULT 0,
     verified_at           TEXT,
     verification_method   TEXT,
+    -- v1.1.68 — cronologia "ultimi giochi lanciati" per il menu
+    -- contestuale della tray, vedi commento esteso nella migrazione qui
+    -- sotto per un DB già esistente.
+    last_launched_at      TEXT,
     updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -212,7 +216,19 @@ if (!existingCols.includes('verification_method')) {
 if (!existingCols.includes('system')) {
   db.exec("ALTER TABLE games ADD COLUMN system TEXT");
 }
-// Migration per compat_profiles
+// v1.1.68 — cronologia "ultimi giochi lanciati" per il menu contestuale
+// della tray (richiesta dall'utente, contestuale allo Step 19a
+// xlaunch://): fino ad ora il sistema tracciava solo l'ULTIMO gioco
+// lanciato, e solo in memoria (gameManager.lastLaunchedGame, usato per il
+// meccanismo hide/show della finestra) — non una cronologia persistita,
+// e non universale fra store (il campo LastPlayed letto da Steam è ore
+// di gioco totali, non un timestamp dell'ultima sessione, e comunque solo
+// per Steam). Nullable: i giochi mai lanciati restano NULL, non 0/vuoto —
+// altrimenti finirebbero "primi" in un ordinamento ASC insieme a giochi
+// mai effettivamente giocati.
+if (!existingCols.includes('last_launched_at')) {
+  db.exec("ALTER TABLE games ADD COLUMN last_launched_at TEXT");
+}
 const compatCols = (db.prepare("PRAGMA table_info(compat_profiles)").all() as any[]).map(r => r.name);
 if (!compatCols.includes('winetricks_verbs')) {
   db.exec("ALTER TABLE compat_profiles ADD COLUMN winetricks_verbs TEXT");
@@ -493,6 +509,31 @@ export function getAllGames(): Game[] {
 export function getGameById(id: string): Game | undefined {
   const row = db.prepare('SELECT * FROM games WHERE id = ?').get(id) as any;
   return row ? rowToGame(row) : undefined;
+}
+
+// v1.1.68 — cronologia "ultimi giochi lanciati", per il menu contestuale
+// della tray. Chiamata da gameManager.launchGame() solo quando il lancio
+// supera tutti i controlli (installato, nessun lock attivo) — non ad ogni
+// tentativo, altrimenti un lancio bloccato/fallito scavalcherebbe un
+// gioco realmente giocato di recente.
+export function recordGameLaunch(id: string): void {
+  db.prepare(`UPDATE games SET last_launched_at = datetime('now') WHERE id = ?`).run(id);
+}
+
+/**
+ * getRecentlyLaunched — gli ultimi N giochi lanciati, più recente prima.
+ * Solo giochi con last_launched_at valorizzato (mai lanciati esclusi, non
+ * mostrati come "recenti" solo perché in cima a un ordinamento NULL-first
+ * di SQLite) e ancora effettivamente installati (un gioco disinstallato
+ * dopo l'ultimo lancio non ha senso riproporlo come scorciatoia rapida).
+ */
+export function getRecentlyLaunched(limit = 3): Array<{ id: string; title: string }> {
+  return db.prepare(`
+    SELECT id, title FROM games
+    WHERE last_launched_at IS NOT NULL AND is_installed = 1
+    ORDER BY last_launched_at DESC
+    LIMIT ?
+  `).all(limit) as any[];
 }
 
 export function updateGameStatus(id: string, isInstalled: boolean, status: Game['status']): void {

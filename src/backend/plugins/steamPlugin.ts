@@ -36,7 +36,7 @@ const PREVIEW_PLACEHOLDER = 'https://images.unsplash.com/photo-1614850523296-d8c
 // Non usiamo librerie esterne per non aggiungere dipendenze.
 // ---------------------------------------------------------------------------
 
-function parseVdf(content: string): Record<string, any> {
+export function parseVdf(content: string): Record<string, any> {
   const result: Record<string, any> = {};
   const lines = content.split('\n');
   const stack: Record<string, any>[] = [result];
@@ -81,11 +81,11 @@ function parseVdf(content: string): Record<string, any> {
 // Lettura librerie aggiuntive da libraryfolders.vdf
 // ---------------------------------------------------------------------------
 
-function findSteamRoot(): string | null {
+export function findSteamRoot(): string | null {
   return STEAM_ROOTS.find(p => existsSync(path.join(p, 'steamapps'))) ?? null;
 }
 
-function findAllLibraryPaths(steamRoot: string): string[] {
+export function findAllLibraryPaths(steamRoot: string): string[] {
   const paths: string[] = [path.join(steamRoot, 'steamapps')];
 
   const vdfPath = path.join(steamRoot, 'steamapps', 'libraryfolders.vdf');

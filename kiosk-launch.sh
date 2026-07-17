@@ -73,8 +73,18 @@ done
 TRAY_VENV="$PROJECT_DIR/.venv-tray"
 if [ -x "$TRAY_VENV/bin/python3" ] && [ -f "$PROJECT_DIR/tray.py" ]; then
   if ! pgrep -f "tray.py" &>/dev/null; then
-    "$TRAY_VENV/bin/python3" "$PROJECT_DIR/tray.py" &>/dev/null &
-    echo "[KIOSK] Systray avviato (PID $!)."
+    # v1.1.71 — segnalato dall'utente: &>/dev/null qui buttava via
+    # QUALUNQUE traceback o messaggio diagnostico da tray.py, rendendo
+    # impossibile capire perché l'icona non comparisse in systray dopo
+    # v1.1.68/70 — si andava alla cieca per davvero, non per mancanza di
+    # log da parte di tray.py (che ne stampa parecchi), ma perché
+    # finivano tutti su /dev/null. File di log persistente invece —
+    # sovrascritto ad ogni avvio (>​ non >>), così non cresce
+    # indefinitamente e mostra sempre solo l'ultima sessione.
+    TRAY_LOG="${XDG_DATA_HOME:-$HOME/.local/share}/x-launcher/tray.log"
+    mkdir -p "$(dirname "$TRAY_LOG")"
+    "$TRAY_VENV/bin/python3" "$PROJECT_DIR/tray.py" >"$TRAY_LOG" 2>&1 &
+    echo "[KIOSK] Systray avviato (PID $!). Log: $TRAY_LOG"
   else
     echo "[KIOSK] Systray già attivo — skip."
   fi
@@ -166,6 +176,12 @@ trap restore_xfwm4_titleless EXIT
 
 maybe_enable_xfwm4_titleless() {
   if [ "$X_LAUNCHER_DEDICATED_SESSION" = "true" ]; then return; fi 
+  # Step 19a (v1.1.69) — stesso principio del guard in
+  # focus_dashboard_window: se la finestra resterà nascosta, non ha senso
+  # mettere i pannelli XFCE in autohide/titleless per lei — rischierebbe
+  # anzi un flicker visibile dei pannelli proprio mentre l'utente sta
+  # giocando, l'esatta interferenza che questa funzionalità deve evitare.
+  if [ "$X_LAUNCHER_START_HIDDEN" = "true" ]; then return; fi 
   if command -v xfconf-query &>/dev/null; then 
     XFWM4_TITLELESS_SAVED="$(xfconf-query -c xfwm4 -p /general/titleless_maximize 2>/dev/null)" 
     [ -z "$XFWM4_TITLELESS_SAVED" ] && XFWM4_TITLELESS_SAVED="false" 
@@ -183,6 +199,14 @@ maybe_enable_xfwm4_titleless() {
 
 focus_dashboard_window() {
   if [ "$X_LAUNCHER_DEDICATED_SESSION" = "true" ]; then return; fi 
+  # Step 19a (v1.1.69) — xlaunch://: quando la Dashboard viene avviata solo
+  # per servire un lancio esterno, deve restare nascosta (vedi
+  # xlaunch-handler.sh, che la nasconde subito dopo l'apertura) — questo
+  # richiamo in primo piano andrebbe altrimenti in corsa diretta con
+  # quell'hide, vincendo o perdendo a seconda del timing. Un solo punto di
+  # guardia qui, invece di avvolgere le tre chiamate a questa funzione più
+  # sotto: più semplice da mantenere, stesso effetto.
+  if [ "$X_LAUNCHER_START_HIDDEN" = "true" ]; then return; fi 
   if command -v wmctrl &>/dev/null; then 
     sleep 1 
     for _ in $(seq 1 10); do 

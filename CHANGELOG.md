@@ -3089,3 +3089,121 @@ Due decisioni permanenti richieste dall'utente, valide da qui in avanti:
 ### Verifica
 
 `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. `metadata.json` validato. Zip verificato: `node_modules` assente, tutti i file chiave presenti (namespace i18n inclusi).
+
+## v1.1.66 — bugfix: rilevamento Proton su library folder Steam multiple
+
+Segnalato dall'utente: Limbo (Steam, senza versione nativa Linux) girava correttamente tramite Proton, ma nessun runner Proton compariva né in Settings → System né nella sezione Runner Bridge dell'overlay Game Options.
+
+Causa trovata verificando `compatibilityManager.ts`: le due cartelle scansionate per i Proton ufficiali di Steam (`~/.steam/steam/steamapps/common`, `~/.local/share/Steam/steamapps/common`) coprono solo l'installazione **di default** di Steam — non le library folder aggiuntive (es. un secondo disco dedicato ai giochi, comune su un HTPC), dove Steam può installare la build Proton effettivamente usata per un titolo specifico. `steamPlugin.ts` aveva già la soluzione corretta per lo stesso identico problema applicato alla libreria giochi (`findSteamRoot()`/`findAllLibraryPaths()`, che legge `libraryfolders.vdf` per enumerare tutte le library folder configurate in Steam) — mai riusata in `compatibilityManager.ts`, stesso bug irrisolto in due punti diversi del codice.
+
+Fix: le due funzioni esportate da `steamPlugin.ts`, riusate in `compatibilityManager.ts` per costruire dinamicamente l'elenco delle cartelle da scansionare (`getProtonDirs()`, calcolato ad ogni chiamata, non in un campo di classe — l'elenco delle library folder può cambiare mentre l'app è in esecuzione). Stessa correzione applicata anche a `downloadProton()` e `uninstallProton()`, che assumevano `~/.local/share/Steam` come unico percorso possibile per `compatibilitytools.d` — ora usano la steam root effettivamente rilevata, con lo stesso fallback storico se il rilevamento fallisce del tutto.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti (inclusi due già presenti in `compatibilityManager.ts` prima di questo fix, non introdotti da esso), nessun errore nuovo.
+
+## v1.1.67 — bugfix: rilevamento Proton via appmanifest (.acf), non solo scan cartelle
+
+Osservazione dell'utente, corretta e più semplice del fix precedente: Steam elenca ogni Proton installato con un proprio `appmanifest_<appid>.acf`, esattamente come fa per un gioco — non serve dedurne la presenza scansionando cartelle alla ricerca di un file binario chiamato `proton`. `steamPlugin.ts` legge già questi stessi file per popolare la libreria giochi, e scarta esplicitamente (`isSteamTool`) le voci il cui nome inizia per "proton" — lo stesso identico dato che serviva qui, mai riusato.
+
+Nuovo metodo `getInstalledProtonFromManifests()` in `compatibilityManager.ts`: riusa `findAllLibraryPaths()` (già esportata in v1.1.66) per leggere gli `appmanifest_*.acf` di tutte le library folder, filtra quelli il cui nome inizia per "proton" e il cui `StateFlags` indica installazione completa (bit 2, stesso controllo già usato per i giochi), restituendoli come runner disponibili — canonico, niente scan del filesystem alla cieca.
+
+Il vecchio scan cartelle (v1.1.66) **resta**, non sostituito: copre Proton-GE installato via ProtonUp-Qt o download manuale da GitHub, che non genera mai un appmanifest perché non è "installato" da Steam stesso — le due fonti sono unite in `getAvailableRunners()` con deduplicazione per nome.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.68 — tray: cronologia ultimi 3 giochi lanciati nel menu contestuale
+
+Richiesta dall'utente durante la discussione preliminare su Step 19a (`xlaunch://`): utile in un contesto d'uso desktop poter rilanciare al volo un gioco frequente col solo mouse, senza riportare in primo piano l'intera Dashboard.
+
+**Backend**: nuova colonna nullable `last_launched_at` su `games` (stesso pattern di migrazione PRAGMA table_info + ALTER TABLE già in uso altrove). `db.recordGameLaunch(id)` chiamata da `gameManager.launchGame()` **solo dopo** tutti i controlli di blocco (non installato, lock installazione/gioco già attivo, plugin disabilitato) — un lancio bloccato non deve scavalcare un gioco realmente giocato di recente. `db.getRecentlyLaunched(limit)` esclude sia i giochi mai lanciati (`last_launched_at IS NULL`) sia quelli nel frattempo disinstallati. Nuovo endpoint `GET /api/games/recent?limit=3`, di sola lettura.
+
+**Tray (`tray.py`)**: nuovo sottomenu "Giochi recenti", costruito come funzione generatrice passata a `pystray.Menu` (non una lista già pronta) — pystray la richiama ad ogni apertura del menu, quindi la cronologia mostrata è sempre quella corrente, non quella al momento dell'avvio del tray. Ogni voce cliccata chiama `POST /api/launch` — lo stesso identico endpoint già usato dal pulsante Play della Dashboard, nessuna logica di lancio duplicata nel tray.
+
+**Bonus nello stesso passaggio**: le due voci di menu preesistenti ("Mostra/Nascondi Dashboard", "Esci dal tray") non erano mai state toccate dalla convenzione bilingue adottata durante Step 19b, essendo native Python fuori dal sistema i18next del frontend. Tradotte ora insieme alle nuove, per non introdurre la stessa incoerenza (solo il testo nuovo bilingue, quello vecchio no) risolta per l'intera UI web in questa sessione — lingua letta una sola volta all'avvio da `/api/config` (stesso campo già esposto per il frontend), nessun bisogno di un sistema i18n completo per poche stringhe native.
+
+**Nota onesta**: il comportamento dinamico del sottomenu pystray (rigenerato ad ogni apertura tramite funzione generatrice) segue il pattern documentato della libreria ma non è stato verificato con un test dal vivo in questo ambiente (nessun server X/tray disponibile) — stesso avvertimento già presente nel modulo per la gestione XFixes del cursore.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `db.ts`/`gameManager.ts`/`server.ts` nei punti toccati). `python3 -m py_compile tray.py`: sintassi valida.
+
+## v1.1.69 — Step 19a: protocollo `xlaunch://`
+
+Primo pezzo implementativo dopo la discussione preliminare di design (vedi X-Launcher-Roadmap.md, sezione 19a, per il ragionamento completo). Come concordato: nessuna nuova logica di lancio — `xlaunch://<id>` delega interamente a `POST /api/launch`, lo stesso endpoint già usato dal pulsante Play della Dashboard.
+
+**Nuovo file `xlaunch-handler.sh`**: lo script effettivamente invocato dal sistema quando un link `xlaunch://<id>` viene cliccato. Estrae l'id dall'URI, verifica se daemon e finestra sono già attivi; se la finestra non esiste, avvia `kiosk-launch.sh` in background e la nasconde **subito dopo che compare**, prima che l'utente possa vederla — poi, in ogni caso, chiama `POST /api/launch` con l'id.
+
+**Conflitto scoperto e risolto discutendone con l'utente prima di scrivere codice**: `kiosk-launch.sh` già richiama attivamente la finestra in primo piano per alcuni secondi dopo l'avvio (`focus_dashboard_window`), e mette i pannelli XFCE in autohide/titleless per l'occasione (`maybe_enable_xfwm4_titleless`) — entrambi andrebbero in corsa diretta con "la finestra deve restare nascosta". Deciso di riusare `kiosk-launch.sh` invariato nella sua logica di avvio (niente duplicazione), aggiungendo una singola variabile d'ambiente, `X_LAUNCHER_START_HIDDEN=true`, controllata all'inizio di entrambe le funzioni per saltarle quando l'avvio è per un lancio esterno nascosto.
+
+**Registrazione a livello di sistema**: nuovo `xlaunch-protocol.desktop` (`MimeType=x-scheme-handler/xlaunch`), installato in `/usr/share/applications/` da `install.sh` (esteso, non un nuovo script) insieme alla registrazione `xdg-mime default` — eseguita esplicitamente come l'utente reale (`$SUDO_USER`, non root: altrimenti finirebbe nel `mimeapps.list` di root invece che dell'utente che userà davvero X-Launcher).
+
+### Verifica
+
+`bash -n` su `kiosk-launch.sh`/`xlaunch-handler.sh`/`install.sh`: sintassi valida su tutti e tre. Non testato dal vivo in questo ambiente (nessun server X/D-Bus/xdg-mime disponibile qui) — da verificare su hardware reale, in particolare il timing della corsa fra apertura finestra e `wmctrl -r ... add,hidden`.
+
+## v1.1.70 — fix regressione: icona tray sparita dopo v1.1.68
+
+Segnalato dall'utente: dopo aver applicato v1.1.68 (sottomenu "Giochi recenti"), l'icona del demone tray smetteva di comparire nella systray — pur con `tray.py` ancora vivo e funzionante (hide/show della finestra durante il gioco continuava a funzionare correttamente, prova che il processo non era crashato).
+
+**Causa probabile**: il sottomenu era costruito passando una funzione generatrice a `pystray.Menu` — pattern di "menu pigro" documentato da pystray, rivalutato ad ogni apertura. Il backend AppIndicator, tipicamente usato su XFCE per la systray, si aspetta un menu GTK completamente costruito in anticipo, non generato al volo; con un menu "pigro" annidato, sembra fallire silenziosamente nel render dell'icona stessa, non solo del sottomenu — coerente con quanto osservato.
+
+**Fix**: sottomenu ricostruito **staticamente**, valutando `fetch_recent_games()` subito invece che in una funzione generatrice. Per mantenerlo comunque aggiornato senza il pattern "pigro", `poll_loop` (già in esecuzione ogni 2s per governare l'hide/show del gioco) ora ricostruisce l'intero menu (`icon.menu = build_menu(); icon.update_menu()`) ogni 5 tick (~10s) — pattern cross-backend esplicitamente documentato da pystray per contenuto dinamico, a differenza del menu "pigro" che sembra non esserlo. Il refresh periodico è avvolto in un try/except che non deve mai far cadere il thread di polling: un aggiornamento menu fallito non deve compromettere la funzione più importante di quel loop (nascondere la finestra durante il gioco).
+
+**Nota onesta**: la causa esatta (backend AppIndicator specificamente) è un'ipotesi ragionata sul comportamento osservato, non verificata con un test dal vivo in questo ambiente (nessun server X qui) — ma il fix (menu statico ricostruito periodicamente) è comunque il pattern più sicuro e documentato indipendentemente dalla causa esatta, quindi vale la pena applicarlo a prescindere.
+
+### Verifica
+
+`python3 -m py_compile tray.py`: sintassi valida. Nessun riferimento residuo al vecchio pattern a funzione generatrice.
+
+## v1.1.71 — diagnostica tray: trovata la causa reale del silenzio
+
+Segnalato dall'utente con log alla mano dopo che il fix v1.1.70 non aveva risolto il problema: giustamente ha chiesto strumenti di diagnosi invece di ulteriori tentativi al buio.
+
+**Causa reale trovata**: `kiosk-launch.sh` avvia `tray.py` con `&>/dev/null` — **qualunque** output, incluso un traceback Python completo in caso di eccezione, veniva buttato via, sempre. L'ipotesi AppIndicator di v1.1.70 poteva essere giusta o sbagliata, semplicemente non c'era modo di saperlo: non si stava "andando alla cieca" per mancanza di log da parte di `tray.py` (che già ne stampava), ma perché finivano tutti su `/dev/null` prima ancora di poter essere letti.
+
+**Fix**:
+- `kiosk-launch.sh`: l'output di `tray.py` ora va su `~/.local/share/x-launcher/tray.log` (sovrascritto ad ogni avvio, non accumulato all'infinito), non più su `/dev/null`.
+- `tray.py`: aggiunta diagnostica esplicita in `main()` — versione pystray, `DISPLAY`/`XDG_SESSION_TYPE`/`DBUS_SESSION_BUS_ADDRESS`, lingua rilevata, e soprattutto **quale backend concreto pystray ha scelto** (`type(icon).__module__` — AppIndicator/GTK/XOrg hanno requisiti di sistema diversi, es. AppIndicator richiede uno StatusNotifierHost nel pannello come `xfce4-statusnotifier-plugin`, non presente di default nella "Notification Area" base di XFCE che supporta solo il protocollo XEmbed legacy).
+- `if __name__ == "__main__":` ora avvolge `main()` in un try/except che stampa il traceback completo di qualunque eccezione non gestita altrove, invece di terminare in silenzio.
+- `sys.stdout`/`stderr` impostati a line-buffered fin dall'inizio dello script: un output reindirizzato su file normalmente bufferizza a blocchi, non riga per riga — se il processo terminasse bruscamente, gli ultimi log rischiavano di non arrivare mai al file, lo stesso tipo di "buco" diagnostico appena risolto in `kiosk-launch.sh`.
+
+**Refuso corretto nello stesso passaggio**: un commento scritto per errore in stile C (`//`) invece che Python (`#`) nel primo giro di scrittura di questa modifica — avrebbe causato un errore di sintassi. Preso dalla verifica di sintassi che precede ogni consegna, non arrivato all'utente.
+
+### Verifica
+
+`python3 -m py_compile tray.py`: sintassi valida. `bash -n kiosk-launch.sh`: sintassi valida.
+
+## v1.1.72 — trovato e corretto il vero crash (grazie alla diagnostica v1.1.71)
+
+La diagnostica aggiunta in v1.1.71 ha funzionato esattamente come doveva: il traceback fornito dall'utente ha rivelato il crash reale al primo avvio, mai visibile prima per via di `&>/dev/null`.
+
+```
+ValueError: <function build_recent_games_menu_items.<locals>.<lambda> at 0x...>
+```
+
+**Causa esatta**: pystray valida ogni azione di `MenuItem` contando gli argomenti con `action.__code__.co_argcount`, accettando solo 0, 1 o 2 — e conta **anche i parametri con un valore di default**, non solo quelli obbligatori. Il codice di v1.1.68/70 catturava l'id del gioco nel ciclo con `lambda icon, item, gid=g["id"]: launch_game(gid)` — un trucco comune per evitare la classica insidia delle closure in un loop, ma che pystray vede come 3 argomenti totali e rifiuta con un `ValueError`, mandando in crash l'intero tray al primo avvio (non un problema di backend AppIndicator come ipotizzato in v1.1.70, che restava comunque un fix ragionevole a prescindere).
+
+**Fix**: sostituita la lambda con parametro di default con una vera closure tramite funzione factory (`_make_launch_callback(game_id)`, che restituisce un `callback(icon, item)` con `game_id` catturato dalla funzione circostante) — la firma risultante ha esattamente 2 argomenti, il caso esplicitamente accettato da pystray.
+
+**Verificato con un test isolato**, non solo per ragionamento sul codice: script Python separato che importa `pystray._base` direttamente (bypassando la selezione del backend, che in questo ambiente sandbox fallisce per mancanza di GTK) e costruisce `MenuItem` sia con il vecchio pattern sia con quello nuovo — confermato che il vecchio solleva lo stesso identico `ValueError` del traceback dell'utente, e il nuovo non solleva nulla.
+
+### Verifica
+
+`python3 -m py_compile tray.py`: sintassi valida. Test isolato con `pystray._base.MenuItem`: vecchio pattern → `ValueError` riprodotto; nuovo pattern → nessun errore.
+
+## v1.1.73 — Step 19a: campo "Steam App ID" reso contestuale, id visibile per testare xlaunch://
+
+Richiesta dall'utente: senza un modo comodo per vedere l'id interno di un gioco, testare `xlaunch://<id>` richiedeva aprire il database o i log a mano. Il campo "Steam App ID" nel Game Config era già lì, ma **sempre mostrato come tale anche per giochi non-Steam**, dove non ha mai significato nulla (mai usato, mai valorizzato) — occasione naturale per riusarlo invece di aggiungere un campo nuovo.
+
+**Per giochi Steam**: invariato, resta "Steam App ID" modificabile (apre la tastiera virtuale, stesso comportamento di sempre).
+
+**Per tutti gli altri store**: diventa "xlaunch:// App ID", di sola lettura, con l'id interno della Dashboard (`selectedGame.id`) — lo stesso valore da usare dopo `xlaunch://` per un test. Nessuna tastiera virtuale (non è un campo modificabile): Invio copia l'id negli appunti (`navigator.clipboard.writeText`), con un tooltip che lo indica esplicitamente.
+
+Le due etichette restano invariate in entrambe le lingue (nomi tecnici/di protocollo, stesso principio già applicato a "Runner Bridge"/"RetroArch Core"); il tooltip "Invio per copiare", genuinamente conversazionale, tradotto secondo la convenzione bilingue adottata in questa sessione.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.

@@ -32,6 +32,14 @@ set -e
 INSTALL_DIR="/opt/x-launcher"
 BIN_LINK="/usr/local/bin/x-launcher"
 SESSION_FILE="/usr/share/xsessions/xlauncher.desktop"
+# Step 19a (v1.1.69) — protocollo xlaunch://. Il .desktop del gestore va
+# in /usr/share/applications (scoperto da xdg-mime per tutti gli utenti
+# del sistema, stessa logica di FHS già seguita per INSTALL_DIR), ma la
+# registrazione "questo .desktop gestisce questo scheme" (xdg-mime
+# default) è per-utente — non ha senso farla come root, altrimenti
+# finirebbe nel mimeapps.list di root, non dell'utente che userà
+# davvero X-Launcher. Da qui SUDO_USER più sotto.
+XLAUNCH_DESKTOP_FILE="/usr/share/applications/xlaunch-protocol.desktop"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$EUID" -ne 0 ]; then
@@ -45,6 +53,8 @@ if [ "$1" = "--uninstall" ]; then
   rm -rf "$INSTALL_DIR"
   rm -f "$BIN_LINK"
   rm -f "$SESSION_FILE"
+  rm -f "$XLAUNCH_DESKTOP_FILE"
+  update-desktop-database /usr/share/applications 2>/dev/null || true
   echo "[INSTALL] Rimosso. Le impostazioni utente in ~/.local/share/x-launcher NON sono state toccate (sono per-utente, non riguardano l'installazione globale)."
   exit 0
 fi
@@ -83,10 +93,30 @@ ln -sf "$INSTALL_DIR/kiosk-launch.sh" "$BIN_LINK"
 echo "[INSTALL] Installo la sessione LightDM in ${SESSION_FILE}..."
 cp "$INSTALL_DIR/xlauncher.desktop" "$SESSION_FILE"
 
+echo "[INSTALL] Registro il protocollo xlaunch:// in ${XLAUNCH_DESKTOP_FILE}..."
+cp "$INSTALL_DIR/xlaunch-protocol.desktop" "$XLAUNCH_DESKTOP_FILE"
+update-desktop-database /usr/share/applications 2>/dev/null || true
+
+# xdg-mime default va eseguito dall'utente reale, non da root (scrive in
+# ~/.config/mimeapps.list DELL'UTENTE CHE LO ESEGUE) — SUDO_USER è
+# valorizzato automaticamente da sudo con l'utente che ha invocato lo
+# script, non root stesso.
+if [ -n "${SUDO_USER:-}" ] && command -v xdg-mime &>/dev/null; then
+  echo "[INSTALL] Imposto ${SUDO_USER} come gestore predefinito di xlaunch:// (xdg-mime)..."
+  sudo -u "$SUDO_USER" xdg-mime default xlaunch-protocol.desktop x-scheme-handler/xlaunch
+elif ! command -v xdg-mime &>/dev/null; then
+  echo "[INSTALL] xdg-mime non trovato — installa il pacchetto xdg-utils, poi esegui manualmente:"
+  echo "[INSTALL]   xdg-mime default xlaunch-protocol.desktop x-scheme-handler/xlaunch"
+else
+  echo "[INSTALL] Impossibile determinare l'utente reale (SUDO_USER non impostato) — registra manualmente con:"
+  echo "[INSTALL]   xdg-mime default xlaunch-protocol.desktop x-scheme-handler/xlaunch"
+fi
+
 echo ""
 echo "[INSTALL] Completato."
 echo "[INSTALL] - Avvio da riga di comando, qualunque cartella: x-launcher"
 echo "[INSTALL] - Sessione dedicata: selezionabile dal menu sessioni alla schermata di login LightDM."
+echo "[INSTALL] - Link xlaunch://<id-gioco> (da browser, script esterni, altre integrazioni) ora avviano il gioco direttamente, aprendo la Dashboard nascosta in background se non è già in esecuzione."
 echo "[INSTALL] - Per disinstallare: sudo ${INSTALL_DIR}/install.sh --uninstall (oppure rilancia questo script con --uninstall)"
 echo ""
 echo "[INSTALL] Integrazione Steam (opzionale, separata — richiede Steam già autenticato almeno una volta):"

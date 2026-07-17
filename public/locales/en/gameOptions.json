@@ -30,5 +30,6 @@
   "useKnownFixesLabel": "Use Known Fixes (Heroic)",
   "useKnownFixesDesc": "Looks up known dependencies for this game in Heroic Games Launcher's public database before installation. If found, they replace the verbs configured below. If the game isn't covered, you'll get a notification and the default verbs will be used.",
   "uninstall": "UNINSTALL",
-  "install": "INSTALL"
+  "install": "INSTALL",
+  "pressEnterToCopy": "Press Enter to copy"
 }

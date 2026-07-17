@@ -661,7 +661,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.1.65-rc.3');
+  const [appVersion, setAppVersion] = useState('v1.1.73');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -7063,38 +7063,84 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       </Focusable>
                     </label>
                     <label className="block">
-                      <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">Steam App ID</span>
-                      <Focusable
-                        group="game-options"
-                        id="field-steamAppId"
-                        onEnter={() => openKeyboardForField(
-                          'field-steamAppId',
-                          'Steam App ID',
-                          localGameConfig.steamAppId ?? '',
-                          async (val) => {
-                            setLocalGameConfig(prev => ({ ...prev, steamAppId: val }));
-                            await fetch(`/api/games/${selectedGame.id}/config`, {
-                              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ steamAppId: val || null })
-                            });
-                            setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, steamAppId: val || undefined } : g));
-                          }
-                        )}
-                      >
-                        {(isFocused) => (
-                          <input
-                            type="text"
-                            readOnly
-                            value={localGameConfig.steamAppId ?? ''}
-                            placeholder="es. 292030"
-                            className={cn(
-                              "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
-                              theme === 'dark' ? "bg-black/40" : "bg-white",
-                              isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                      {/* Step 19a (v1.1.73) — richiesta dall'utente: prima
+                          questo campo era sempre "Steam App ID", anche per
+                          giochi non-Steam dove non significa nulla (mai
+                          usato, mai valorizzato). Reso contestuale: per
+                          Steam resta esattamente come prima (modificabile,
+                          apre la tastiera virtuale); per tutti gli altri
+                          store diventa un campo di sola lettura con l'id
+                          interno della Dashboard — lo stesso che va dopo
+                          "xlaunch://" per testare un lancio esterno, prima
+                          impossibile da vedere senza aprire il database o
+                          i log a mano. */}
+                      {selectedGame.store === 'Steam' ? (
+                        <>
+                          <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">Steam App ID</span>
+                          <Focusable
+                            group="game-options"
+                            id="field-steamAppId"
+                            onEnter={() => openKeyboardForField(
+                              'field-steamAppId',
+                              'Steam App ID',
+                              localGameConfig.steamAppId ?? '',
+                              async (val) => {
+                                setLocalGameConfig(prev => ({ ...prev, steamAppId: val }));
+                                await fetch(`/api/games/${selectedGame.id}/config`, {
+                                  method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ steamAppId: val || null })
+                                });
+                                setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, steamAppId: val || undefined } : g));
+                              }
                             )}
-                          />
-                        )}
-                      </Focusable>
+                          >
+                            {(isFocused) => (
+                              <input
+                                type="text"
+                                readOnly
+                                value={localGameConfig.steamAppId ?? ''}
+                                placeholder="es. 292030"
+                                className={cn(
+                                  "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
+                                  theme === 'dark' ? "bg-black/40" : "bg-white",
+                                  isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                )}
+                              />
+                            )}
+                          </Focusable>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">xlaunch:// App ID</span>
+                          <Focusable
+                            group="game-options"
+                            id="field-steamAppId"
+                            onEnter={() => {
+                              // Nessuna tastiera virtuale: non è un campo
+                              // modificabile, è l'id reale del gioco —
+                              // l'unica azione sensata su Invio è copiarlo,
+                              // per incollarlo altrove (es. un link
+                              // xlaunch://<id> da testare).
+                              navigator.clipboard?.writeText(selectedGame.id).catch(() => {});
+                              play('select');
+                            }}
+                          >
+                            {(isFocused) => (
+                              <input
+                                type="text"
+                                readOnly
+                                value={selectedGame.id}
+                                title={t('gameOptions:pressEnterToCopy')}
+                                className={cn(
+                                  "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer select-all",
+                                  theme === 'dark' ? "bg-black/40 text-white/70" : "bg-white text-gray-600",
+                                  isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                )}
+                              />
+                            )}
+                          </Focusable>
+                        </>
+                      )}
                     </label>
                     {selectedGame.runner === 'DOSBox' && (
                       <label className="block">
