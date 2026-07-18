@@ -3207,3 +3207,17 @@ Le due etichette restano invariate in entrambe le lingue (nomi tecnici/di protoc
 ### Verifica
 
 `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.74 — Step 19a: fix bug reale trovato dall'utente testando l'avvio a freddo
+
+Testato dall'utente sia con Dashboard già aperta sia con avvio "a freddo" via `xlaunch://`: nel secondo caso, l'avvio nascosto funzionava correttamente (nessuna interferenza col gioco), ma alla chiusura del gioco la Dashboard riappariva **massimizzata con il decoratore XFCE visibile**, non più a schermo intero — nonostante il Quick Menu continuasse a segnalare la modalità come "Schermo Intero".
+
+**Causa**: il guard `X_LAUNCHER_START_HIDDEN` aggiunto in v1.1.69 a `maybe_enable_xfwm4_titleless()` era basato su un ragionamento sbagliato ("evita un flicker dei pannelli mentre si gioca"). Quella funzione non è solo estetica sui pannelli XFCE: `titleless_maximize=true` al suo interno è **l'intero meccanismo** con cui la modalità "kiosk" appare senza decorazioni — Chromium qui non usa mai un vero flag `--kiosk`, si affida a `--start-maximized` + questa impostazione xfwm4 (nessuna decorazione su una finestra maximized con `titleless_maximize` attivo). Saltare la funzione lasciava quell'impostazione al suo valore precedente, e la finestra tornava visibile maximized ma con decorazione normale.
+
+Anche il ragionamento originale non reggeva a un secondo sguardo: il cambiamento a `titleless_maximize` avviene una sola volta, all'avvio della Dashboard — non in concomitanza con l'hide/show che avviene durante la partita. Nessun flicker reale da evitare.
+
+**Fix**: guard rimosso da `maybe_enable_xfwm4_titleless()` — viene sempre eseguita indipendentemente da `X_LAUNCHER_START_HIDDEN`, avvio a freddo o no. Il guard gemello in `focus_dashboard_window()` (che previene la vera corsa con l'hide di `xlaunch-handler.sh`) resta invariato, quello era corretto.
+
+### Verifica
+
+`bash -n kiosk-launch.sh`: sintassi valida. Non testato di nuovo dal vivo in questo ambiente (nessun server X qui) — da confermare su hardware reale con un nuovo test di avvio a freddo.

@@ -176,12 +176,20 @@ trap restore_xfwm4_titleless EXIT
 
 maybe_enable_xfwm4_titleless() {
   if [ "$X_LAUNCHER_DEDICATED_SESSION" = "true" ]; then return; fi 
-  # Step 19a (v1.1.69) — stesso principio del guard in
-  # focus_dashboard_window: se la finestra resterà nascosta, non ha senso
-  # mettere i pannelli XFCE in autohide/titleless per lei — rischierebbe
-  # anzi un flicker visibile dei pannelli proprio mentre l'utente sta
-  # giocando, l'esatta interferenza che questa funzionalità deve evitare.
-  if [ "$X_LAUNCHER_START_HIDDEN" = "true" ]; then return; fi 
+  # Step 19a (v1.1.74) — FIX: il guard X_LAUNCHER_START_HIDDEN aggiunto
+  # qui in v1.1.69 era sbagliato, segnalato dall'utente dopo un test reale
+  # di avvio a freddo — la Dashboard tornava visibile massimizzata CON il
+  # decoratore XFCE invece che a schermo intero, nonostante il menu la
+  # segnalasse ancora come "Schermo Intero". Causa: questa funzione non è
+  # solo estetica sui pannelli — `titleless_maximize=true` qui sotto è
+  # l'INTERO meccanismo con cui la modalità "kiosk" appare senza
+  # decorazioni (Chromium qui non usa mai un vero flag --kiosk, si
+  # affida a --start-maximized + questa impostazione xfwm4). Saltarla
+  # lasciava la finestra maximized ma con decorazione normale. Il
+  # ragionamento originale ("evita un flicker dei pannelli mentre si
+  # gioca") era comunque scorretto: questo cambiamento avviene
+  # all'avvio della Dashboard, non in concomitanza con l'hide/show
+  # durante la partita — nessun flicker reale da evitare.
   if command -v xfconf-query &>/dev/null; then 
     XFWM4_TITLELESS_SAVED="$(xfconf-query -c xfwm4 -p /general/titleless_maximize 2>/dev/null)" 
     [ -z "$XFWM4_TITLELESS_SAVED" ] && XFWM4_TITLELESS_SAVED="false" 
