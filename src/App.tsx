@@ -690,7 +690,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.1.78');
+  const [appVersion, setAppVersion] = useState('v1.1.79');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -978,9 +978,23 @@ function MainApp() {
   // scrivere "q" involontariamente — da cui le sequenze "qqqq" osservate.
   // 'key-done' è sicuro: un A residuo lì chiude semplicemente la tastiera
   // senza scrivere nulla, comportamento comunque recuperabile dall'utente.
+  // Richiesta utente: focus iniziale sulla lettera "Q" quando la tastiera
+  // si apre. FIX di un riferimento morto trovato mentre si applicava
+  // questa richiesta: puntava a 'key-done', un pulsante "Fatto" che non
+  // esiste più da quando la tastiera è stata ridisegnata a 4 righe con
+  // Invio che chiude (vedi il commento sul layout più in alto in
+  // VirtualKeyboard.tsx: "nessun pulsante Fatto separato, ridondante") —
+  // setFocusedId('key-done') non stava più puntando a nulla, quindi la
+  // protezione anti-rimbalzo descritta qui sotto in origine non era già
+  // più realmente in funzione. 'key-1-Q-0' è l'id reale della Q, identico
+  // in entrambi i layout IT/EN (keyId(1, keyDef, 0) da
+  // VirtualKeyboard.tsx — Q è sempre il primo tasto della riga QWERTY).
+  // La protezione contro un rimbalzo residuo del tasto A è stata spostata
+  // dentro VirtualKeyboard.tsx stesso (breve finestra di grazia dopo il
+  // montaggio, vedi lì) invece di evitare la Q come bersaglio iniziale.
   useEffect(() => {
     if (showKeyboard) {
-      setFocusedId('key-done');
+      setFocusedId('key-1-Q-0');
       play('focus');
     }
   }, [showKeyboard, setFocusedId, play]);

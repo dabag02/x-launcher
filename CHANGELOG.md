@@ -3280,3 +3280,21 @@ Nuovo campo opzionale `label` su `SuggestionItem` (`VirtualKeyboard.tsx`): se pr
 ### Verifica
 
 `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.79 — quattro migliorie alla tastiera virtuale
+
+Richieste dall'utente in un unico giro.
+
+**1) Focus iniziale sulla Q.** Trovato un riferimento morto mentre si applicava la richiesta: il focus iniziale puntava a `'key-done'`, un pulsante "Fatto" che non esiste più da quando la tastiera è stata ridisegnata a 4 righe con Invio-per-chiudere — la protezione anti-rimbalzo del tasto A che quel riferimento doveva garantire non era quindi già più realmente in funzione. Corretto puntando a `'key-1-Q-0'` (id reale della Q, identico in entrambi i layout). La protezione anti-rimbalzo è stata spostata dentro `VirtualKeyboard.tsx`: una finestra di grazia di 200ms dal montaggio in cui `handleKey` ignora silenziosamente qualunque pressione, per assorbire un residuo del tasto fisico A letto come "appena premuto" nel frame successivo all'apertura.
+
+**2) Navigazione ciclica, orizzontale e verticale.** `buildNeighborMap()` usava guard (`if (colIdx > 0)`, `if (rowIdx > 0)`) che lasciavano il vicino non impostato ai bordi, cadendo nello scoring geometrico generico (già documentato come inaffidabile in questo stesso file). Sostituiti con aritmetica modulo: dal bordo si riparte sempre dal lato opposto, sia in orizzontale (fine riga → inizio stessa riga) sia in verticale (l'intera tastiera come un ciclo).
+
+**3) I suggerimenti impedivano di scendere ai tasti.** Causa esatta in `FocusProvider.tsx`: `chainAxis="flow"` intercetta OGNI direzione (non solo sinistra/destra), quindi "giù" da un suggerimento veniva letto come "avanti nella catena" — restava intrappolato finché non si raggiungeva l'ultimo elemento, e per uscire dal primo bisognava andare a sinistra (l'unica direzione "indietro" che cadeva fuori dai bordi). Cambiato in `chainAxis="horizontal"`: la catena cattura solo sinistra/destra (che restano in ordine di lettura come prima, nessuna differenza), su/giù cadono subito nella mappa vicini.
+
+Risolto in modo unificato con il punto 2: i suggerimenti sono stati integrati come riga aggiuntiva in cima al ciclo verticale di `buildNeighborMap()` (`rowSugg`, ricalcolata quando cambia `activeSuggestions`) — dalla riga numeri si sale ai suggerimenti, dai suggerimenti si scende ai numeri, il ciclo li include naturalmente senza casi speciali. Sinistra/destra sui suggerimenti restano governati solo dalla sequentialChain (i due meccanismi si dividono puliti gli assi, nessun conflitto: la catena viene valutata prima della mappa vicini in `FocusProvider`, quindi eventuali sinistra/destra assegnati dalla mappa non avrebbero comunque effetto).
+
+**4) Apostrofo mancante.** Aggiunto in fondo a `row4` in entrambi i layout (IT/EN), stesso trattamento di "," e "." — un solo carattere, nessuna variante shiftata.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `VirtualKeyboard.tsx`).

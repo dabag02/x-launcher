@@ -101,7 +101,11 @@ const LAYOUT_IT: Layout = {
   numbers: [k('1','!'), k('2','"'), k('3','£'), k('4','$'), k('5','%'), k('6','&'), k('7','/'), k('8','('), k('9',')'), k('0','=')],
   row2: [k('Q'), k('W'), k('E'), k('R'), k('T'), k('Y'), k('U'), k('I'), k('O'), k('P'), k('è','É'), k('/'), k('\\')],
   row3: [k('A'), k('S'), k('D'), k('F'), k('G'), k('H'), k('J'), k('K'), k('L'), k('ò','Ò'), k('à','À')],
-  row4: [k('Z'), k('X'), k('C'), k('V'), k('B'), k('N'), k('M'), k('ù','Ù'), k(','), k('.'), k('-','_'), k('@')],
+  // Richiesta utente — apostrofo mancante fra i caratteri speciali:
+  // aggiunto qui, stesso posto degli altri simboli non-lettera di questa
+  // riga (nessun tasto shiftato per lui, un solo carattere sempre uguale
+  // come già "," e ".").
+  row4: [k('Z'), k('X'), k('C'), k('V'), k('B'), k('N'), k('M'), k('ù','Ù'), k(','), k('.'), k('-','_'), k('@'), k("'")],
 };
 
 const LAYOUT_EN: Layout = {
@@ -110,7 +114,7 @@ const LAYOUT_EN: Layout = {
   numbers: [k('1','!'), k('2','@'), k('3','#'), k('4','$'), k('5','%'), k('6','^'), k('7','&'), k('8','*'), k('9','('), k('0',')')],
   row2: [k('Q'), k('W'), k('E'), k('R'), k('T'), k('Y'), k('U'), k('I'), k('O'), k('P'), k('/'), k('\\')],
   row3: [k('A'), k('S'), k('D'), k('F'), k('G'), k('H'), k('J'), k('K'), k('L')],
-  row4: [k('Z'), k('X'), k('C'), k('V'), k('B'), k('N'), k('M'), k(','), k('.'), k('-','_'), k('@')],
+  row4: [k('Z'), k('X'), k('C'), k('V'), k('B'), k('N'), k('M'), k(','), k('.'), k('-','_'), k('@'), k("'")],
 };
 
 const LAYOUTS: Record<'it' | 'en', Layout> = { it: LAYOUT_IT, en: LAYOUT_EN };
@@ -162,28 +166,37 @@ type NeighborMap = Record<string, Partial<Record<'up' | 'down' | 'left' | 'right
  * riga adiacente, che può avere una lunghezza diversa) invece di un
  * indice 1:1, cosi anche righe di lunghezza diversa restano allineate
  * in modo sensato invece di sfasarsi progressivamente verso un lato.
+ *
+ * v1.1.79 — richiesta utente: navigazione ciclica in entrambi gli assi,
+ * non solo entro i confini. Da bordo a bordo opposto — sia in
+ * orizzontale (fine riga → inizio stessa riga) sia in verticale (l'intera
+ * tastiera come un unico ciclo, righe suggerimenti incluse in cima).
  */
 function buildNeighborMap(rows: string[][]): NeighborMap {
   const map: NeighborMap = {};
   rows.forEach((row, rowIdx) => {
     row.forEach((id, colIdx) => {
       const n: NeighborMap[string] = {};
-      if (colIdx > 0) n.left = row[colIdx - 1];
-      if (colIdx < row.length - 1) n.right = row[colIdx + 1];
+      // Richiesta utente — navigazione ciclica: dal bordo si riparte dal
+      // lato opposto invece di restare "bloccati" o cadere nello scoring
+      // geometrico generico. Sostituisce i vecchi guard `if (colIdx > 0)`/
+      // `if (rowIdx > 0)` (che lasciavano il vicino non impostato ai
+      // bordi) con l'aritmetica modulo, che avvolge sempre a un valore
+      // valido — sia in orizzontale (dentro la stessa riga) sia in
+      // verticale (fra le righe, l'intera tastiera come un ciclo).
+      n.left  = row[(colIdx - 1 + row.length) % row.length];
+      n.right = row[(colIdx + 1) % row.length];
 
       const proportionalCol = (targetRow: string[]) =>
         targetRow.length > 1
           ? Math.round((colIdx * (targetRow.length - 1)) / Math.max(row.length - 1, 1))
           : 0;
 
-      if (rowIdx > 0) {
-        const aboveRow = rows[rowIdx - 1];
-        n.up = aboveRow[proportionalCol(aboveRow)];
-      }
-      if (rowIdx < rows.length - 1) {
-        const belowRow = rows[rowIdx + 1];
-        n.down = belowRow[proportionalCol(belowRow)];
-      }
+      const aboveRow = rows[(rowIdx - 1 + rows.length) % rows.length];
+      n.up = aboveRow[proportionalCol(aboveRow)];
+      const belowRow = rows[(rowIdx + 1) % rows.length];
+      n.down = belowRow[proportionalCol(belowRow)];
+
       map[id] = n;
     });
   });
@@ -249,10 +262,34 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
     // stessa riga logica ai fini della mappa dei vicini, cosi sx/dx e
     // su/giù restano deterministici come per ogni altro tasto.
     const rowSpace = ['key-lang', 'key-space', 'key-paste'];
-    return buildNeighborMap([rowNum, rowQ, rowA, rowZ, rowSpace]);
-  }, [layout]);
+    // Richiesta utente — i suggerimenti (chip Shift) entrano anche loro
+    // nel ciclo su/giù, come qualunque altra riga: dalla riga numeri si
+    // sale ai suggerimenti, dai suggerimenti si scende ai numeri, e il
+    // ciclo verticale dell'intera tastiera li include naturalmente senza
+    // bisogno di un caso speciale. Sinistra/destra sui suggerimenti
+    // restano invece governati SOLO dalla sequentialChain qui sotto
+    // (chainAxis="horizontal", ordine di lettura anche a capo) — la
+    // catena viene valutata prima della mappa vicini in FocusProvider,
+    // quindi qualunque sinistra/destra che buildNeighborMap assegnasse a
+    // questi id non avrebbe comunque effetto: nessun conflitto reale fra
+    // i due meccanismi, si dividono pulitamente gli assi.
+    const rowSugg  = activeSuggestions.map((_, i) => `key-sugg-${i}`);
+    return buildNeighborMap([rowSugg, rowNum, rowQ, rowA, rowZ, rowSpace]);
+  }, [layout, activeSuggestions]);
+
+  // Spostata qui da App.tsx (che puntava a un pulsante "Fatto" rimosso da
+  // tempo, quindi non più realmente in funzione — vedi il commento su
+  // setFocusedId in App.tsx). Il focus iniziale ora atterra sulla Q
+  // (richiesta utente), quindi un rimbalzo residuo del tasto fisico A
+  // (comune su controller Bluetooth, letto come "appena premuto" anche
+  // nel frame subito successivo all'apertura) scriverebbe altrimenti una
+  // "q" indesiderata — questa finestra di grazia lo assorbe senza dover
+  // evitare la Q come bersaglio iniziale.
+  const mountTimeRef = React.useRef(Date.now());
+  const BOUNCE_GUARD_MS = 200;
 
   const handleKey = (keyDef: KeyDef) => {
+    if (Date.now() - mountTimeRef.current < BOUNCE_GUARD_MS) return;
     // Le lettere (nessuna coppia normal/shifted esplicita) seguono la
     // regola maiuscolo/minuscolo classica — i simboli con una coppia
     // esplicita (es. '-'/'_') usano invece direttamente il valore
@@ -372,7 +409,20 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
           uniforme (elementi di larghezza variabile), rendendo lo scoring
           geometrico imprevedibile fra le righe — la stessa lista si
           comporta ora come un'unica sequenza in ordine di lettura,
-          indipendente da dove il testo va effettivamente a capo. */}
+          indipendente da dove il testo va effettivamente a capo.
+          FIX (segnalato dall'utente): 'flow' intercetta OGNI direzione
+          (vedi FocusProvider.tsx, directionMatchesChainAxis — 'flow'
+          matcha sempre, non solo sinistra/destra), quindi "giù" da un
+          suggerimento veniva letto come "avanti nella catena" invece di
+          scendere verso i tasti sotto — restava intrappolato finché non
+          si raggiungeva l'ultimo elemento dell'array, e per uscire dal
+          primo bisognava andare a sinistra (l'unica direzione trattata
+          come "indietro" che riusciva a cadere fuori dai bordi). Con
+          'horizontal', la catena cattura solo sinistra/destra (che
+          restano in ordine di lettura come prima, nessuna differenza per
+          quello): su/giù non vengono più intercettati da nessun
+          elemento della lista, e cadono subito nello scoring/neighbor
+          normale verso i tasti sotto. */}
       <div className="flex flex-wrap justify-center gap-1 md:gap-1.5">
         {activeSuggestions.map((s, i) => (
           <Focusable
@@ -380,7 +430,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
             id={`key-sugg-${i}`}
             group="keyboard"
             sequentialChain="keyboard-suggestions"
-            chainAxis="flow"
+            chainAxis="horizontal"
+            neighbors={neighborMap[`key-sugg-${i}`]}
             onEnter={() => handleSuggestion(s)}
           >
             {(isFocused: boolean) => (
