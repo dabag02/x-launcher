@@ -31,5 +31,7 @@
   "useKnownFixesDesc": "Cerca dipendenze note per questo gioco nel database pubblico di Heroic Games Launcher prima dell'installazione. Se trovate, sostituiscono i verb configurati qui sotto. Se il gioco non è coperto, riceverai una notifica e verranno usati i verb di default.",
   "uninstall": "DISINSTALLA",
   "install": "INSTALLA",
-  "pressEnterToCopy": "Invio per copiare"
+  "pressEnterToCopy": "Invio per copiare",
+  "scrapeTitleLabel": "Titolo per Ricerca Metadati",
+  "scrapeTitlePlaceholder": "es. Guardians (se il nome ROM non è riconoscibile)"
 }

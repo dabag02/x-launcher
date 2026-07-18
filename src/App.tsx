@@ -90,6 +90,35 @@ const LAUNCH_ARG_SUGGESTIONS: SuggestionItem[] = [
   { value: '-nojoy',     insertMode: 'append-space', tip: 'Disattiva il rilevamento joystick del gioco — utile se confligge col rilevamento controller della Dashboard' },
 ];
 
+// Richiesta utente — Launch Arguments era sempre e solo la lista Wine/
+// Proton sopra, anche per giochi Classic Console lanciati con RetroArch,
+// dove quei flag non hanno alcun senso (RetroArch non è Wine). Il
+// backend già inoltra questi argomenti a RetroArch senza bisogno di
+// alcuna modifica (gameManager.ts costruisce runnerConfig.args dallo
+// stesso campo per qualunque runner, RetroArchRunner.launch() li accoda
+// già) — mancava solo la controparte in questa UI. RetroArch non ha un
+// flag diretto tipo "--shader=" in tutte le build: --appendconfig è la
+// via documentata e universale per applicare un file di configurazione
+// aggiuntivo (es. uno shader CRT) per-gioco senza toccare retroarch.cfg.
+// Richiesta utente — test dal vivo: --appendconfig= viene ignorato del
+// tutto da RetroArch (causa non ancora capita, da investigare), l'unico
+// argomento che applica davvero lo shader è --set-shader con il percorso
+// diretto del file .slangp fra virgolette. Finché non si capisce perché
+// la configurazione custom via file viene ignorata, questa entry sta qui
+// come SHORTCUT già completa (percorso reale incluso, verificato bundled
+// dal pacchetto libretro-shaders-slang su Arch) — non un flag da
+// completare a mano, così l'utente non deve sapere in anticipo quale
+// file appendere. Il pulsante "Filtro CRT" dedicato nell'overlay (che
+// scriveva --appendconfig=, ora rimosso) è stato sostituito da questa
+// voce, esattamente per lo stesso motivo.
+const RETROARCH_CRT_SHADER_PATH = '/usr/share/libretro/shaders/shaders_slang/crt/crt-easymode.slangp';
+
+const RETROARCH_LAUNCH_ARG_SUGGESTIONS: SuggestionItem[] = [
+  { value: `--set-shader "${RETROARCH_CRT_SHADER_PATH}"`, label: '📺 Filtro CRT', insertMode: 'append-space', tip: 'Filtro CRT pronto all\'uso (crt-easymode) — --appendconfig= risulta ignorato da RetroArch, questo è il flag verificato funzionante' },
+  { value: '-v',               insertMode: 'append-space', tip: 'Log verboso — primo passo per diagnosticare un core o una ROM che non parte' },
+  { value: '--max-frames=600', insertMode: 'append-space', tip: 'Chiude RetroArch dopo N frame — utile solo per test automatizzati, non per l\'uso normale' },
+];
+
 const ENV_VAR_SUGGESTIONS_WINE: SuggestionItem[] = [
   { value: 'WINEDEBUG=-all',                          insertMode: 'replace', tip: 'Silenzia il log di debug di Wine — meno rumore, leggero overhead in meno' },
   { value: 'WINEARCH=win64',                           insertMode: 'replace', tip: 'Forza un prefix a 64 bit' },
@@ -661,7 +690,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.1.74');
+  const [appVersion, setAppVersion] = useState('v1.1.78');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1671,13 +1700,18 @@ function MainApp() {
   // file) e tsc l'ha segnalato subito come TS2448 prima ancora di
   // arrivare a un test su hardware reale.
   // Set di suggerimenti alternativo per il campo attualmente in editing:
-  // Launch Arguments → lista curata di flag comuni; una riga Custom Env
-  // Variables → lista curata di variabili, diversa per Wine o Proton in
-  // base al runner del gioco selezionato; ogni altro campo → nessuna
-  // alternativa, Shift si comporta come sempre (solo maiuscolo/minuscolo).
+  // Launch Arguments → lista curata di flag comuni, RetroArch o Wine/
+  // Proton in base al runner del gioco selezionato (richiesta utente:
+  // prima era sempre e solo Wine/Proton, anche per RetroArch); una riga
+  // Custom Env Variables → lista curata di variabili, diversa per Wine o
+  // Proton in base al runner del gioco selezionato; ogni altro campo →
+  // nessuna alternativa, Shift si comporta come sempre (solo maiuscolo/
+  // minuscolo).
   const keyboardAltSuggestions = useMemo((): SuggestionItem[] | undefined => {
     if (!activeField) return undefined;
-    if (activeField.id === 'field-launchArgs') return LAUNCH_ARG_SUGGESTIONS;
+    if (activeField.id === 'field-launchArgs') {
+      return selectedGame?.runner === 'RetroArch' ? RETROARCH_LAUNCH_ARG_SUGGESTIONS : LAUNCH_ARG_SUGGESTIONS;
+    }
     if (activeField.id.startsWith('envvar-')) {
       const isProton = (selectedGame?.runner ?? '').toLowerCase().includes('proton');
       return isProton ? ENV_VAR_SUGGESTIONS_PROTON : ENV_VAR_SUGGESTIONS_WINE;
@@ -1966,6 +2000,7 @@ function MainApp() {
       dosboxConf:     selectedGame.dosboxConf     ?? '',
       libretroCore:   selectedGame.libretroCore   ?? '',
       scummvmId:      selectedGame.scummvmId      ?? '',
+      scrapeTitle:    selectedGame.scrapeTitle    ?? '',
     });
     fetch('/api/runners')
       .then(r => r.json())
@@ -7025,6 +7060,18 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         PATCH diretto all'API. Stesso pattern di
                         Executable Path sopra. */}
                     <label className="block">
+                      {/* Step 19a (v1.1.77) — FIX: il pulsante "Filtro CRT"
+                          qui scriveva --appendconfig=<preset .cfg
+                          bundled>, che test dal vivo hanno confermato
+                          essere del tutto ignorato da RetroArch (causa non
+                          ancora capita). Rimosso — la stessa scorciatoia
+                          ora vive fra i suggerimenti Shift della tastiera
+                          virtuale per questo campo (RETROARCH_LAUNCH_ARG_
+                          SUGGESTIONS), con --set-shader al posto di
+                          --appendconfig=: quello risulta funzionare
+                          davvero. Il file .cfg bundled resta nel progetto
+                          per quando si capirà perché la configurazione
+                          custom viene ignorata. */}
                       <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">Launch Arguments</span>
                       <Focusable
                         group="game-options"
@@ -7055,6 +7102,54 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               isFocused
                                 ? "border-2 border-blue-500"
                                 : localGameConfig.launchArgs
+                                  ? "border border-green-500/40"
+                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                            )}
+                          />
+                        )}
+                      </Focusable>
+                    </label>
+                    <label className="block">
+                      {/* Richiesta utente — nato per i ROM MAME con nome
+                          file poco significativo (es. "gngt.zip", mai
+                          riconoscibile per lo scraping IGDB/SGDB), ma
+                          disponibile per qualunque gioco: non cambia il
+                          titolo mostrato in libreria, solo la query usata
+                          per cercare cover/rating/generi. Al salvataggio,
+                          il backend fa da solo un rifetch immediato per
+                          questo gioco (non aspetta la prossima sync
+                          automatica) — vedi gameManager.updateGameConfig,
+                          ramo 'scrapeTitle' in config. */}
+                      <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">{t('gameOptions:scrapeTitleLabel')}</span>
+                      <Focusable
+                        group="game-options"
+                        id="field-scrapeTitle"
+                        onEnter={() => openKeyboardForField(
+                          'field-scrapeTitle',
+                          t('gameOptions:scrapeTitleLabel'),
+                          localGameConfig.scrapeTitle ?? '',
+                          async (val) => {
+                            setLocalGameConfig(prev => ({ ...prev, scrapeTitle: val }));
+                            await fetch(`/api/games/${selectedGame.id}/config`, {
+                              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ scrapeTitle: val || null })
+                            });
+                            setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, scrapeTitle: val || undefined } : g));
+                          }
+                        )}
+                      >
+                        {(isFocused) => (
+                          <input
+                            type="text"
+                            readOnly
+                            value={localGameConfig.scrapeTitle ?? ''}
+                            placeholder={t('gameOptions:scrapeTitlePlaceholder')}
+                            className={cn(
+                              "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
+                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              isFocused
+                                ? "border-2 border-blue-500"
+                                : localGameConfig.scrapeTitle
                                   ? "border border-green-500/40"
                                   : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
                             )}

@@ -79,6 +79,10 @@ db.exec(`
     dosbox_conf      TEXT,
     libretro_core    TEXT,
     scummvm_id       TEXT,
+    -- Override manuale del titolo di ricerca per lo scraping metadati —
+    -- vedi commento esteso su Game.scrapeTitle in types.ts. NULL = usa
+    -- title normale, nessun override.
+    scrape_title     TEXT,
     -- v1.0.0 — chiave canonica di sistema per Classic Console (es.
     -- 'genesis', 'snes'), usata per filtrare i core RetroArch compatibili
     -- nell'overlay. Dimenticata nel primo giro: impostata dal plugin ma
@@ -229,6 +233,13 @@ if (!existingCols.includes('system')) {
 if (!existingCols.includes('last_launched_at')) {
   db.exec("ALTER TABLE games ADD COLUMN last_launched_at TEXT");
 }
+// Override manuale del titolo di ricerca per lo scraping metadati —
+// richiesto dall'utente per i ROM MAME con nome file poco significativo
+// (es. "gngt.zip"), utile anche per qualunque altro store se lo scraping
+// automatico prende un abbinamento sbagliato. NULL = usa title normale.
+if (!existingCols.includes('scrape_title')) {
+  db.exec("ALTER TABLE games ADD COLUMN scrape_title TEXT");
+}
 const compatCols = (db.prepare("PRAGMA table_info(compat_profiles)").all() as any[]).map(r => r.name);
 if (!compatCols.includes('winetricks_verbs')) {
   db.exec("ALTER TABLE compat_profiles ADD COLUMN winetricks_verbs TEXT");
@@ -301,6 +312,7 @@ function rowToGame(row: any): Game {
     libretroCore:   row.libretro_core   ?? undefined,
     system:         row.system          ?? undefined,
     scummvmId:      row.scummvm_id      ?? undefined,
+    scrapeTitle:    row.scrape_title    ?? undefined,
     hltbHours: (row.hltb_main != null) ? {
       main:          row.hltb_main,
       completionist: row.hltb_completionist,
@@ -337,6 +349,7 @@ const stmtUpsertGame = db.prepare(`
     cover_image, preview_image, description, tags, genres, categories,
     rating, installed_at, release_date, status, trailer_url,
     executable_path, steam_app_id, dosbox_conf, libretro_core, scummvm_id,
+    scrape_title,
     system,
     hltb_main, hltb_completionist,
     achievements_unlocked, achievements_total,
@@ -346,13 +359,30 @@ const stmtUpsertGame = db.prepare(`
     @coverImage, @previewImage, @description, @tags, @genres, @categories,
     @rating, @installedAt, @releaseDate, @status, @trailerUrl,
     @executablePath, @steamAppId, @dosboxConf, @libretroCore, @scummvmId,
+    @scrapeTitle,
     @system,
     @hltbMain, @hltbCompletionist,
     @achievementsUnlocked, @achievementsTotal,
     datetime('now')
   )
   ON CONFLICT(id) DO UPDATE SET
-    title            = excluded.title,
+    -- Bug confermato dall'utente: il titolo corretto da IGDB dopo un
+    -- override scrapeTitle (vedi metadataManager.ts, "richiede
+    -- scrapeTitle" nel commento su enriched.title) veniva scritto nel DB,
+    -- ma alla sync libreria SUCCESSIVA (che parte anche da sola ad ogni
+    -- avvio del daemon, non solo su richiesta esplicita) il plugin dello
+    -- store — classicPlugin.ts per i ROM MAME, ma la stessa cosa vale per
+    -- qualunque altro plugin — richiama comunque titleFromFilename() (o
+    -- l'equivalente) e passa di nuovo il titolo grezzo originale in
+    -- upsertGames(), che qui veniva scritto incondizionatamente. Se
+    -- scrape_title è impostato (l'utente ha esplicitamente rivendicato un
+    -- override per questo gioco), preserva il title già in DB — quello
+    -- corretto scritto dall'arricchimento — invece di accettare quello
+    -- "fresco" della sync, che è sempre il nome grezzo non corretto per
+    -- definizione (altrimenti l'utente non avrebbe mai impostato
+    -- scrape_title). Se scrape_title è NULL, comportamento identico a
+    -- prima: il titolo segue sempre la sync.
+    title            = CASE WHEN games.scrape_title IS NOT NULL THEN games.title ELSE excluded.title END,
     store            = excluded.store,
     is_installed     = excluded.is_installed,
     play_time_hours  = excluded.play_time_hours,
@@ -408,7 +438,9 @@ const stmtUpsertGame = db.prepare(`
     system           = excluded.system,
     updated_at       = datetime('now')
   -- NON sovrascriviamo executable_path, steam_app_id, dosbox_conf,
-  -- libretro_core, scummvm_id: sono configurati manualmente dall'utente (Step 4)
+  -- libretro_core, scummvm_id, scrape_title: sono configurati manualmente
+  -- dall'utente (Step 4; scrape_title dalla richiesta MAME/override
+  -- scraping metadati)
   --
   -- v0.99.38 — bug confermato (screenshot: switch runner nell'overlay
   -- tornato su Wine dopo aver cambiato a Proton-GE 11.1 per SOMA, che con
@@ -464,6 +496,7 @@ export function upsertGame(game: Game): void {
     dosboxConf:           game.dosboxConf        ?? null,
     libretroCore:         game.libretroCore      ?? null,
     scummvmId:            game.scummvmId         ?? null,
+    scrapeTitle:          game.scrapeTitle       ?? null,
     system:               game.system            ?? null,
     hltbMain:             game.hltbHours?.main           ?? null,
     hltbCompletionist:    game.hltbHours?.completionist  ?? null,
@@ -504,6 +537,22 @@ export function deleteGamesByStoreNotIn(store: string, validIds: string[]): numb
 
 export function getAllGames(): Game[] {
   return (db.prepare('SELECT * FROM games ORDER BY title ASC').all() as any[]).map(rowToGame);
+}
+
+// Bug trovato con un test isolato mentre si verificava il fix sopra:
+// title = CASE WHEN games.scrape_title IS NOT NULL THEN games.title ...
+// protegge correttamente da una SYNC successiva del plugin (che passa
+// sempre il titolo grezzo del file ROM), ma blocca ANCHE la scrittura
+// legittima del titolo corretto fatta dal passaggio di arricchimento
+// stesso — a quel punto scrape_title è già impostato dal PATCH
+// immediatamente precedente (updateGameConfig), quindi anche
+// l'arricchimento passa dalla stessa condizione bloccante e non riesce
+// mai a scrivere il titolo nuovo. Questa funzione bypassa upsertGame()
+// per il solo campo title, con una UPDATE diretta e incondizionata —
+// va chiamata SOLO dal passaggio di arricchimento (gameManager.ts,
+// ramo scrapeTitle di updateGameConfig), mai da una sync regolare.
+export function updateGameTitle(id: string, title: string): void {
+  db.prepare('UPDATE games SET title = ? WHERE id = ?').run(title, id);
 }
 
 export function getGameById(id: string): Game | undefined {
@@ -596,6 +645,7 @@ export function updateGameConfig(id: string, config: {
   dosboxConf?: string | null;
   libretroCore?: string | null;
   scummvmId?: string | null;
+  scrapeTitle?: string | null;
   runner?: string;
 }): void {
   // Mappa campo JS → colonna SQL
@@ -608,6 +658,7 @@ export function updateGameConfig(id: string, config: {
     dosboxConf:     'dosbox_conf',
     libretroCore:   'libretro_core',
     scummvmId:      'scummvm_id',
+    scrapeTitle:    'scrape_title',
     runner:         'runner',
   };
 

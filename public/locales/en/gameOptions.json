@@ -31,5 +31,7 @@
   "useKnownFixesDesc": "Looks up known dependencies for this game in Heroic Games Launcher's public database before installation. If found, they replace the verbs configured below. If the game isn't covered, you'll get a notification and the default verbs will be used.",
   "uninstall": "UNINSTALL",
   "install": "INSTALL",
-  "pressEnterToCopy": "Press Enter to copy"
+  "pressEnterToCopy": "Press Enter to copy",
+  "scrapeTitleLabel": "Metadata Search Title",
+  "scrapeTitlePlaceholder": "e.g. Guardians (if the ROM name isn't recognizable)"
 }

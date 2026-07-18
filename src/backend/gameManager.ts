@@ -1274,6 +1274,7 @@ class GameManager {
     dosboxConf?: string;
     libretroCore?: string;
     scummvmId?: string;
+    scrapeTitle?: string;
     runner?: string;
   }) {
     db.updateGameConfig(id, config);
@@ -1297,6 +1298,46 @@ class GameManager {
       this.applyVerbsToProtonPrefix(id, config.runner).catch(err =>
         this.addLog(`[COMPAT] Applicazione verb su Proton fallita per ${id}: ${err}`, 'error')
       );
+    }
+
+    // Richiesta utente — override del titolo di ricerca metadati (nato
+    // per i ROM MAME con nome file poco significativo, es. "gngt.zip",
+    // ma disponibile per qualunque gioco): appena impostato, rifetch
+    // immediato per QUESTO gioco invece di aspettare la prossima sync
+    // automatica della libreria. Stesso pattern del ramo Proton sopra —
+    // non blocca la risposta HTTP, gira in background; il fetch
+    // completato notifica via SSE 'library-updated' (stesso meccanismo
+    // già in uso per ogni altro aggiornamento asincrono ai metadati),
+    // la Dashboard aggiorna cover/rating da sola quando arrivano.
+    // 'scrapeTitle' in config, non config.scrapeTitle: un valore vuoto
+    // ('' per tornare al titolo normale) deve rifare comunque il fetch,
+    // non solo un valore "truthy".
+    if ('scrapeTitle' in config) {
+      const freshGame = db.getGameById(id);
+      if (freshGame) {
+        metadataManager.enrichGameMetadata(freshGame, true)
+          .then(enriched => {
+            db.upsertGames([enriched]);
+            // Bug confermato dall'utente con test dal vivo: senza questa
+            // riga, il titolo mostrato in libreria/sidebar tornava al nome
+            // grezzo del file ROM alla sync successiva (anche solo
+            // riavviando la Dashboard) — db.upsertGames() sopra non basta
+            // per il campo title da solo, perché games.scrape_title è già
+            // impostato a questo punto (dal PATCH di poco prima) e la
+            // protezione in db.ts (necessaria per bloccare le sync
+            // regolari) blocca anche QUESTA scrittura legittima. Bypassa
+            // quella protezione con una UPDATE diretta, solo quando il
+            // titolo è davvero cambiato — se enrichGameMetadata non ha
+            // trovato un abbinamento IGDB migliore, enriched.title resta
+            // uguale a freshGame.title e questa riga non fa nulla di più.
+            if (enriched.title !== freshGame.title) {
+              db.updateGameTitle(id, enriched.title);
+            }
+            this.notifyLibraryRefreshed();
+            this.addLog(`[METADATA] Rifetch forzato completato per ${id} (titolo di ricerca: "${config.scrapeTitle || freshGame.title}").`, 'system');
+          })
+          .catch(err => this.addLog(`[METADATA] Rifetch forzato fallito per ${id}: ${err}`, 'error'));
+      }
     }
 
     return { success: true };

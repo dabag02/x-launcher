@@ -14,6 +14,15 @@ import { Theme } from '../types';
 export interface SuggestionItem {
   value: string;
   tip?: string;
+  /**
+   * Richiesta utente — per le shortcut il cui value effettivo è lungo/
+   * tecnico (es. `--set-shader "/percorso/completo/shader.slangp"`),
+   * un'etichetta breve da mostrare al posto del testo intero nel chip
+   * della tastiera. Se assente, si mostra value com'è sempre stato —
+   * questo campo non cambia nulla per le suggestion esistenti che non
+   * lo impostano.
+   */
+  label?: string;
   // v1.1.16 — come inserire il valore nel campo: 'append' (default,
   // comportamento originale — completamenti come .exe/.com si accodano
   // al testo digitato), 'append-space' (per i launch argument: si
@@ -383,7 +392,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
                     ? 'bg-gray-100 text-gray-500 border border-gray-200'
                     : 'bg-white/5 text-white/50'
               )}>
-                {s.value}
+                {s.label ?? s.value}
               </div>
             )}
           </Focusable>

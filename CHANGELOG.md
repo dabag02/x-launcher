@@ -3221,3 +3221,62 @@ Anche il ragionamento originale non reggeva a un secondo sguardo: il cambiamento
 ### Verifica
 
 `bash -n kiosk-launch.sh`: sintassi valida. Non testato di nuovo dal vivo in questo ambiente (nessun server X qui) — da confermare su hardware reale con un nuovo test di avvio a freddo.
+
+## v1.1.75 — RetroArch: launch argument contestuali + titolo di scraping manuale
+
+Due migliorie richieste dall'utente per il plugin Classic Console/RetroArch.
+
+**1) Launch Arguments contestuali per RetroArch.** Il backend supportava già tutto, senza bisogno di toccare `RetroArchRunner`: `runnerConfig.args` (costruito da `game.launchArgs` in `gameManager.ts`) viene già passato a qualunque runner in modo generico, e `RetroArchRunner.launch()` già accoda `config?.args` alla riga di comando. Mancava solo la UI: i suggerimenti Shift sulla tastiera virtuale per il campo Launch Arguments erano **sempre** quelli Wine/Proton, anche per un gioco RetroArch, dove non hanno senso.
+
+Nuova lista `RETROARCH_LAUNCH_ARG_SUGGESTIONS` (`--appendconfig=` — la via corretta per applicare uno shader CRT per-gioco, dato che RetroArch non ha un flag diretto tipo `--shader=` in tutte le build; `-v` per la diagnostica; `--max-frames=` per test automatizzati). `keyboardAltSuggestions` ora sceglie fra questa e la lista Wine/Proton in base a `selectedGame.runner === 'RetroArch'`, esattamente come già faceva per Custom Env Variables (Wine vs Proton).
+
+**2) Titolo di scraping manuale, per ROM MAME con nome poco significativo.** `titleFromFilename()` in `classicPlugin.ts` fa solo una pulizia ingenua del nome file — per "gngt.zip" resta "gngt", che è esattamente quello che veniva mandato a IGDB/SGDB (confermato nel log fornito dall'utente in una sessione precedente: `⚠ IGDB no results: gngt`). Un vero database MAME è fuori scala; invece, un campo di override manuale — stesso principio già in uso per "ScummVM Game ID".
+
+Reso disponibile per **qualunque gioco**, non solo Classic Console (richiesta esplicita dell'utente): utile anche se lo scraping automatico sbaglia abbinamento per un titolo Steam/GOG/Epic. Pipeline completa:
+
+- Nuova colonna nullable `scrape_title` su `games` (stesso pattern di migrazione PRAGMA table_info + ALTER TABLE già in uso), esplicitamente **esclusa** dalla clausola `ON CONFLICT DO UPDATE SET` di `upsertGame` — stessa protezione già in uso per `executable_path`/`steam_app_id`/ecc., altrimenti una sync automatica della libreria la cancellerebbe.
+- `metadataManager.enrichGameMetadata()` usa `game.scrapeTitle || game.title` per la query di ricerca; nuovo parametro `force` che salta sia la cache in memoria sia lo skip "ha già metadati reali" — necessario perché altrimenti un gioco con già (sbagliati) cover/rating dal nome ROM non verrebbe mai ri-arricchito.
+- **Rifetch immediato**, richiesto esplicitamente dall'utente invece di aspettare la prossima sync automatica: `gameManager.updateGameConfig()` lo attiva in background non appena `scrapeTitle` cambia, notificando via SSE `library-updated` (stesso meccanismo di ogni altro aggiornamento asincrono ai metadati) a fetch completato.
+- Nuovo campo "Titolo per Ricerca Metadati" nel Game Config, tradotto in entrambe le lingue.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente su `db.ts`, `gameManager.ts`, `metadataManager.ts`, `types.ts`). JSON validati. Corretto durante la stesura un JSX rimasto orfano (apertura di commento/tag persa da un inserimento precedente) — preso dalla verifica di sintassi prima della consegna, non arrivato all'utente.
+
+## v1.1.76 — titolo canonico da IGDB dopo scrapeTitle + preset "Filtro CRT" un-click
+
+Due follow-up richiesti dall'utente dopo aver provato v1.1.75.
+
+**1) Il titolo mostrato in libreria/sidebar restava comunque quello brutto.** `scrapeTitle` (v1.1.75) correggeva solo la query di ricerca, non il titolo visualizzato — il gioco continuava a chiamarsi "gngt" anche con cover e info corrette scaricate. Corretto in `metadataManager.ts`: quando `game.scrapeTitle` è impostato e IGDB conferma un abbinamento reale, il titolo mostrato viene aggiornato a `igdbData.name` — il nome **canonico** restituito da IGDB, non il testo scritto a mano dall'utente (che potrebbe essere solo un indizio di ricerca, capitalizzazione/nome ufficiale non garantiti). Un titolo Steam/GOG/Epic già corretto non viene mai rinominato solo perché IGDB ha trovato una corrispondenza — solo quando `scrapeTitle` è esplicitamente impostato.
+
+Nello stesso passaggio, resi coerenti con `force` anche gli altri controlli interni di `enrichGameMetadata()` (SGDB/IGDB/HLTB, e le singole assegnazioni rating/generi/descrizione/data di uscita) — prima `force` bypassava solo il controllo più esterno; se un gioco avesse già avuto un abbinamento sbagliato da un precedente `scrapeTitle` poi corretto, i controlli interni "ha già dati" avrebbero comunque impedito la sovrascrittura con quelli nuovi.
+
+**2) Preset "Filtro CRT" — un click, non un flag da completare a mano.** L'utente ha giustamente notato che il suggerimento `--appendconfig=` (v1.1.75) presuppone di sapere già quale file "appendere" — non praticabile per chi non vuole entrare nei tecnicismi. Nuovo file bundled `assets/retroarch-presets/crt-easymode.cfg` (shader `crt-easymode.slangp`, verificato con una ricerca reale come bundled dal pacchetto `libretro-shaders-slang` su Arch — leggero, ampiamente raccomandato come default, non un percorso indovinato). Percorso assoluto risolto lato server (`GET /api/config`, nuovo campo `retroarchCrtPresetPath` via `path.join(process.cwd(), ...)` — funziona sia da un checkout di sviluppo sia da un'installazione in `/opt/x-launcher`) ed esposto al frontend. Nuovo pulsante "📺 Filtro CRT" accanto al campo Launch Arguments, visibile solo per giochi RetroArch: un solo Invio scrive `--appendconfig=<percorso risolto>` e lo salva, zero file da creare o percorsi da conoscere.
+
+**Sul preset "Remaster" (N64/PSX/Saturn/PS2/Dreamcast) discusso insieme all'utente ma non ancora implementato**: a differenza del filtro CRT (un solo file, universale per qualunque sistema 2D), l'upscaling della risoluzione interna richiede opzioni **specifiche per ciascun core** (Mupen64Plus-Next per N64, Beetle PSX HW per PSX, Beetle Saturn per Saturn, Flycast per Dreamcast — nomi di opzione diversi, che cambiano fra versioni dei core), e il supporto PS2 in RetroArch non è maturo/diffuso quanto gli altri. Rischio concreto di scrivere un nome di opzione sbagliato che RetroArch ignora silenziosamente invece di segnalare errore. Da affrontare come lavoro a parte, verificando le opzioni corrette core per core prima di scrivere qualunque preset — non incluso in questa voce.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati.
+
+## v1.1.77 — due bug reali trovati dall'utente con test dal vivo
+
+**1) `--appendconfig=` ignorato del tutto da RetroArch.** Test dal vivo dell'utente: l'unico argomento che applica davvero lo shader CRT è `--set-shader "/percorso/shader.slangp"` — `--appendconfig=` non ha alcun effetto, causa non ancora capita. Il pulsante "Filtro CRT" nell'overlay (v1.1.76, scriveva `--appendconfig=`) è stato **rimosso**: la stessa scorciatoia vive ora fra i suggerimenti Shift della tastiera virtuale per Launch Arguments (`RETROARCH_LAUNCH_ARG_SUGGESTIONS`), come voce già completa con `--set-shader` e il percorso reale del file — non un flag da completare a mano. Il file bundled `assets/retroarch-presets/crt-easymode.cfg` e il campo `retroarchCrtPresetPath` in `GET /api/config` restano nel progetto (non consumati dal frontend per ora) per quando si capirà perché la configurazione custom via file viene ignorata.
+
+**2) Il titolo corretto in libreria/sidebar (v1.1.76) non era persistente.** Confermato dall'utente: tornava al nome grezzo del ROM alla sync successiva, e anche solo riavviando la Dashboard — nonostante il campo di testo dell'overlay continuasse a mostrare il valore corretto inserito dall'utente. Causa trovata con un test isolato (`better-sqlite3` in memoria, sequenza reale riprodotta passo per passo) invece che a naso: `title = excluded.title` nell'`ON CONFLICT DO UPDATE SET` di `upsertGame()` veniva sovrascritto incondizionatamente da qualunque sync successiva del plugin (che ripropone sempre il titolo grezzo derivato dal nome file, non sa nulla di `scrapeTitle`).
+
+Primo fix tentato — proteggere `title` con `CASE WHEN games.scrape_title IS NOT NULL THEN games.title ELSE excluded.title END` — si è rivelato **insufficiente da solo**, e il test isolato l'ha scoperto prima che l'utente lo facesse: la stessa protezione blocca anche la scrittura legittima del titolo corretto fatta dal passaggio di arricchimento stesso, perché a quel punto `scrape_title` è già impostato dal salvataggio immediatamente precedente. Aggiunta `db.updateGameTitle(id, title)`, una UPDATE diretta e incondizionata che bypassa quella protezione — chiamata solo dal passaggio di arricchimento in `gameManager.ts`, solo quando il titolo è davvero cambiato. Sequenza completa (sync iniziale → override utente → arricchimento → sync successiva → riavvio simulato) riverificata con lo stesso test isolato dopo il fix: il titolo corretto sopravvive a tutti i passaggi.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. JSON validati. Fix della persistenza titolo verificato con un test isolato `better-sqlite3` (non solo lettura del codice) che riproduce l'intera sequenza reale (sync → PATCH → arricchimento → sync successiva → riavvio) — sia la versione col bug sia quella corretta, per confermare che il problema fosse esattamente quello ipotizzato.
+
+## v1.1.78 — etichetta breve per i suggerimenti della tastiera virtuale
+
+Richiesta dall'utente, confermato stabile il fix titolo di v1.1.77: il chip della scorciatoia "Filtro CRT" nella tastiera virtuale mostrava il `value` per intero (`--set-shader "/usr/share/libretro/shaders/shaders_slang/crt/crt-easymode.slangp"`), poco leggibile.
+
+Nuovo campo opzionale `label` su `SuggestionItem` (`VirtualKeyboard.tsx`): se presente, il chip mostra quello al posto di `value` — `value` resta invariato ed è sempre quello che viene davvero inserito nel campo, `label` è solo la resa visiva. Nessuna suggestion esistente che non lo imposta cambia aspetto. La voce "Filtro CRT" ora usa `label: '📺 Filtro CRT'`.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.

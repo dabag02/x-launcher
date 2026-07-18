@@ -688,6 +688,23 @@ async function startServer() {
       // scritto, anche solo il default 'it'" (avvio successivo, rispetta
       // quanto persistito) — vedi hasLanguageBeenSet() in appConfig.ts.
       languageIsUserSet: hasLanguageBeenSet(),
+      // Richiesta utente — preset "Filtro CRT" per RetroArch: il percorso
+      // assoluto va risolto qui (il progetto può girare da /opt/x-launcher
+      // o da un checkout di sviluppo in una cartella qualsiasi), non
+      // hardcoded lato frontend. process.cwd() è la working directory del
+      // demone Node, impostata da kiosk-launch.sh/xdash.service alla radice
+      // del progetto — stesso presupposto già usato altrove (vedi
+      // GAMES_ROOT in downloadManager.ts).
+      //
+      // v1.1.77 — test dal vivo hanno confermato che --appendconfig=
+      // (il meccanismo per cui questo file .cfg era pensato) viene
+      // ignorato del tutto da RetroArch, causa non ancora capita. Il
+      // frontend non consuma più questo campo (il pulsante "Filtro CRT"
+      // che lo usava è stato rimosso, sostituito da una shortcut
+      // --set-shader nei suggerimenti della tastiera virtuale). Lasciato
+      // qui, non rimosso: torna utile quando si capirà perché la
+      // configurazione custom viene ignorata.
+      retroarchCrtPresetPath: path.join(process.cwd(), 'assets', 'retroarch-presets', 'crt-easymode.cfg'),
     });
   });
 

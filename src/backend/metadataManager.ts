@@ -264,7 +264,14 @@ function hasRealMetadata(game: Game): boolean {
 class MetadataManager {
   private cache = new Map<string, Game>();
 
-  async enrichGameMetadata(game: Game): Promise<Game> {
+  /**
+   * @param force Salta sia la cache in memoria sia lo skip "ha già
+   * metadati reali" — usato dal rifetch immediato dopo un override
+   * manuale del titolo di ricerca (scrapeTitle), dove il gioco potrebbe
+   * già avere un cover/rating (sbagliati, dallo scraping automatico col
+   * nome ROM) che altrimenti farebbero saltare del tutto il nuovo fetch.
+   */
+  async enrichGameMetadata(game: Game, force = false): Promise<Game> {
     // v1.1.27 — CAUSA REALE trovata nei log: prima, un cache-hit
     // restituiva l'INTERO oggetto cacheato — inclusi isInstalled,
     // executablePath, status e ogni altro campo VOLATILE che non ha
@@ -278,7 +285,9 @@ class MetadataManager {
     // (le protezioni v1.1.23/v1.1.26 restano corrette e necessarie per
     // altri casi), ma di un dato in INGRESSO già sbagliato, che nessuna
     // protezione a valle poteva riconoscere come tale.
-    if (this.cache.has(game.id)) {
+    if (force) {
+      this.cache.delete(game.id);
+    } else if (this.cache.has(game.id)) {
       const cached = this.cache.get(game.id)!;
       // Solo i campi che questa funzione arricchisce davvero — tutto il
       // resto (isInstalled, executablePath, status, prefixPath,
@@ -299,7 +308,7 @@ class MetadataManager {
 
     // Se il gioco ha già metadati reali (rating + generi) e cover reale nel DB,
     // non ri-fetchiamo — risparmia chiamate API ad ogni riavvio del daemon
-    if (hasRealMetadata(game) && hasRealCover(game)) {
+    if (!force && hasRealMetadata(game) && hasRealCover(game)) {
       this.cache.set(game.id, game);
       return game;
     }
@@ -322,10 +331,15 @@ class MetadataManager {
     await requestQueue.add(async () => {
       // Normalizza il titolo per le ricerche: rimuove suffissi di regione ROM
       // es. "Alex Kidd in Miracle World (USA, Europe)" → "Alex Kidd in Miracle World"
-      const searchTitle = game.title.replace(/\s*\([^)]*\)\s*$/, '').trim();
+      // Richiesta utente — scrapeTitle: override manuale per ROM con nome
+      // file poco significativo (es. MAME "gngt.zip"), o per qualunque
+      // gioco dove lo scraping automatico sul titolo normale non trova
+      // nulla o sbaglia abbinamento. Ha sempre precedenza su game.title
+      // quando presente.
+      const searchTitle = (game.scrapeTitle || game.title).replace(/\s*\([^)]*\)\s*$/, '').trim();
 
       // Cover art via SteamGridDB
-      if (!hasRealCover(game) && SGDB_KEY) {
+      if ((force || !hasRealCover(game)) && SGDB_KEY) {
         const sgdbId = await sgdbSearchGame(searchTitle);
         if (sgdbId) {
           const images = await sgdbGetCover(sgdbId);
@@ -342,17 +356,30 @@ class MetadataManager {
       }
 
       // Metadati via IGDB
-      if (!hasRealMetadata(game) && IGDB_CLIENT_ID) {
+      if ((force || !hasRealMetadata(game)) && IGDB_CLIENT_ID) {
         const token = await getIgdbToken();
         if (!token) {
           writeLog('warning', `[METADATA] ❌ IGDB token not obtained — check IGDB_CLIENT_ID and IGDB_CLIENT_SECRET`);
         } else {
           const igdbData = await igdbSearch(searchTitle);
           if (igdbData) {
-            if (!enriched.rating && igdbData.rating) enriched.rating = Math.round(igdbData.rating);
-            if (!enriched.genres?.length && igdbData.genres?.length) enriched.genres = igdbData.genres.map(g => g.name);
-            if (!enriched.description && igdbData.summary) enriched.description = igdbData.summary;
-            if (!enriched.releaseDate && igdbData.first_release_date) enriched.releaseDate = new Date(igdbData.first_release_date * 1000).toISOString();
+            if ((force || !enriched.rating) && igdbData.rating) enriched.rating = Math.round(igdbData.rating);
+            if ((force || !enriched.genres?.length) && igdbData.genres?.length) enriched.genres = igdbData.genres.map(g => g.name);
+            if ((force || !enriched.description) && igdbData.summary) enriched.description = igdbData.summary;
+            if ((force || !enriched.releaseDate) && igdbData.first_release_date) enriched.releaseDate = new Date(igdbData.first_release_date * 1000).toISOString();
+            // Richiesta utente — dopo aver impostato scrapeTitle (nato per
+            // ROM MAME con nome file poco significativo, es. "gngt.zip"),
+            // il titolo mostrato in libreria/sidebar restava comunque
+            // quello brutto: solo la RICERCA usava scrapeTitle, non la
+            // visualizzazione. Corretto qui, non prendendo alla lettera il
+            // testo scritto dall'utente (potrebbe essere solo un indizio
+            // di ricerca, non necessariamente la capitalizzazione/il nome
+            // ufficiale esatti) — usiamo invece igdbData.name, il nome
+            // CANONICO restituito da IGDB una volta confermato un
+            // abbinamento reale. Solo se scrapeTitle è impostato: un
+            // titolo Steam/GOG/Epic già corretto non va mai rinominato
+            // solo perché IGDB ha trovato una corrispondenza.
+            if (game.scrapeTitle && igdbData.name) enriched.title = igdbData.name;
             writeLog('info', `[METADATA] ✅ IGDB: ${game.title} — rating:${enriched.rating} genres:${enriched.genres?.join(',')}`);
           } else {
             writeLog('info', `[METADATA] ⚠ IGDB no results: ${game.title}`);
@@ -361,7 +388,7 @@ class MetadataManager {
       }
 
       // HowLongToBeat (opzionale)
-      if (!enriched.hltbHours) {
+      if (force || !enriched.hltbHours) {
         const hltb = await hltbSearch(searchTitle);
         if (hltb) enriched.hltbHours = hltb;
       }
