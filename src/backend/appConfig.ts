@@ -52,6 +52,14 @@ export interface AppConfig {
   // autorilevamento della lingua di sistema ancora implementato (roadmap):
   // il default resta 'it' finché quella parte non viene costruita.
   language: Language;
+  // Step 19a (v1.1.86) — richiesto dall'utente: l'avatar selezionato era
+  // salvato solo in localStorage (client-side), quindi non condiviso fra
+  // Chromium e Firefox (storage separato per browser, inevitabile) e
+  // azzerato ad ogni riavvio in Firefox specificamente, lanciato con
+  // --private-window (che scarta tutto lo storage alla chiusura). Spostato
+  // qui — persistito lato server, sopravvive sia al riavvio sia al cambio
+  // di browser. null = nessun avatar selezionato (default).
+  avatarUrl: string | null;
 }
 
 const DEFAULTS: AppConfig = {
@@ -62,6 +70,7 @@ const DEFAULTS: AppConfig = {
   // al limite, un default ragionevole senza essere arbitrariamente basso.
   aiMonthlyTokenBudget: 50_000,
   language: 'it',
+  avatarUrl: null,
 };
 
 function parseConfFile(raw: string): Partial<AppConfig> {
@@ -83,6 +92,9 @@ function parseConfFile(raw: string): Partial<AppConfig> {
     }
     if (key === 'language' && (val === 'it' || val === 'en')) {
       out.language = val;
+    }
+    if (key === 'avatarUrl') {
+      out.avatarUrl = val === '' ? null : val;
     }
   }
   return out;
@@ -140,6 +152,7 @@ export function writeAppConfig(partial: Partial<AppConfig>): AppConfig {
     `displayMode=${next.displayMode}`,
     `aiMonthlyTokenBudget=${next.aiMonthlyTokenBudget}`,
     `language=${next.language}`,
+    `avatarUrl=${next.avatarUrl ?? ''}`,
     '',
   ].join('\n');
   writeFileSync(CONFIG_PATH, body, 'utf-8');

@@ -11,6 +11,7 @@ import { knowledgeBase } from './src/backend/knowledgeBase';
 import * as db from './src/backend/db';
 import * as attemptTracker from './src/backend/aiProviders/attemptTracker';
 import { readAppConfig, writeAppConfig, hasLanguageBeenSet } from './src/backend/appConfig';
+import { getSystemInfo } from './src/backend/systemInfo';
 import fs from 'fs';
 import os from 'os';
 import { spawn, execSync } from 'child_process';
@@ -577,9 +578,58 @@ async function startServer() {
     res.json(result);
   });
 
+  // Richiesta utente — tab Info Hardware in Gestisci Account: Motherboard/
+  // CPU/GPU/RAM/HDD/OS, tutti leggibili senza permessi elevati (vedi
+  // systemInfo.ts). Cache in memoria lato server, l'hardware non cambia
+  // durante l'esecuzione del demone.
+  app.get('/api/system-info', (_req, res) => {
+    try {
+      res.json(getSystemInfo());
+    } catch (e: any) {
+      writeLog('error', `[API] /system-info fallita: ${e?.message ?? e}`);
+      res.status(500).json({ error: 'Impossibile rilevare l\'hardware' });
+    }
+  });
+
   app.get("/api/games/:id/compat", (req, res) => {
     const { getCompatProfile } = require('./src/backend/db');
     res.json(getCompatProfile(req.params.id) ?? {});
+  });
+
+  // Richiesta utente — "auto-remaster" PSX, on/off dall'overlay. Il core
+  // stesso è l'interruttore (vedi setPsxRemaster in gameManager.ts).
+  app.post("/api/games/:id/psx-remaster", async (req, res) => {
+    try {
+      const { enabled } = req.body as { enabled: boolean };
+      const result = await gameManager.setPsxRemaster(req.params.id, enabled === true);
+      res.json(result);
+    } catch (e: any) {
+      writeLog('error', `[API] /psx-remaster fallita per ${req.params.id}: ${e?.message ?? e}`);
+      res.status(500).json({ success: false, message: e?.message ?? 'Errore interno' });
+    }
+  });
+
+  // Richiesta utente — dimensione prevista di installazione, on-demand
+  // per il gioco selezionato (solo GOG/Epic per ora, vedi commento su
+  // getPredictedInstallSize in gameManager.ts). Volutamente non
+  // richiamato per l'intera libreria in una volta — una chiamata per
+  // gioco, solo quando l'utente lo seleziona davvero.
+  //
+  // try/catch aggiunto dopo un crash segnalato dall'utente
+  // (TypeError: gameManager.getPredictedInstallSize is not a function,
+  // causa più probabile: build avviata da una cartella diversa/non
+  // aggiornata — ma la route non aveva comunque nessuna protezione:
+  // un errore async non catturato qui può destabilizzare l'intero
+  // processo invece di restituire un errore contenuto alla sola
+  // richiesta che l'ha causato).
+  app.get("/api/games/:id/predicted-size", async (req, res) => {
+    try {
+      const bytes = await gameManager.getPredictedInstallSize(req.params.id);
+      res.json({ bytes });
+    } catch (e: any) {
+      writeLog('error', `[API] /predicted-size fallita per ${req.params.id}: ${e?.message ?? e}`);
+      res.json({ bytes: null });
+    }
   });
   // --- PLUGIN MANAGER ---
 
@@ -657,7 +707,14 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // GET /api/version — versione daemon da metadata.json
+  // GET /api/version — versione/milestone da metadata.json.
+  // v1.1.87 — non più consumato dal frontend per il numero mostrato nel
+  // menu (vedi il commento esteso in App.tsx sull'effect rimosso): questo
+  // file viene aggiornato solo ai congelamenti di milestone, mai nei fix
+  // quotidiani, quindi usarlo per sovrascrivere la versione mostrata
+  // causava una versione stantia in ogni cartella di sviluppo non
+  // risincronizzata con l'ultimo zip di milestone. Lasciato qui per uso
+  // futuro (es. diagnostica esterna, script), non più per questo scopo.
   app.get('/api/version', (_req, res) => {
     try {
       const { readFileSync } = require('fs');

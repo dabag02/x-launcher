@@ -399,4 +399,81 @@ export class GOGPlugin extends StorePlugin {
       message: 'Apri un terminale ed esegui: lgogdownloader --login — segui le istruzioni a schermo. Questa card si aggiornerà automaticamente al termine.',
     };
   }
+
+  /**
+   * Richiesta utente — dimensione PREVISTA dell'installazione (prima di
+   * scaricare), non quella reale su disco a installazione avvenuta.
+   *
+   * Deliberatamente diverso dal --list details/json usato per l'intero
+   * catalogo (vedi commento in cima al file: scartato lì perché fa una
+   * chiamata API per gioco, 128 chiamate per l'intera libreria sono
+   * impraticabili) — qui invece è UN SOLO gioco alla volta, on-demand,
+   * quando l'utente lo seleziona: la stessa chiamata che per l'intero
+   * catalogo era impraticabile, per un singolo gioco è perfettamente
+   * ragionevole.
+   *
+   * NOTA ONESTA: non testato dal vivo in questo ambiente (nessun account
+   * GOG/lgogdownloader disponibile qui) — il nome esatto del campo JSON
+   * con la dimensione non è verificato. Per questo il JSON grezzo viene
+   * sempre loggato per intero al primo utilizzo: se il parsing sotto non
+   * trova il campo giusto, il log mostra comunque la struttura reale,
+   * invece di fallire in silenzio come è successo con l'opzione
+   * --appendconfig= di RetroArch in una sessione precedente.
+   */
+  async getPredictedInstallSizeBytes(gameId: string): Promise<number | null> {
+    const slug = gameId.replace(/^gog-/, '');
+    if (!binaryExists('lgogdownloader')) return null;
+
+    return new Promise((resolve) => {
+      // FIX (segnalato dall'utente con log alla mano): '--list details,json'
+      // restituiva stdout completamente vuoto — molto probabilmente perché
+      // --list accetta UN SOLO valore dall'elenco (games/details/json/tags/
+      // ecc.), non una combinazione separata da virgola come avevo
+      // assunto senza verifica. '--list details --game <slug>' è invece la
+      // sintassi confermata funzionante da un esempio reale trovato con una
+      // ricerca in precedenza — testuale, non JSON: il parsing sotto cerca
+      // righe con una dimensione invece di interpretare JSON.
+      const proc = spawn('lgogdownloader', ['--list', 'details', '--game', slug, '--no-color'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => { proc.kill(); resolve(null); }, 20_000);
+
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', () => {
+        clearTimeout(timer);
+        const clean = stripAnsi(stdout);
+        writeLog('info', `[GOG] --list details --game ${slug} — output grezzo: ${clean.slice(0, 3000)}`);
+        if (stderr.trim()) writeLog('info', `[GOG] --list details --game ${slug} — stderr: ${stderr.slice(0, 500)}`);
+
+        // FIX (log reale fornito dall'utente): il formato non usa
+        // un'unità come ipotizzato in v1.1.90 ("Size: 1.23 GB") — è un
+        // numero di byte grezzo, senza suffisso: "size: 1048576". Il
+        // vecchio pattern richiedeva un'unità (GB/MB/KB/B) e quindi non
+        // trovava mai corrispondenze.
+        //
+        // Sommati solo i "size:" dentro la sezione "installers:" — non
+        // "extras:" (contenuti bonus, non necessari per installare il
+        // gioco: avatar, wallpaper, colonna sonora) né "patches:"
+        // (aggiornamenti da una versione precedente, non rilevanti per
+        // un'installazione nuova). Nota: la sezione "installers:" può
+        // elencare file per PIÙ PIATTAFORME insieme (qui: .exe/.bin per
+        // Windows e .sh per Linux) — sommarli tutti sovrastima quando
+        // sono presenti entrambe, ma resta una stima ragionevole in
+        // assenza di un modo semplice per sapere quale piattaforma verrà
+        // scaricata prima del download vero e proprio.
+        const installersSection = clean.split(/^installers:\s*$/m)[1]?.split(/^(?:extras|patches|dlcs):\s*$/m)[0] ?? '';
+        const matches = [...installersSection.matchAll(/^\s*size:\s*(\d+)\s*$/gm)];
+        if (matches.length === 0) {
+          writeLog('info', `[GOG] Nessuna dimensione trovata nella sezione installers per ${slug} — vedi output grezzo sopra per adattare il pattern.`);
+          return resolve(null);
+        }
+        const totalBytes = matches.reduce((acc, m) => acc + (parseInt(m[1], 10) || 0), 0);
+        resolve(totalBytes > 0 ? totalBytes : null);
+      });
+      proc.on('error', () => { clearTimeout(timer); resolve(null); });
+    });
+  }
 }

@@ -43,7 +43,11 @@ import {
   Sparkles,
   BookOpen,
   ChevronDown,
-  Edit3
+  Edit3,
+  HardDrive,
+  CircuitBoard,
+  MemoryStick,
+  Laptop
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -519,7 +523,7 @@ function MainApp() {
   } | null>(null);
   const [showTrailer, setShowTrailer] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [activeSettingsTab, setActiveSettingsTab] = useState<'engine' | 'accounts' | 'input' | 'plugins' | 'ai-models'>('accounts');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<'engine' | 'accounts' | 'input' | 'plugins' | 'ai-models' | 'hardware'>('accounts');
   const [availableRunners, setAvailableRunners] = useState<any[]>([]);
   const [installableRunners, setInstallableRunners] = useState<any[]>([]);
   // v0.99.90 — Step 15d: modelli Ollama disponibili sulla macchina e
@@ -622,9 +626,37 @@ function MainApp() {
   // Step 12f — Log console avanzata
   const [logFilter, setLogFilter] = useState<Set<string>>(new Set());   // set vuoto = mostra tutto
   // Step 13 UI — avatar utente e menu profilo rapido
-  const [avatarImage, setAvatarImage] = useState<string | null>(() => {
-    try { return localStorage.getItem('x-launcher-avatar'); } catch { return null; }
-  });
+  // Step 19a (v1.1.86) — non più letto da localStorage all'avvio (era
+  // per-browser, azzerato in Firefox da --private-window): popolato dal
+  // fetch di boot di /api/config, insieme al resto della configurazione
+  // persistita lato server.
+  const [avatarImage, setAvatarImage] = useState<string | null>(null);
+  // Richiesta utente — dimensione PREVISTA dell'installazione (prima di
+  // scaricare), solo GOG/Epic per ora (decisione esplicita). null =
+  // ancora da caricare o non disponibile per questo gioco/store;
+  // 'loading' distinto da null per non mostrare "—" durante il fetch.
+  const [predictedSizeBytes, setPredictedSizeBytes] = useState<number | null>(null);
+  const [predictedSizeLoading, setPredictedSizeLoading] = useState(false);
+  // Richiesta utente — "auto-remaster" PSX: il core stesso è l'interruttore
+  // (mednafen_psx_hw = attivo, mednafen_psx = originale), verificato via
+  // selectedGame.libretroCore, non un campo separato.
+  const [psxRemasterToggling, setPsxRemasterToggling] = useState(false);
+  // Richiesta utente — tab Info Hardware in Gestisci Account. null = non
+  // ancora recuperato. Il server tiene già una cache in memoria (l'hardware
+  // non cambia durante l'esecuzione del demone) — qui basta un fetch alla
+  // prima apertura della tab, non ad ogni volta che la si riseleziona.
+  const [systemInfo, setSystemInfo] = useState<{
+    motherboard: string; cpu: string; gpu: string; ram: string; storage: string; os: string;
+  } | null>(null);
+  // Persistenza lato server, sostituisce i precedenti localStorage.setItem/
+  // removeItem diretti nei quattro punti che modificano l'avatar — un solo
+  // posto invece di duplicare lo stesso fetch quattro volte.
+  const persistAvatarUrl = (url: string | null) => {
+    fetch('/api/config', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ avatarUrl: url }),
+    }).catch(() => {});
+  };
   const [showAvatarLibrary, setShowAvatarLibrary] = useState(false);
 
   // Plugin manager
@@ -690,7 +722,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.1.79');
+  const [appVersion, setAppVersion] = useState('v1.1.97-dev.1');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1058,12 +1090,31 @@ function MainApp() {
     fetch('/api/avatars').catch(() => {});
   }, []);
 
-  // Fetch versione dal backend
+  // Richiesta utente — Info Hardware: un solo fetch alla prima apertura
+  // della tab (systemInfo resta null finché non è mai stata aperta),
+  // non ad ogni riselezione.
   useEffect(() => {
-    fetch('/api/version').then(r => r.json()).then(d => {
-      if (d.version) setAppVersion(d.version);
-    }).catch(() => {});
-  }, []);
+    if (activeSettingsTab === 'hardware' && !systemInfo) {
+      fetch('/api/system-info').then(r => r.json()).then(setSystemInfo).catch(() => {});
+    }
+  }, [activeSettingsTab, systemInfo]);
+
+  // v1.1.87 — RIMOSSO: questo effect sovrascriveva silenziosamente
+  // appVersion (il letterale useState in cima al componente, aggiornato
+  // ad ogni singola modifica di questa sessione) con quello restituito
+  // da /api/version — che legge metadata.json dal disco. metadata.json
+  // viene toccato SOLO nei congelamenti di milestone (RC3, poi Gaia),
+  // mai nei fix quotidiani: nella cartella di sviluppo dell'utente, mai
+  // risincronizzata con lo zip di una milestone (tenuto a parte in una
+  // cartella separata), è rimasto fermo al valore della primissima
+  // build — con l'effetto che OGNI aggiornamento di appVersion fatto in
+  // questa sessione veniva silenziosamente scartato al caricamento
+  // della pagina, sostituito da quel valore stantio. Segnalato
+  // dall'utente dopo una sessione di diagnostica (demone verificato
+  // fresco, build verificata contenere la stringa corretta via grep) —
+  // la vera causa non era né il demone né la build, ma questo secondo
+  // useEffect che vinceva sempre la corsa. Il letterale in App.tsx resta
+  // ora l'unica fonte di verità per la versione mostrata nel menu.
 
   // Sincronizza displayMode con la preferenza persistita: kiosk-launch.sh
   // ha già deciso con quali flag lanciare il browser in base a questo
@@ -1107,6 +1158,7 @@ function MainApp() {
         setDisplayMode(d.fullscreen ? 'kiosk' : 'window');
       }
       setDedicatedSession(d.dedicatedSession === true);
+      if (d.avatarUrl !== undefined) setAvatarImage(d.avatarUrl);
       // Step 19b (v1.1.38, guardia aggiunta in v1.1.49, autorilevamento in
       // v1.1.63) — applica la lingua persistita SOLO se l'utente non ha
       // già cambiato lingua manualmente nel frattempo.
@@ -1689,6 +1741,30 @@ function MainApp() {
   const selectedGame = selectedGameId === STEAM_BIG_PICTURE_ID
     ? makeSteamBigPictureCard()
     : games.find(g => g.id === selectedGameId);
+
+  // Richiesta utente — dimensione prevista di installazione, on-demand per
+  // un solo gioco alla volta (solo GOG/Epic — il backend ritorna null per
+  // ogni altro store, gestito qui semplicemente nascondendo il blocco).
+  // Un fetch per gioco selezionato, non per l'intera libreria in una volta.
+  // Deve vivere DOPO la dichiarazione di selectedGame qui sopra, non
+  // prima — stessa categoria di errore (TS2448) già documentata più sotto
+  // per keyboardAltSuggestions/overlayNavAnchors in questo stesso file.
+  useEffect(() => {
+    if (!selectedGame || (selectedGame.store !== 'GOG Galaxy' && selectedGame.store !== 'Epic Games')) {
+      setPredictedSizeBytes(null);
+      setPredictedSizeLoading(false);
+      return;
+    }
+    setPredictedSizeBytes(null);
+    setPredictedSizeLoading(true);
+    let cancelled = false;
+    fetch(`/api/games/${selectedGame.id}/predicted-size`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setPredictedSizeBytes(typeof d.bytes === 'number' ? d.bytes : null); })
+      .catch(() => { if (!cancelled) setPredictedSizeBytes(null); })
+      .finally(() => { if (!cancelled) setPredictedSizeLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedGame?.id, selectedGame?.store]);
 
   // v1.0.0 — fix navigazione overlay Game Options: Runner Bridge,
   // Compatibility Layer/Core ed Executable Path si affidavano solo allo
@@ -2773,7 +2849,7 @@ Vuoi provare ad avviarlo comunque?`);
   // "elemento più in alto" indipendentemente da quanto in basso si trovasse
   // il primo controllo reale del contenuto. Qui invece sappiamo esattamente
   // cosa esiste per ciascuna tab e puntiamo lì in modo deterministico.
-  const getFirstFocusableForSettingsTab = useCallback((tab: 'accounts' | 'engine' | 'plugins' | 'input' | 'ai-models'): string | null => {
+  const getFirstFocusableForSettingsTab = useCallback((tab: 'accounts' | 'engine' | 'plugins' | 'input' | 'ai-models' | 'hardware'): string | null => {
     switch (tab) {
       case 'accounts': {
         const visibleAccountStores = stores.filter(s => {
@@ -2837,7 +2913,7 @@ Vuoi provare ad avviarlo comunque?`);
       fromId: `settings-tab-${activeSettingsTabRef.current}`,
     });
     if (!nextId) return;
-    const nextTab = nextId.replace('settings-tab-', '') as 'accounts' | 'engine' | 'plugins' | 'input' | 'ai-models';
+    const nextTab = nextId.replace('settings-tab-', '') as 'accounts' | 'engine' | 'plugins' | 'input' | 'ai-models' | 'hardware';
 
     setActiveSettingsTab(nextTab);
     play('select');
@@ -3738,7 +3814,7 @@ Vuoi provare ad avviarlo comunque?`);
                     alt="avatar"
                     onError={() => {
                       setAvatarImage(null);
-                      try { localStorage.removeItem('x-launcher-avatar'); } catch {}
+                      persistAvatarUrl(null);
                     }}
                   />
                 : <User size={18} className="opacity-70" />}
@@ -3783,7 +3859,7 @@ Vuoi provare ad avviarlo comunque?`);
                 {avatarImage && (
                   <Focusable group="avatar-library" id="avatar-remove" onEnter={() => {
                     setAvatarImage(null);
-                    try { localStorage.removeItem('x-launcher-avatar'); } catch {}
+                    persistAvatarUrl(null);
                     play('back');
                   }}>
                     {(isFocused) => (
@@ -3882,7 +3958,7 @@ Vuoi provare ad avviarlo comunque?`);
                         // chiudono — questo permette di provare più avatar
                         // in sequenza prima di confermare e tornare al menu.
                         setAvatarImage(file.url);
-                        try { localStorage.setItem('x-launcher-avatar', file.url); } catch {}
+                        persistAvatarUrl(file.url);
                         play('select');
                       }}
                     >
@@ -3891,7 +3967,7 @@ Vuoi provare ad avviarlo comunque?`);
                           onClick={(e) => {
                             e.stopPropagation();
                             setAvatarImage(file.url);
-                            try { localStorage.setItem('x-launcher-avatar', file.url); } catch {}
+                            persistAvatarUrl(file.url);
                             setShowAvatarLibrary(false);
                             setActiveGroup(null);
                             play('select');
@@ -4333,6 +4409,26 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       : <span className="opacity-30 text-xs font-normal">—</span>}
                   </span>
                 </div>
+
+                {/* Dimensione prevista di installazione — richiesta utente,
+                    solo GOG/Epic per ora (Steam/Classic Console non hanno
+                    una fonte già cablata per questo, vedi discussione).
+                    Blocco nascosto del tutto per gli altri store, invece di
+                    mostrare sempre un "—" che implicherebbe un dato mancante
+                    anziché "non applicabile a questo store". */}
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games') && (
+                  <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/5 shrink-0">
+                    <HardDrive size={14} className="text-blue-400 shrink-0" />
+                    <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{t('dashboard:sidebar.predictedSize')}</span>
+                    <span className="ml-auto text-sm font-black italic">
+                      {predictedSizeLoading
+                        ? <span className="opacity-30 text-xs font-normal">{t('dashboard:sidebar.predictedSizeLoading')}</span>
+                        : predictedSizeBytes && predictedSizeBytes > 0
+                          ? `${(predictedSizeBytes / (1024 ** 3)).toFixed(1)} GB`
+                          : <span className="opacity-30 text-xs font-normal">—</span>}
+                    </span>
+                  </div>
+                )}
 
                 {/* Achievements — nascosto: non ancora implementato */}
                 {/* {selectedGame.achievements && ( ... )} */}
@@ -5253,6 +5349,24 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         )}
                       </Focusable>
                     )}
+                    {/* Richiesta utente — tab Info Hardware: deve restare
+                        SEMPRE per ultima, indipendentemente da altre tab
+                        che potrebbero essere aggiunte in futuro. Per
+                        questo vive qui, come ultimo elemento fisico di
+                        questo blocco — qualunque nuova tab futura va
+                        inserita PRIMA di questa, mai dopo. */}
+                    <Focusable group="settings-tabs" id="settings-tab-hardware" onEnter={() => {
+                      setActiveSettingsTab('hardware');
+                      const target = getFirstFocusableForSettingsTabRef.current('hardware');
+                      setTimeout(() => setFocusedId(target ?? 'settings-tab-hardware'), 50);
+                    }}>
+                      {(isFocused) => (
+                        <button className={cn(
+                          "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
+                          activeSettingsTab === 'hardware' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                        )}>{t('tabs.hardware')}</button>
+                      )}
+                    </Focusable>
                   </div>
                 </div>
                 {(() => {
@@ -6525,6 +6639,35 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       </div>
                     </div>
                   </div>
+                ) : activeSettingsTab === 'hardware' ? (
+                  /* ── Info Hardware — richiesta utente: Motherboard, CPU,
+                     GPU, RAM, HDD, OS. Tutti i valori letti senza permessi
+                     elevati (vedi systemInfo.ts) — nessun dmidecode/sudo. */
+                  <div className="space-y-4">
+                    {!systemInfo ? (
+                      <p className={cn("text-xs font-mono", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                        {t('hardware.loading')}
+                      </p>
+                    ) : (
+                      [
+                        { icon: CircuitBoard, label: t('hardware.motherboard'), value: systemInfo.motherboard },
+                        { icon: Cpu,          label: t('hardware.cpu'),         value: systemInfo.cpu },
+                        { icon: Monitor,      label: t('hardware.gpu'),         value: systemInfo.gpu },
+                        { icon: MemoryStick,  label: t('hardware.ram'),         value: systemInfo.ram },
+                        { icon: HardDrive,    label: t('hardware.storage'),     value: systemInfo.storage },
+                        { icon: Laptop,       label: t('hardware.os'),          value: systemInfo.os },
+                      ].map((row, i) => (
+                        <div key={i} className={cn(
+                          "flex items-center gap-4 p-4 rounded-xl",
+                          theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                        )}>
+                          <row.icon size={18} className="text-blue-400 shrink-0" />
+                          <span className="text-[10px] font-black uppercase tracking-widest opacity-40 w-32 shrink-0">{row.label}</span>
+                          <span className="text-sm font-mono truncate">{row.value}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 ) : null}
               </div>
             </div>
@@ -7356,6 +7499,58 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               )}
                             />
                           )}
+                        </Focusable>
+                      </label>
+                    )}
+                    {/* Richiesta utente — "auto-remaster" PSX: il core
+                        stesso è l'interruttore (verificato passo per passo
+                        a mano su hardware reale prima di implementarlo).
+                        'mednafen_psx_hw_libretro.so' deve combaciare con
+                        PSX_REMASTER_CORE in classicPlugin.ts — libretroCore
+                        può essere un percorso assoluto risolto o il nome
+                        file grezzo, .includes() copre entrambi i casi. */}
+                    {selectedGame.system === 'psx' && (
+                      <label className="block">
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">{t('gameOptions:psxRemaster')}</span>
+                        <Focusable
+                          group="game-options"
+                          id="field-psxRemaster"
+                          onEnter={async () => {
+                            if (psxRemasterToggling) return;
+                            const isEnabled = (localGameConfig.libretroCore ?? '').includes('mednafen_psx_hw');
+                            setPsxRemasterToggling(true);
+                            try {
+                              const res = await fetch(`/api/games/${selectedGame.id}/psx-remaster`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ enabled: !isEnabled })
+                              });
+                              const data = await res.json();
+                              if (data.success) {
+                                const newCore = !isEnabled ? 'mednafen_psx_hw_libretro.so' : 'mednafen_psx_libretro.so';
+                                setLocalGameConfig(prev => ({ ...prev, libretroCore: newCore }));
+                                setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, libretroCore: newCore } : g));
+                                play('select');
+                              }
+                            } finally {
+                              setPsxRemasterToggling(false);
+                            }
+                          }}
+                        >
+                          {(isFocused) => {
+                            const isEnabled = (localGameConfig.libretroCore ?? '').includes('mednafen_psx_hw');
+                            return (
+                              <button className={cn(
+                                "w-full flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-black italic transition-all",
+                                isEnabled ? "bg-blue-600 text-white" : theme === 'dark' ? "bg-black/40" : "bg-white",
+                                isFocused && !isEnabled ? "border-2 border-blue-500" : isEnabled ? "" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                              )}>
+                                <Sparkles size={14} className="shrink-0" />
+                                {psxRemasterToggling
+                                  ? t('gameOptions:psxRemasterToggling')
+                                  : isEnabled ? t('gameOptions:psxRemasterOn') : t('gameOptions:psxRemasterOff')}
+                              </button>
+                            );
+                          }}
                         </Focusable>
                       </label>
                     )}

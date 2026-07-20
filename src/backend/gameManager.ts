@@ -9,7 +9,7 @@ import { SteamPlugin } from './plugins/steamPlugin';
 import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
-import { ClassicPlugin } from './plugins/classicPlugin';
+import { ClassicPlugin, PSX_REMASTER_CORE, PSX_DEFAULT_CORE, writePsxRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
 import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary } from './runners/implementations';
 import { downloadManager, resolveGogExe } from './downloadManager';
@@ -333,6 +333,17 @@ class GameManager {
           notificationEngine.emit({ type: 'launch-error', gameId: before.gameId, gameTitle: before.gameTitle, error: errorText });
           return;
         }
+
+        // Richiesta utente — tempo di gioco reale (era hardcoded a 0 per
+        // GOG/Epic/Classic Console, solo Steam calcola un valore reale
+        // dalla propria Web API). Solo qui, DOPO il controllo di uscita
+        // rapida sopra: una sessione troppo breve è già trattata come
+        // probabile fallimento di avvio, non tempo di gioco reale da
+        // accumulare. Vedi db.addPlayTime per il dettaglio su Steam
+        // (nessun rischio di doppio conteggio, la sua Web API resta
+        // comunque l'autorità finale a ogni sync).
+        db.addPlayTime(before.gameId, elapsedMs / (1000 * 60 * 60));
+        this.notifyLibraryRefreshed(); // la sidebar mostra il tempo aggiornato subito, non al prossimo sync periodico
 
         if (game.verified) {
           // Spec: "se il gioco funziona il messaggio non appare più" —
@@ -1260,6 +1271,60 @@ class GameManager {
       const plugin = this.plugins.find(p => p.id === id);
       if (plugin) plugin.enabled = enabled;
     }
+  }
+
+  /**
+   * Richiesta utente — dimensione PREVISTA dell'installazione (prima di
+   * scaricare), on-demand per un solo gioco alla volta. Solo GOG ed Epic
+   * per ora (decisione esplicita dell'utente): Steam non ha una fonte
+   * già cablata per il "non ancora installato" (SizeOnDisk esiste solo
+   * per manifest locali, cioè giochi già installati), Classic Console
+   * non si applica (le ROM sono già file completi, nessuna fase di
+   * installazione separata). Ritorna null per qualunque altro store, o
+   * se il plugin giusto non espone questo metodo.
+   *
+   * v1.1.90 — richiesto dall'utente: cache persistente invece di
+   * rifare la chiamata a lgogdownloader/legendary ogni volta che il
+   * gioco viene selezionato. Se già presente in DB, ritorna subito
+   * quello senza richiamare il plugin; altrimenti lo recupera una
+   * volta e lo scrive per le volte successive.
+   */
+  /**
+   * Richiesta utente — "auto-remaster" per PSX: attiva/disattiva passando
+   * dal core software (mednafen_psx, default — più fedele, nessun
+   * upscaling) al core hardware-accelerato (mednafen_psx_hw, "Beetle PSX
+   * HW") con un preset di risoluzione/AA/PGXP verificato passo per passo
+   * a mano dall'utente su hardware reale. Il core stesso è l'interruttore
+   * — nessun campo DB dedicato: disattivare si limita a tornare al core
+   * di default, che semplicemente ignora il file di preset (vive nella
+   * cartella di config di un core diverso).
+   */
+  async setPsxRemaster(gameId: string, enabled: boolean): Promise<{ success: boolean; message?: string }> {
+    const game = db.getGameById(gameId);
+    if (!game || game.system !== 'psx') {
+      return { success: false, message: 'Non è un gioco PSX' };
+    }
+    if (enabled && game.executablePath) {
+      writePsxRemasterOptions(game.executablePath);
+    }
+    db.updateGameConfig(gameId, { libretroCore: enabled ? PSX_REMASTER_CORE : PSX_DEFAULT_CORE });
+    this.addLog(`[CLASSIC] Auto-remaster PSX ${enabled ? 'attivato' : 'disattivato'} per ${game.title}.`, 'system');
+    return { success: true };
+  }
+
+  async getPredictedInstallSize(gameId: string): Promise<number | null> {
+    const game = db.getGameById(gameId);
+    if (!game) return null;
+    if (typeof game.predictedSizeBytes === 'number' && game.predictedSizeBytes > 0) {
+      return game.predictedSizeBytes;
+    }
+    const plugin = this.plugins.find(p => p.id === game.store) as any;
+    if (!plugin || typeof plugin.getPredictedInstallSizeBytes !== 'function') return null;
+    const bytes = await plugin.getPredictedInstallSizeBytes(gameId);
+    if (typeof bytes === 'number' && bytes > 0) {
+      db.setPredictedSizeBytes(gameId, bytes);
+    }
+    return bytes;
   }
 
   async refreshRunners() {

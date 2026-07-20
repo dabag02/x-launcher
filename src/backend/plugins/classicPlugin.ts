@@ -12,7 +12,7 @@
  *   GBA       → RetroArch (mgba_libretro.so)
  *   GBC/GB    → RetroArch (gambatte_libretro.so)
  *   MD/MEGA   → RetroArch (genesis_plus_gx_libretro.so)
- *   PSX/PS1   → RetroArch (pcsx_rearmed_libretro.so)
+ *   PSX/PS1   → RetroArch (mednafen_psx_libretro.so)
  *   N64       → RetroArch (mupen64plus_next_libretro.so)
  *   DOS       → DOSBox
  *   SCUMMVM   → ScummVM
@@ -22,9 +22,10 @@
 import { StorePlugin } from './base';
 import { writeLog } from '../logger';
 import { Game } from '../../types';
-import { existsSync, readdirSync, statSync, mkdirSync } from 'fs';
+import { existsSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
+import { execFileSync } from 'child_process';
 
 // ---------------------------------------------------------------------------
 // Mappa nome cartella → { runner, core libretro, sistema visualizzato }
@@ -64,8 +65,16 @@ const SYSTEM_MAP: Record<string, SystemInfo> = {
   'ms':    { runner: 'RetroArch', core: 'genesis_plus_gx_libretro.so',   label: 'Sega Master System', genre: 'Action', canonical: 'mastersystem' },
   'mastersystem': { runner: 'RetroArch', core: 'genesis_plus_gx_libretro.so', label: 'Sega Master System', genre: 'Action', canonical: 'mastersystem' },
   // PlayStation
-  'psx':   { runner: 'RetroArch', core: 'pcsx_rearmed_libretro.so',      label: 'PlayStation',        genre: 'Action', canonical: 'psx' },
-  'ps1':   { runner: 'RetroArch', core: 'pcsx_rearmed_libretro.so',      label: 'PlayStation',        genre: 'Action', canonical: 'psx' },
+  // v1.1.96 — segnalato dall'utente: pcsx_rearmed è ottimizzato per ARM
+  // (il nome stesso lo dice) e non risulta più pacchettizzato in modo
+  // affidabile per x86_64 su Arch — il pacchetto trovabile con una
+  // ricerca reale è specifico per Arch Linux ARM, non per i repository
+  // x86_64 standard. mednafen_psx (pacchetto Arch: libretro-beetle-psx,
+  // confermato attuale su extra/x86_64) è il default più sensato su
+  // desktop x86_64, e l'utente lo ha già verificato funzionante sul
+  // proprio sistema con lo stesso identico gioco.
+  'psx':   { runner: 'RetroArch', core: 'mednafen_psx_libretro.so',      label: 'PlayStation',        genre: 'Action', canonical: 'psx' },
+  'ps1':   { runner: 'RetroArch', core: 'mednafen_psx_libretro.so',      label: 'PlayStation',        genre: 'Action', canonical: 'psx' },
   'psp':   { runner: 'RetroArch', core: 'ppsspp_libretro.so',            label: 'PSP',                genre: 'Action', canonical: 'psp' },
   // N64
   'n64':   { runner: 'RetroArch', core: 'mupen64plus_next_libretro.so',  label: 'Nintendo 64',        genre: 'Action', canonical: 'n64' },
@@ -105,7 +114,7 @@ export const COMPATIBLE_CORES_BY_SYSTEM: Record<string, string[]> = {
   gb:           ['gambatte', 'mgba', 'sameboy', 'tgbdual'],
   genesis:      ['genesis_plus_gx', 'picodrive', 'blastem'],
   mastersystem: ['genesis_plus_gx', 'picodrive'],
-  psx:          ['pcsx_rearmed', 'mednafen_psx', 'mednafen_psx_hw', 'swanstation', 'beetle_psx', 'beetle_psx_hw'],
+  psx:          ['mednafen_psx', 'mednafen_psx_hw', 'beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
   psp:          ['ppsspp'],
   n64:          ['mupen64plus_next', 'parallel_n64'],
   arcade:       ['mame', 'mame2003_plus', 'mame2010', 'fbneo', 'fbalpha2012'],
@@ -233,6 +242,92 @@ function titleFromFilename(filename: string): string {
     .trim();
 }
 
+// Richiesta utente — diagnosi fatta da loro stessi: passando lo ZIP di un
+// gioco PSX a RetroArch, il lancio fallisce; estraendolo a mano e puntando
+// al file .cue funziona con lo stesso identico core. Causa: a differenza
+// dei sistemi a cartuccia (SNES/Genesis/MAME, un solo file per ROM,
+// RetroArch legge comodamente dentro lo zip), un dump PSX è un'immagine CD
+// (.cue + uno o più .bin) — più file con riferimenti relativi fra loro,
+// che il meccanismo generico "leggi dentro lo zip" di RetroArch non
+// gestisce allo stesso modo. Estendibile in futuro ad altri sistemi CD
+// (Saturn, Dreamcast, PC Engine CD) aggiungendoli qui.
+const CD_BASED_SYSTEMS = new Set(['psx']);
+
+/** Cerca un file .cue direttamente dentro la cartella indicata (non ricorsivo — un'estrazione pulita ne ha uno solo alla radice). */
+function findCueFile(dir: string): string | null {
+  try {
+    const cue = readdirSync(dir).find(f => f.toLowerCase().endsWith('.cue'));
+    return cue ? path.join(dir, cue) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Richiesta utente — "auto-remaster" per PSX, verificato passo per passo a
+// mano col vero client RetroArch prima di scrivere una riga di codice:
+// - Il core software (mednafen_psx_libretro.so, il default già in uso) non
+//   supporta upscaling della risoluzione interna — serve la variante
+//   hardware-accelerata mednafen_psx_hw_libretro.so ("Beetle PSX HW").
+// - --appendconfig= NON funziona in modo affidabile per queste opzioni: il
+//   log del test dal vivo mostra che RetroArch le legge, ma poi il file
+//   PERSISTENTE del core (`Beetle PSX HW.opt`, riscritto ad ogni chiusura)
+//   le sovrascrive silenziosamente con i default. Il meccanismo che
+//   funziona davvero è l'override PER-CONTENUTO che RetroArch stesso
+//   supporta nativamente: un file con lo stesso nome del contenuto (senza
+//   estensione) nella stessa cartella di config del core, con priorità più
+//   alta del file globale.
+// - Valori confermati funzionanti dall'utente su hardware reale (incluso
+//   un secondo giro per il testo "posterizzato": filtro escluso dagli
+//   sprite + colore a 32bpp con dithering disabilitato, entrambi
+//   documentati come fix noti per questo sintomo).
+export const PSX_REMASTER_CORE = 'mednafen_psx_hw_libretro.so';
+export const PSX_DEFAULT_CORE  = 'mednafen_psx_libretro.so';
+
+const PSX_REMASTER_OPTIONS = [
+  'beetle_psx_hw_renderer = "hardware_vk"',
+  'beetle_psx_hw_internal_resolution = "2x"',
+  'beetle_psx_hw_filter = "bilinear"',
+  'beetle_psx_hw_filter_exclude_sprite = "enabled"',
+  'beetle_psx_hw_depth = "32bpp"',
+  'beetle_psx_hw_dither_mode = "disabled"',
+  'beetle_psx_hw_msaa = "2x"',
+  'beetle_psx_hw_pgxp_mode = "memory"',
+].join('\n') + '\n';
+
+/**
+ * Scrive il file di override per-contenuto con il preset auto-remaster,
+ * se non esiste già — richiamata quando l'utente attiva l'opzione per un
+ * gioco PSX specifico. Il nome del file deve combaciare ESATTAMENTE col
+ * nome del contenuto caricato (senza estensione) — verificato dal vivo:
+ * "Crash Bandicoot (USA).cue" → "Crash Bandicoot (USA).opt".
+ *
+ * Non serve mai RIMUOVERE questo file per tornare all'emulazione
+ * originale: disattivare l'opzione si limita a cambiare il core in uso
+ * (vedi PSX_DEFAULT_CORE) — un core diverso legge da una cartella di
+ * config diversa ("Beetle PSX", non "Beetle PSX HW"), quindi questo file
+ * semplicemente smette di essere rilevante, senza doverlo toccare.
+ */
+export function writePsxRemasterOptions(cueFilePath: string): void {
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config');
+  const optDir = path.join(configHome, 'retroarch', 'config', 'Beetle PSX HW');
+  const contentName = path.basename(cueFilePath, path.extname(cueFilePath));
+  const optPath = path.join(optDir, `${contentName}.opt`);
+
+  try {
+    mkdirSync(optDir, { recursive: true });
+    // Scrive solo se assente — se l'utente ha già modificato queste
+    // impostazioni per QUESTO gioco specifico dentro RetroArch stesso
+    // (es. dal menu rapido), non vogliamo sovrascrivere le sue scelte
+    // ogni volta che riattiva l'opzione dalla Dashboard.
+    if (!existsSync(optPath)) {
+      writeFileSync(optPath, PSX_REMASTER_OPTIONS, 'utf-8');
+      writeLog('info', `[CLASSIC] Preset auto-remaster PSX scritto: ${optPath}`);
+    }
+  } catch (e) {
+    writeLog('warning', `[CLASSIC] Scrittura preset auto-remaster PSX fallita (${optPath}): ${e}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -311,9 +406,52 @@ export class ClassicPlugin extends StorePlugin {
     return games;
   }
 
+  // Richiesta utente — diagnosi fatta da loro stessi: passando lo ZIP di un
+  // gioco PSX a RetroArch, il lancio fallisce; estraendolo a mano e
+  // puntando al file .cue funziona con lo stesso identico core. Causa: a
+  // differenza dei sistemi a cartuccia (SNES/Genesis/MAME, un solo file
+  // per ROM, RetroArch legge comodamente dentro lo zip), un dump PSX è
+  // un'immagine CD (.cue + uno o più .bin) — più file con riferimenti
+  // relativi fra loro, che il meccanismo generico "leggi dentro lo zip"
+  // di RetroArch non gestisce allo stesso modo. Estendibile in futuro ad
+  // altri sistemi CD (Saturn, Dreamcast, PC Engine CD) aggiungendoli qui.
+  private extractCdImageIfNeeded(romPath: string, canonicalSystem: string | undefined): string {
+    if (!canonicalSystem || !CD_BASED_SYSTEMS.has(canonicalSystem)) return romPath;
+    if (!romPath.toLowerCase().endsWith('.zip')) return romPath;
+
+    const extractDir = path.join(path.dirname(romPath), '.extracted', path.basename(romPath, path.extname(romPath)));
+
+    // Cache su disco: se già estratto in un giro precedente (.cue già
+    // presente), non ripetere — l'unzip di un'immagine CD (centinaia di
+    // MB) è sincrono e bloccante, accettabile solo perché avviene una
+    // volta sola per gioco, non ad ogni scansione della libreria.
+    const cached = findCueFile(extractDir);
+    if (cached) return cached;
+
+    try {
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('unzip', ['-o', '-q', romPath, '-d', extractDir], { timeout: 120_000 });
+      const cue = findCueFile(extractDir);
+      if (cue) {
+        writeLog('info', `[CLASSIC] Estratto ${path.basename(romPath)} → ${cue}`);
+        return cue;
+      }
+      writeLog('warning', `[CLASSIC] Estrazione di ${path.basename(romPath)} riuscita ma nessun .cue trovato dentro — uso lo zip originale (probabilmente non partirà).`);
+      return romPath;
+    } catch (e) {
+      writeLog('warning', `[CLASSIC] Estrazione di ${path.basename(romPath)} fallita (manca 'unzip'? installa con: sudo pacman -S unzip): ${e} — uso lo zip originale.`);
+      return romPath;
+    }
+  }
+
   private buildGame(romPath: string, system: SystemInfo, systemDir: string): Game {
     const title = titleFromFilename(romPath);
     const id    = makeGameId(romPath);
+    // v1.1.95 — per sistemi CD-based (PSX per ora), estrae lo zip e
+    // punta al .cue reale invece del pacchetto compresso, vedi
+    // extractCdImageIfNeeded sopra. Per ogni altro sistema, ritorna
+    // romPath invariato (nessun costo aggiuntivo).
+    const executablePath = this.extractCdImageIfNeeded(romPath, system.canonical);
 
     return {
       id,
@@ -329,7 +467,7 @@ export class ClassicPlugin extends StorePlugin {
       genres:        [system.genre],
       categories:    ['Single-player'],
       status:        'Ready to Launch',
-      executablePath: romPath,
+      executablePath: executablePath,
       libretroCore:  system.core,   // può essere sovrascritto dall'utente (Step 4)
       // v1.0.0 — chiave canonica di sistema, usata per filtrare quali core
       // RetroArch installati sono compatibili con questo gioco specifico

@@ -30,6 +30,8 @@
     "rating": "Rating {{pct}}%",
     "hltb": "HLTB {{hours}}h",
     "playtime": "Playtime",
+    "predictedSize": "Predicted size",
+    "predictedSizeLoading": "Checking…",
     "loadingLibrary": "Loading library…",
     "welcomeBackNamed": "Welcome back, {{name}}",
     "welcomeBack": "Welcome back",

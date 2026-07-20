@@ -30,6 +30,8 @@
     "rating": "Voto {{pct}}%",
     "hltb": "HLTB {{hours}}h",
     "playtime": "Tempo di gioco",
+    "predictedSize": "Dimensione prevista",
+    "predictedSizeLoading": "Verifica in corso…",
     "loadingLibrary": "Caricamento libreria…",
     "welcomeBackNamed": "Bentornato, {{name}}",
     "welcomeBack": "Bentornato",

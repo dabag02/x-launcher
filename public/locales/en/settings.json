@@ -4,7 +4,17 @@
     "system": "System",
     "plugins": "Plugins",
     "input": "Input",
-    "aiAdvisor": "AI Advisor"
+    "aiAdvisor": "AI Advisor",
+    "hardware": "Hardware Info"
+  },
+  "hardware": {
+    "loading": "Detecting hardware…",
+    "motherboard": "Motherboard",
+    "cpu": "CPU",
+    "gpu": "GPU",
+    "ram": "RAM",
+    "storage": "Storage",
+    "os": "Operating system"
   },
   "accounts": {
     "sessionActive": "Session Active · Synced: {{synced}} · Installed: {{installed}}",

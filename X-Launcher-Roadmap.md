@@ -3,6 +3,41 @@
 Documento di riferimento elaborato dall'analisi tecnica del progetto
 e dal confronto con il documento Analisi_XLauncher_HTPC.
 
+## Milestone stabili
+
+Da v1.1.79 in poi, ogni milestone stabile prende il nome di un pianeta o satellite del sistema solare (richiesta esplicita dell'utente).
+
+- **v1.1.79-Gaia** (18 luglio 2026) — Step 18, Step 19b (i18n) e Step 19a (`xlaunch://`) tutti chiusi e testati su hardware reale; migliorie RetroArch e tastiera virtuale incluse. Vedi CHANGELOG.md per il dettaglio completo di ogni versione dalla milestone precedente fino a questa.
+- v1.1.65-rc.3 (16 luglio 2026) — interfaccia interamente bilingue + log di debug unificati in inglese (milestone precedente, nome non adottato: la convenzione parte da Gaia)
+
+## Regole di sviluppo consolidate in questa sessione
+
+Convenzioni emerse e adottate stabilmente nel corso della sessione, valide per tutto il lavoro successivo:
+
+- **Bilingue di default**: ogni nuova funzione che introduce testo va realizzata in italiano E inglese fin da subito, non più italiano-poi-tradotto-dopo. I log di debug (`writeLog`/`console.*`) restano invece **solo in inglese** — mai bilingue, la lingua franca dello sviluppo non va tradotta né tenuta doppia.
+- **Versionamento**: ogni milestone stabile prende il nome di un pianeta o satellite del sistema solare (prima: v1.1.79-Gaia). Fra una milestone e l'altra, le build di sviluppo intermedie portano il suffisso `-dev.N` sul numero di patch corrente (es. v1.1.86-dev.1) — distinto sia dal nome della milestone sia dalle vecchie candidate `-rc.N`, ormai abbandonate.
+- **Consegna file**: condividere solo i singoli file modificati, non uno zip dell'intero progetto — a meno che le modifiche non siano strutturali e coinvolgano molti file contemporaneamente, o si stia congelando una milestone stabile (dove il pacchetto completo è invece atteso).
+- **Verificare prima di assumere**: quando un comando, un'opzione CLI, il nome di un campo JSON o il comportamento dichiarato di uno strumento esterno non è mai stato testato dal vivo in questo ambiente, dirlo esplicitamente e loggare l'output grezzo/reale al primo utilizzo — mai fidarsi ciecamente della documentazione o di un pattern plausibile ma non verificato. Lezione imparata a caro prezzo più volte: `--appendconfig=` di RetroArch (ignorato in silenzio), `--list details,json` di lgogdownloader (sintassi sbagliata, mai verificata), l'auto-creazione dichiarata da Mozilla per `--profile` (non affidabile in pratica).
+- **Diagnosticare prima di ritentare**: di fronte a un comportamento inatteso che si ripete, aggiungere log/diagnostica reale prima di proporre un secondo tentativo di fix alla cieca — non indovinare una seconda volta senza dati concreti (saga della tray sparita, v1.1.70-72: la causa vera si è trovata solo dopo aver smesso di buttare via l'output del processo).
+- **Test isolati quando fattibile**: per bug di logica SQL o parsing, verificare con uno script isolato (`node -e`, `better-sqlite3` in memoria) usando dati reali forniti dall'utente quando disponibili, invece di fidarsi del solo ragionamento sul codice — ha rivelato più volte insufficienze in un fix che sembrava corretto a prima vista (protezione titolo/tempo di gioco nell'UPSERT, parsing dimensione GOG).
+- **`patches/`**: cartella rimossa (era per patch incrementali via script, non più in uso da tempo) — qualunque modifica va applicata direttamente ai file del progetto, non tramite script di patch separati.
+
+## Apertura ai test: installazione cross-DE e cross-distro (v1.1.80+)
+
+Obiettivo dichiarato dall'utente: rendere X-Launcher installabile su qualunque distribuzione, non solo Arch, e su qualunque dei desktop environment più diffusi (XFCE/MATE/GNOME/Plasma) — non solo XFCE. Prerequisito: la creazione di una sessione dedicata (Gamescope) è oggi incompleta/non funzionante, quindi ci si concentra sull'installazione entro un DE esistente per questa prima apertura.
+
+Formato di packaging discusso: scartati AppImage/Flatpak (l'app non è una GUI autonoma — demone Node + finestra browser + tray Python, deve gestire finestre del DE ospite e lanciare processi di sistema come Wine/RetroArch/Steam, incompatibile col modello sandboxed/containerizzato di entrambi). Confermato `install.sh`, da riscrivere per essere davvero cross-distro (rilevamento del gestore pacchetti: apt/dnf/pacman/zypper) — lavoro non ancora iniziato.
+
+**v1.1.80 — primo passo, rilevamento DE per il kiosk mode**: `--kiosk` di Chromium scartato su indicazione esplicita dell'utente (causa problemi di prestazione, già deprecato in passato). Bug reale trovato verificando il codice: il rilevamento sessione-dedicata-sì/no si basava solo su `pgrep -x xfwm4`, avrebbe fallito silenziosamente su MATE/GNOME/Plasma — corretto con `$XDG_CURRENT_DESKTOP`. Meccanismo di rimozione decorazioni riscritto con `_MOTIF_WM_HINTS` (verificato con ricerca reale come supportato da Mutter/KWin/xfwm4/Marco), un solo meccanismo per tutti e quattro i desktop invece di quattro trucchi separati. Non ancora testato dal vivo su nessuno dei quattro DE — vedi CHANGELOG.md v1.1.80 per il dettaglio completo.
+
+**v1.1.81 — tre bug reali dal primo test su XFCE**: `build.sh start firefox` non inoltrava l'argomento browser (bug in `build.sh`, non in `kiosk-launch.sh`); Firefox apriva la Dashboard come scheda in una finestra già in esecuzione invece che in un'istanza dedicata (`--new-instance` da solo non basta su Linux, serve `--no-remote` + profilo dedicato, confermato con ricerca reale); il decoratore restava visibile anche su XFCE nonostante `_MOTIF_WM_HINTS` — su suggerimento dell'utente, tornato a un dispatch per-DE con il vecchio meccanismo xfwm4 provato per XFCE specificamente, `_MOTIF_WM_HINTS` mantenuto come livello aggiuntivo per tutti (unico disponibile per MATE/GNOME/Plasma), più diagnostica reale aggiunta per il prossimo giro di test. Vedi CHANGELOG.md v1.1.81.
+
+**Ancora da fare**: `install.sh` cross-distro (rilevamento gestore pacchetti, mai iniziato); conferma su hardware reale che il dispatch per-DE risolva davvero il decoratore su XFCE, e test su MATE/GNOME/Plasma quando possibile.
+
+## Migliorie sidebar/Gestisci Account (fuori sequenza, prima di 19c)
+
+Tre richieste dell'utente, tutte confermate funzionanti su hardware reale dopo alcuni giri di fix: dimensione prevista di installazione per GOG/Epic (v1.1.88, corretta la sintassi `lgogdownloader` in v1.1.90/91 dopo test reali — formato "size: byte grezzi" senza unità, non "1.23 GB" come ipotizzato); tempo di gioco reale accumulato per GOG/Epic/Classic Console (v1.1.89, fix persistenza in v1.1.90 — una sync di libreria sovrascriveva l'accumulo); entrambi resi persistenti su richiesta esplicita, cache in DB invece di rifare il fetch ad ogni selezione. Tab "Info Hardware" in Gestisci Account (v1.1.92) — Motherboard/CPU/GPU/RAM/HDD/OS, tutti leggibili senza permessi elevati, sempre in ultima posizione nella tab bar. Vedi CHANGELOG.md v1.1.88-92 per il dettaglio completo.
+
 -----
 
 ## Regole di processo

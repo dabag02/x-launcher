@@ -67,7 +67,7 @@ start() {
 
 case "$ACTION" in
   compile) compile ;;
-  start)   start ;;
+  start)   start "$@" ;;
   dev)     npm run dev ;;
   all)     compile && start "$@" ;;
   *)       echo "Uso: ./build.sh [compile|start|dev|all] [browser]"; exit 1 ;;

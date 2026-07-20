@@ -89,6 +89,26 @@ export interface Game {
   /** Percorso al file .conf personalizzato per DOSBox */
   dosboxConf?: string;
 
+  /**
+   * Override manuale del titolo usato per lo scraping metadati
+   * (SGDB/IGDB/HLTB) — richiesto dall'utente per i ROM MAME, il cui nome
+   * file spesso non è un titolo riconoscibile (es. "gngt.zip"). Non
+   * cambia il titolo mostrato in libreria (`title` resta invariato),
+   * solo la query di ricerca metadati. Utile anche per store diversi da
+   * Classic Console, se lo scraping automatico prende un abbinamento
+   * sbagliato o non trova nulla.
+   */
+  scrapeTitle?: string;
+
+  /**
+   * Richiesta utente — dimensione prevista di installazione (GOG/Epic),
+   * cache persistente: recuperata una volta da lgogdownloader/legendary,
+   * scritta qui, mai più ri-richiesta automaticamente per lo stesso
+   * gioco. null/undefined = non ancora recuperata o non disponibile per
+   * questo store.
+   */
+  predictedSizeBytes?: number;
+
   /** Core Libretro da caricare (es. ~/.config/retroarch/cores/snes9x_libretro.so) */
   libretroCore?: string;
   // v1.0.0 — chiave canonica di sistema per i giochi Classic Console

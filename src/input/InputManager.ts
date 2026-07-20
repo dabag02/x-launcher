@@ -14,6 +14,33 @@ function extractVendorId(id: string): number | undefined {
   return m ? parseInt(m[1], 16) : undefined;
 }
 
+// Step 19a — segnalato dall'utente: X e Y invertiti, ma solo su Firefox,
+// mai su Chromium. Verificato con una ricerca reale (non indovinato):
+// bug noto e datato della Gamepad API di Firefox su Linux (Mozilla
+// bugzilla #1152937, riprodotto anche con controller DS4 — "the
+// triangle and square button are switched" — stesso sintomo, indici 2/3
+// scambiati) — Chromium sullo stesso sistema riporta l'ordine corretto.
+// Non è un bug risolvibile lato nostro cambiando come leggiamo il
+// Gamepad API: è la stessa Firefox a restituire l'indice sbagliato nel
+// suo array `buttons`. Corretto qui, in un punto SOLO — readPrimary() è
+// l'unico punto in cui il risultato di TUTTI i plugin (XInput/DS4/DS5/
+// Generic, tutti e quattro con la stessa convenzione di indici 0-3 per
+// A/B/X/Y) passa prima di raggiungere il resto dell'app — invece di
+// duplicare lo stesso fix in ciascuno dei quattro plugin separatamente.
+const IS_FIREFOX = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent);
+
+function swapXY(state: InputState): InputState {
+  const hasX = state.buttons.has('X');
+  const hasY = state.buttons.has('Y');
+  if (!hasX && !hasY) return state; // niente da scambiare, nessuna allocazione inutile
+  const buttons = new Set(state.buttons);
+  buttons.delete('X');
+  buttons.delete('Y');
+  if (hasX) buttons.add('Y');
+  if (hasY) buttons.add('X');
+  return { ...state, buttons };
+}
+
 /** Sceglie il plugin più appropriato per un gamepad */
 function matchPlugin(gp: Gamepad, plugins: InputPlugin[]): InputPlugin {
   const vendorId = extractVendorId(gp.id);
@@ -108,7 +135,8 @@ class InputManagerClass {
     const gp = navigator.getGamepads()[0];
     if (!gp) return { buttons: new Set<ButtonName>(), axes: [0, 0, 0, 0] };
     const plugin = matchPlugin(gp, this.plugins);
-    return plugin.mapButtons(gp);
+    const state = plugin.mapButtons(gp);
+    return IS_FIREFOX ? swapXY(state) : state;
   }
 
   /** Vibrazione sul dispositivo primario */

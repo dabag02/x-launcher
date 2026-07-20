@@ -240,6 +240,13 @@ if (!existingCols.includes('last_launched_at')) {
 if (!existingCols.includes('scrape_title')) {
   db.exec("ALTER TABLE games ADD COLUMN scrape_title TEXT");
 }
+// Richiesta utente — dimensione prevista di installazione (GOG/Epic),
+// scritta una volta come cache persistente invece di rifare la chiamata
+// a lgogdownloader/legendary ogni volta che il gioco viene selezionato.
+// NULL = non ancora recuperata (o store senza questa fonte).
+if (!existingCols.includes('predicted_size_bytes')) {
+  db.exec("ALTER TABLE games ADD COLUMN predicted_size_bytes INTEGER");
+}
 const compatCols = (db.prepare("PRAGMA table_info(compat_profiles)").all() as any[]).map(r => r.name);
 if (!compatCols.includes('winetricks_verbs')) {
   db.exec("ALTER TABLE compat_profiles ADD COLUMN winetricks_verbs TEXT");
@@ -313,6 +320,7 @@ function rowToGame(row: any): Game {
     system:         row.system          ?? undefined,
     scummvmId:      row.scummvm_id      ?? undefined,
     scrapeTitle:    row.scrape_title    ?? undefined,
+    predictedSizeBytes: row.predicted_size_bytes ?? undefined,
     hltbHours: (row.hltb_main != null) ? {
       main:          row.hltb_main,
       completionist: row.hltb_completionist,
@@ -385,7 +393,20 @@ const stmtUpsertGame = db.prepare(`
     title            = CASE WHEN games.scrape_title IS NOT NULL THEN games.title ELSE excluded.title END,
     store            = excluded.store,
     is_installed     = excluded.is_installed,
-    play_time_hours  = excluded.play_time_hours,
+    -- Bug confermato dall'utente: play_time_hours accumulato da
+    -- db.addPlayTime() (sessioni di gioco reali) veniva sovrascritto alla
+    -- sync di libreria SUCCESSIVA (periodica ogni 5 minuti, o on-demand)
+    -- perché GOG/Epic/Classic Console riportano SEMPRE 0 (hardcoded nei
+    -- rispettivi plugin — nessuno dei tre ha una fonte reale) — "il
+    -- tempo di gioco sembra funzionare, ma il dato non è persistente".
+    -- Solo Steam calcola un valore reale dalla propria Web API, che deve
+    -- continuare a vincere sempre (a differenza di title/scrape_title,
+    -- qui NON serve un bypass diretto separato: un valore reale non è
+    -- mai esattamente 0, quindi "accetta il nuovo valore solo se >0,
+    -- altrimenti mantieni quello già in DB" distingue correttamente i
+    -- due casi con una sola condizione, senza dover sapere da quale
+    -- store viene la sync).
+    play_time_hours  = CASE WHEN excluded.play_time_hours > 0 THEN excluded.play_time_hours ELSE games.play_time_hours END,
     cover_image      = CASE
                          WHEN games.cover_image IS NOT NULL
                           AND games.cover_image NOT LIKE '%unsplash.com%'
@@ -553,6 +574,34 @@ export function getAllGames(): Game[] {
 // ramo scrapeTitle di updateGameConfig), mai da una sync regolare.
 export function updateGameTitle(id: string, title: string): void {
   db.prepare('UPDATE games SET title = ? WHERE id = ?').run(title, id);
+}
+
+// Richiesta utente — tempo di gioco reale: play_time_hours era hardcoded
+// a 0 per GOG/Epic/Classic Console nei rispettivi plugin (solo Steam
+// calcola un valore reale dalla propria Web API). Accumulato invece qui,
+// alla chiusura di ogni sessione di gioco (vedi gameManager.ts,
+// startGameExitPolling) — UPDATE atomica (play_time_hours = play_time_
+// hours + ?) invece di leggere e riscrivere, per evitare una corsa se
+// due sessioni si chiudessero in rapida successione. Applicata a
+// qualunque store uniformemente, Steam incluso: la sua Web API resta
+// comunque l'autorità finale a ogni sync (upsertGame sovrascrive
+// play_time_hours per Steam), quindi l'accumulo locale viene
+// semplicemente rimpiazzato al sync successivo per i giochi Steam —
+// nessun rischio di doppio conteggio, persiste solo dove serve davvero.
+export function addPlayTime(id: string, hours: number): void {
+  if (!(hours > 0)) return;
+  db.prepare('UPDATE games SET play_time_hours = play_time_hours + ? WHERE id = ?').run(hours, id);
+}
+
+// Richiesta utente — cache persistente della dimensione prevista di
+// installazione (GOG/Epic): scritta una volta dopo il primo recupero
+// riuscito da lgogdownloader/legendary, mai più ri-richiesta
+// automaticamente per lo stesso gioco. Scrittura diretta separata,
+// stesso principio di updateGameTitle/addPlayTime sopra — non passa
+// dall'upsert generico (i plugin non valorizzano mai questo campo nei
+// propri scan, quindi upsertGame non lo tocca comunque).
+export function setPredictedSizeBytes(id: string, bytes: number): void {
+  db.prepare('UPDATE games SET predicted_size_bytes = ? WHERE id = ?').run(bytes, id);
 }
 
 export function getGameById(id: string): Game | undefined {

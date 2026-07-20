@@ -368,4 +368,60 @@ export class EpicPlugin extends StorePlugin {
       message: 'Apri un terminale ed esegui: legendary auth — segui le istruzioni a schermo (login + codice di autorizzazione dal browser). Questa card si aggiornerà automaticamente al termine.',
     };
   }
+
+  /**
+   * Richiesta utente — dimensione PREVISTA dell'installazione (prima di
+   * scaricare), non quella reale su disco a installazione avvenuta.
+   * `legendary info <app_name> --json` esiste apposta per questo scopo
+   * (documentato: "Prints info about specified app name or manifest").
+   *
+   * NOTA ONESTA: non testato dal vivo in questo ambiente (nessun account
+   * Epic/legendary disponibile qui) — a differenza di `legendary list
+   * --json` (la cui struttura, vedi commento in cima al file, è stata
+   * verificata con un test reale in una sessione precedente), la
+   * struttura di `info --json` specificamente non lo è. Il JSON grezzo
+   * viene sempre loggato per intero al primo utilizzo: se il parsing
+   * sotto non trova il campo giusto, il log mostra comunque la
+   * struttura reale invece di fallire in silenzio.
+   */
+  async getPredictedInstallSizeBytes(gameId: string): Promise<number | null> {
+    const appName = gameId.replace(/^epic-/, '');
+    if (!binaryExists('legendary')) return null;
+
+    return new Promise((resolve) => {
+      const proc = spawn('legendary', ['info', appName, '--json'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => { proc.kill(); resolve(null); }, 20_000);
+
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', () => {
+        clearTimeout(timer);
+        writeLog('info', `[Epic] legendary info ${appName} --json — output grezzo: ${stdout.slice(0, 2000)}`);
+        if (stderr.trim()) writeLog('info', `[Epic] legendary info ${appName} --json — stderr: ${stderr.slice(0, 500)}`);
+        try {
+          const parsed = JSON.parse(stdout);
+          // Più nomi di campo plausibili, in punti plausibili della
+          // struttura — non verificato dal vivo quale sia quello reale,
+          // vedi nota sopra.
+          const candidates = [
+            parsed?.manifest?.disk_size, parsed?.manifest?.install_size,
+            parsed?.manifest?.download_size,
+            parsed?.disk_size, parsed?.install_size, parsed?.download_size,
+            parsed?.game?.disk_size, parsed?.game?.install_size,
+          ].filter((v) => typeof v === 'number' && v > 0);
+          if (candidates.length > 0) return resolve(candidates[0]);
+          writeLog('info', `[Epic] Dimensione prevista non trovata nella struttura JSON per ${appName} — vedi output grezzo sopra per adattare il parsing.`);
+          resolve(null);
+        } catch (e) {
+          writeLog('info', `[Epic] Output di legendary info ${appName} --json non è JSON valido — vedi output grezzo sopra.`);
+          resolve(null);
+        }
+      });
+      proc.on('error', () => { clearTimeout(timer); resolve(null); });
+    });
+  }
 }

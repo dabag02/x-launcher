@@ -550,8 +550,17 @@ export class RetroArchRunner extends BaseRunner {
     const binExe = isFlatpak ? 'flatpak' : bin;
     const coreLabel = resolvedCore ? path.basename(resolvedCore).replace('_libretro.so', '') : 'core da DB RetroArch';
     writeLog('launch', `[RETROARCH] ${binExe} ${args.join(' ')}`);
-    const { pid } = spawnDetached(binExe, args);
-    return { success: true, pid, message: `RetroArch avviato (${isFlatpak ? 'flatpak' : 'system'}) — core: ${coreLabel}` };
+    // Segnalato dall'utente (PSX/RetroArch): il gioco si chiudeva subito
+    // "senza alcun log nel terminale" — non perché RetroArch non stampasse
+    // nulla, ma perché spawnDetached() scarta stdout/stderr per default
+    // quando non le viene passato un logPath esplicito (stdio: 'ignore').
+    // Wine/Proton ed Epic (legendary) già lo fanno — RetroArch no, unico
+    // runner rimasto scoperto insieme a ScummVM/DOSBox. Un errore di
+    // RetroArch (BIOS mancante, core sbagliato, .cue non valido, ecc.)
+    // sarebbe stato perfettamente visibile fin dall'inizio con questo log.
+    const logPath = gameLaunchLogPath(game.id);
+    const { pid } = spawnDetached(binExe, args, {}, undefined, logPath);
+    return { success: true, pid, message: `RetroArch avviato (${isFlatpak ? 'flatpak' : 'system'}) — core: ${coreLabel}`, logPath };
   }
 
   async isAvailable() { return findRetroarchBin() !== null; }

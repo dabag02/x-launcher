@@ -14,7 +14,7 @@
 - **Route refresh**: `POST /api/library/refresh` — refresh manuale libreria
 - **Log su file**: daemon scrive su `~/.local/share/x-launcher/daemon.log`
 - **`build.sh`**: script unico per compilare e avviare
-- **`patches/`**: cartella per patch incrementali
+- **`patches/`**: cartella per patch incrementali (rimossa in una sessione successiva, non più in uso — vedi fondo pagina)
 - Tutti i plugin mock (GOG, Epic, Amazon, Battle.net, Classic) svuotati — restituiscono `[]`
 
 ### Fix rispetto a Step 1
@@ -3298,3 +3298,278 @@ Risolto in modo unificato con il punto 2: i suggerimenti sono stati integrati co
 ### Verifica
 
 `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `VirtualKeyboard.tsx`).
+
+## v1.1.79-Gaia — MILESTONE STABILE
+
+Da questa versione in poi, ogni milestone stabile prende il nome di un pianeta o satellite del sistema solare — richiesta esplicita dell'utente, prima applicazione della convenzione.
+
+Congelata dopo che l'utente ha giudicato tutte le funzioni core sufficientemente mature: libreria unificata GOG/Epic/Steam/Classic Console, interfaccia interamente bilingue IT/EN (Step 19b, chiuso da tempo), protocollo `xlaunch://` funzionante end-to-end e testato su hardware reale (Step 19a, chiuso in questa stessa sessione), Knowledge Base e risposte AI Advisor bilingui, cronologia giochi recenti nella tray, migliorie RetroArch (Launch Arguments contestuali, override del titolo di scraping, preset shader CRT), tastiera virtuale con navigazione ciclica.
+
+Nessun cambiamento di codice in questa voce — solo il congelamento: versione aggiornata in `App.tsx`/`package.json` (`v1.1.79-Gaia`), `metadata.json` aggiornato (`version`/`milestone`/`date`/`notes` + nuova voce riassuntiva in `patches[]`), pacchetto ricreato per intero come `X-Launcher_v1_1_79-Gaia.zip`, stesse esclusioni di `.gitignore` già usate per RC3 (`node_modules`, `dist`, stato locale, log, ecc.).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. `metadata.json` validato. Zip verificato: `node_modules` assente, tutti i file chiave presenti.
+
+## v1.1.80 — kiosk-launch.sh: supporto cross-DE (XFCE/MATE/GNOME/Plasma)
+
+Richiesto dall'utente: la creazione di una sessione dedicata è oggi incomplessa/non funzionante, quindi per l'apertura ai test ci si concentra sull'installazione entro un desktop environment esistente — non più solo XFCE, ma anche MATE, GNOME e Plasma (i più diffusi). `--kiosk` di Chromium scartato su indicazione esplicita dell'utente: causa problemi di prestazione, già deprecato in passato a favore dell'attuale finestra massimizzata senza bordi.
+
+**Bug reale trovato mentre si verificava il codice esistente, non richiesto ma rilevante**: il rilevamento "sessione dedicata sì/no" controllava **solo** `pgrep -x xfwm4` — su MATE/GNOME/Plasma quel processo non esiste mai, quindi lo script avrebbe concluso erroneamente "nessun DE sotto" e tentato di partire in sessione dedicata via Gamescope, l'esatto opposto dell'obiettivo di oggi. Sostituito con `$XDG_CURRENT_DESKTOP` (standard moderno, impostato dalla sessione stessa su tutti e quattro i desktop), con fallback via `pgrep` sui processi WM noti (xfwm4/marco/gnome-shell/kwin_x11/kwin_wayland) solo per il caso limite in cui la variabile non sia impostata. Aggiunto anche un log esplicito del DE rilevato, per diagnostica futura — stessa lezione della saga tray (v1.1.71): meglio loggare che indovinare alla cieca.
+
+**Rimozione decorazioni universale**: il vecchio meccanismo (`titleless_maximize` di xfwm4, config globale impostata prima di lanciare Chromium) funzionava solo su XFCE. Sostituito con `_MOTIF_WM_HINTS`, una proprietà X11 di basso livello verificata con una ricerca reale (non indovinata) come rispettata esplicitamente da Mutter (GNOME) e KWin (Plasma), oltre che da xfwm4/Marco in quanto WM "moderni" conformi allo stesso standard derivato da Motif — un solo meccanismo per tutti e quattro i desktop invece di quattro trucchi separati da verificare uno per uno.
+
+Essendo una proprietà per-finestra (non una config globale), applicata DOPO che la finestra del browser esiste, non più prima del lancio: nuova funzione `remove_window_decorations()`, chiamata in parallelo a `focus_dashboard_window()` subito dopo l'avvio del browser (stesso pattern, stesso ciclo di attesa). Include un doppio toggle maximize (tolto e riapplicato) — workaround documentato dalla community per i WM che applicano l'hint solo al primo map della finestra, non dinamicamente su una già visibile.
+
+L'autohide dei pannelli XFCE (puramente estetico, non essenziale per il look "kiosk" a differenza del vecchio `titleless_maximize`) resta come funzione separata (`maybe_enable_xfce_panel_autohide()`), XFCE-only, innocua altrove.
+
+**Nota onesta**: il meccanismo `_MOTIF_WM_HINTS` non è stato testato dal vivo in questo ambiente (nessun server X qui) su nessuno dei quattro desktop — verificato che esiste ed è documentato come supportato dai WM target, non che si comporti in modo identico ovunque. Da confermare su hardware reale, a partire da XFCE (dove il comportamento precedente era già noto, utile come termine di paragone).
+
+Due refusi di sintassi trovati e corretti durante la verifica prima della consegna (una doppia parentesi graffa residua da una sostituzione precedente, un riferimento a una variabile `$WINDOW_TITLE` mai definita in questo file) — presi dalla verifica di sintassi, non arrivati all'utente.
+
+### Verifica
+
+`bash -n kiosk-launch.sh`: sintassi valida. Conteggio funzioni/chiusure bilanciato (5/5). Nessun riferimento residuo alla vecchia funzione rinominata.
+
+## v1.1.81 — tre bug reali trovati dall'utente testando v1.1.80
+
+**1) `./build.sh start firefox` avviava comunque Chromium.** Bug in `build.sh`: il ramo `start)` chiamava la funzione `start` **senza inoltrarle gli argomenti** (`start ;;` invece di `start "$@"`), a differenza del ramo `all)` che lo faceva correttamente — dentro la funzione, `${2:-}` era quindi sempre vuoto, e `kiosk-launch.sh` riceveva un browser forzato vuoto, ricadendo sul rilevamento automatico (Chromium per primo). Un solo carattere di differenza fra i due rami (`"$@"` mancante), mai notato perché nessuno aveva mai testato `build.sh start <browser>` fino ad ora — solo `./kiosk-launch.sh <browser>` direttamente, che infatti funzionava già.
+
+**2) Firefox apriva la Dashboard come scheda in una finestra già esistente**, arrivando a comparire affiancata ad altre schede aperte (segnalato: affiancata alla chat da cui l'utente scriveva). Confermato con una ricerca reale (bug Mozilla #855899 e documentazione ufficiale): `--new-instance`, l'unico flag usato finora, non disattiva il meccanismo di "remote" di Firefox su Linux — un Firefox già in esecuzione intercetta comunque la richiesta e apre solo una nuova scheda. Fix: aggiunto `--no-remote` insieme a un profilo dedicato (`~/.local/share/x-launcher/firefox-profile`, creato automaticamente da Firefox se assente) — combinazione documentata come l'unica che garantisce un'istanza davvero separata indipendentemente da cosa sia già in esecuzione. Applicato in tutti e tre i punti di lancio Firefox (sessione dedicata Gamescope, desktop esistente — quest'ultimo era anche privo della chiamata a `remove_window_decorations`/`maybe_enable_xfwm4_titleless`, mai presenti nel ramo Firefox fino ad ora).
+
+**3) Il decoratore restava visibile anche su XFCE**, dove il vecchio meccanismo era invece confermato funzionante prima della rewrite di v1.1.80 — segno che il tentativo universale `_MOTIF_WM_HINTS` non ha funzionato come sperato, almeno non da solo. L'utente ha suggerito esattamente la soluzione giusta: dispatch per-DE invece di un solo meccanismo universale. Ripristinato `maybe_enable_xfwm4_titleless()` (il vecchio meccanismo provato, config globale xfwm4 impostata prima del lancio) per XFCE specificamente, con `_MOTIF_WM_HINTS` mantenuto come livello aggiuntivo dopo per tutti i desktop (XFCE incluso, dove nel peggiore dei casi è ridondante) — su MATE/GNOME/Plasma resta l'unico meccanismo disponibile per ora, non essendoci ancora un trucco per-DE provato per quei tre.
+
+Aggiunta anche diagnostica reale a `remove_window_decorations()` (id finestra trovato, esito di `xprop -set`, rilettura della proprietà subito dopo averla impostata) — stessa lezione della saga tray (v1.1.71): un secondo tentativo alla cieca senza dati concreti non avrebbe senso, se il meccanismo universale continua a non funzionare anche con questi fix, il prossimo test dirà esattamente dove si ferma.
+
+### Verifica
+
+`bash -n kiosk-launch.sh` / `bash -n build.sh`: sintassi valida su entrambi. Non testato di nuovo dal vivo in questo ambiente (nessun server X qui) — da confermare su hardware reale.
+
+## v1.1.82 — fix: profilo Firefox dedicato non veniva creato
+
+Segnalato dall'utente subito dopo v1.1.81: lanciando la Dashboard in Firefox, "Your Firefox profile cannot be loaded. It may be missing or inaccessible."
+
+Il fix precedente assumeva (citando la documentazione Mozilla) che `--profile <percorso>` creasse la cartella da solo se assente. Verificato con una ricerca reale — non bastava fidarsi della documentazione questa volta: un report utente reale su Mozilla Support mostra **esattamente lo stesso errore**, con la nota che funzionava solo quando la cartella era già stata creata in anticipo a mano. L'auto-creazione dichiarata non si è dimostrata affidabile in pratica per un percorso annidato non ancora esistente.
+
+Fix: `mkdir -p "$FIREFOX_PROFILE_DIR"` esplicita prima di ogni lancio Firefox, in entrambi i punti che la usano (sessione dedicata Gamescope, desktop esistente) — stesso pattern già usato altrove in questo file per il log della tray, non fidarsi di un'auto-creazione che si è già dimostrata inaffidabile altrove in questa stessa sessione (`--appendconfig=` di RetroArch).
+
+### Verifica
+
+`bash -n kiosk-launch.sh`: sintassi valida.
+
+## v1.1.83 — fix: barra indirizzi/tab visibile in Firefox
+
+Segnalato dall'utente subito dopo v1.1.82: Firefox ora si avvia correttamente (fix profilo riuscito), ma con decoratore e barra degli indirizzi.
+
+**Barra indirizzi/tab**: a differenza di Chromium (`--app=<url>` nasconde tutto da solo), Firefox nelle versioni moderne non ha un flag CLI equivalente — verificato con una ricerca reale prima di scrivere codice, non indovinato. L'unica via documentata è `userChrome.css`, un foglio di stile che personalizza l'interfaccia di Firefox stessa, che va esplicitamente abilitato tramite la preferenza `toolkit.legacyUserProfileCustomizations.stylesheets` (altrimenti ignorato in silenzio). Avendo già un profilo dedicato (v1.1.82), nuova funzione condivisa `setup_firefox_profile()` che vi scrive `user.js` (abilita la preferenza) e `chrome/userChrome.css` (nasconde `#nav-bar`, `#TabsToolbar` e `#titlebar` — quest'ultimo è la titlebar disegnata da Firefox stesso, un elemento diverso e indipendente dalla decorazione del window manager) — scritti ad ogni avvio, idempotente. Sostituisce la semplice `mkdir -p` usata nei due punti di lancio Firefox, ora unificati in questa unica funzione condivisa invece di duplicare la stessa logica.
+
+**Decoratore ancora visibile**: non ancora affrontato in questa voce — serve l'output diagnostico aggiunto in v1.1.81 (`[_MOTIF_WM_HINTS]` nel terminale) per capire dove si ferma il meccanismo su Firefox, non ancora fornito dall'utente.
+
+### Verifica
+
+`bash -n kiosk-launch.sh`: sintassi valida. Conteggio funzioni/chiusure bilanciato (7/7).
+
+## v1.1.84 — decoratore confermato funzionante, fix pannello XFCE in Firefox
+
+**Confermato dall'utente con log alla mano**: il dispatch per-DE di v1.1.81 funziona — `xfwm4 titleless_maximize` (era `false`, impostato a `true`) e `_MOTIF_WM_HINTS` (rilettura dopo il set: `decorations=0`, confermato) lavorano insieme correttamente. Firefox ora parte a schermo intero in una finestra davvero senza bordi.
+
+**Residuo trovato**: il pannello XFCE in alto non spariva mai in Firefox. Causa banale — `maybe_enable_xfce_panel_autohide()` era chiamata **solo** nel ramo Chromium (già presente da prima di questa sessione), mai aggiunta al ramo Firefox durante i fix precedenti (v1.1.81/82/83 avevano tutti toccato quel ramo per altri motivi, senza mai notare questa chiamata mancante). Aggiunta ora.
+
+### Verifica
+
+`bash -n kiosk-launch.sh`: sintassi valida.
+
+## v1.1.85 — due bug Firefox-specifici: X/Y invertiti, audio silenzioso
+
+Segnalati dall'utente dopo il successo di v1.1.84 (decoratore + pannello XFCE risolti su entrambi i browser).
+
+**1) X apre la ricerca, Y apre l'overlay — invertiti, solo in Firefox.** Verificato con una ricerca reale, non indovinato: bug noto e datato della Gamepad API di Firefox su Linux (Mozilla bugzilla #1152937 — "Ubuntu 18.04.3... buttons are switched", con lo stesso identico sintomo riprodotto anche con un controller DS4: "the triangle and square button are switched" — indici 2/3, esattamente X/Y). Chromium sullo stesso sistema riporta l'ordine corretto: non è un problema di come X-Launcher legge la Gamepad API, è Firefox stesso a restituire l'indice sbagliato nel suo array `buttons`.
+
+Fix in `InputManager.ts`, non in ciascuno dei quattro plugin di input (XInput/DS4/DS5/Generic condividono tutti la stessa convenzione di indici 0-3 per A/B/X/Y, tutti ugualmente affetti): nuova funzione `swapXY()` applicata in `readPrimary()`, l'unico punto in cui il risultato di qualunque plugin passa prima di raggiungere il resto dell'app — un solo fix invece di quattro duplicati. Attivo solo quando `navigator.userAgent` rileva Firefox.
+
+**2) I suoni dell'interfaccia non si sentivano in Firefox.** Chromium ha già `--autoplay-policy=no-user-gesture-required` nel comando di lancio — nessun equivalente CLI esiste per Firefox, e la sua policy di autoplay blocca l'audio finché non rileva un vero "user gesture" (un pulsante del controller non sempre viene contato come tale, a differenza di un click o una pressione da tastiera). Verificato con una ricerca reale la preferenza corretta e il suo valore attuale: `media.autoplay.default = 0` ("consentito"). Aggiunta a `user.js` nel profilo Firefox dedicato, insieme alle altre due preferenze già scritte da `setup_firefox_profile()`.
+
+### Verifica
+
+`bash -n kiosk-launch.sh`: sintassi valida. `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `InputManager.ts`).
+
+## v1.1.86 — avatar spostato dal localStorage al server
+
+Segnalato dall'utente: l'avatar impostato in Chromium non veniva letto in Firefox, e si azzerava ad ogni riavvio della Dashboard in Firefox specificamente.
+
+Causa trovata verificando il codice: l'avatar selezionato era salvato solo in `localStorage` (chiave `x-launcher-avatar`), uno storage per-browser per definizione — Chromium e Firefox non lo condividono mai, indipendentemente da qualunque fix. In più, Firefox viene lanciato con `--private-window`, che scarta l'intero storage del browser alla chiusura della finestra: anche restando sempre su Firefox, nulla sarebbe mai sopravvissuto a un riavvio.
+
+Fix architetturale, non un cerotto locale: la selezione dell'avatar è stata spostata alla persistenza lato server già usata per `displayMode`/`language`/`aiMonthlyTokenBudget` (`app.conf`, tramite `readAppConfig()`/`writeAppConfig()` in `appConfig.ts`). Nuovo campo `avatarUrl: string | null` (null = nessun avatar, default), esposto in `GET /api/config` e scrivibile tramite lo stesso endpoint generico `PATCH /api/config` già esistente (nessuna modifica a `server.ts` necessaria, accetta già campi arbitrari). Frontend: i quattro punti che leggevano/scrivevano `localStorage` diretti sostituiti con un nuovo helper `persistAvatarUrl()`, e lo stato iniziale letto dal fetch di boot di `/api/config` invece che da `localStorage.getItem()` all'avvio.
+
+Risolve entrambi i sintomi alla radice: l'avatar ora sopravvive sia al riavvio della Dashboard (qualunque browser) sia al cambio di browser, essendo un dato condiviso sul filesystem invece che nello storage isolato di ciascun browser.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `appConfig.ts`). Nessun riferimento residuo alla vecchia chiave `x-launcher-avatar` in `localStorage`.
+
+## v1.1.86-dev.1 — correzione stringa versione, convenzione `-dev.N` chiarita
+
+Segnalato dall'utente: la versione mostrata nel menu X-Launcher era rimasta `v1.1.86` nudo — corretto in `v1.1.86-dev.1`, a chiarire che questa è una build di sviluppo, non una milestone stabile. La milestone stabile di riferimento resta `v1.1.79-Gaia` finché non ne verrà congelata una nuova con lo stesso rituale (nome di pianeta/satellite, pacchetto completo ricreato).
+
+**Convenzione chiarita per il resto della sessione**: fra una milestone stabile e l'altra, le build di sviluppo intermedie portano un suffisso `-dev.N` (incrementale) sul numero di patch in corso, distinguendole chiaramente sia dalle milestone nominate sia dalle vecchie candidate `-rc.N`.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.87-dev.1 — trovata la vera causa della versione stantia
+
+Segnalato dall'utente e diagnosticato insieme in più passaggi: la versione mostrata nel menu restava `1.1.65-rc.3` nonostante demone verificato fresco (PID/orario di avvio confermati successivi alla ricompilazione) e build verificata contenere la stringa corretta (`grep` diretto sul bundle compilato, confermato `1.1.86-dev.` presente).
+
+**Causa reale**: un secondo `useEffect` in `App.tsx`, indipendente dal letterale `useState('v1.1.XX')` aggiornato ad ogni versione di questa sessione, faceva un fetch a `GET /api/version` (che legge `metadata.json` dal disco) e **sovrascriveva silenziosamente** `appVersion` con quel valore. `metadata.json` viene aggiornato solo ai congelamenti di milestone completi (RC3, poi Gaia) — mai nei fix quotidiani — quindi in qualunque cartella di sviluppo non risincronizzata con l'ultimo zip di milestone (esattamente il caso dell'utente: il pacchetto Gaia è tenuto a parte, mai fuso nella cartella di sviluppo), quel file restava fermo al valore della primissima build. Ogni aggiornamento di `appVersion` fatto in questa sessione veniva quindi scartato al caricamento della pagina, sostituito da quel valore stantio — **il codice era sempre stato corretto**, il problema era tutto in questo secondo effect che vinceva sempre la corsa.
+
+Fix: effect rimosso. Il letterale in cima al componente resta ora l'unica fonte di verità per la versione mostrata. L'endpoint `GET /api/version`/`metadata.json` restano nel progetto per uso futuro (diagnostica esterna, script), non più per sovrascrivere questo valore.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.88-dev.1 — dimensione prevista di installazione (GOG + Epic)
+
+Prima delle tre richieste della sessione (tempo di gioco, dimensione su disco, tab hardware) — chiarito dall'utente durante la discussione: la dimensione richiesta è quella **prevista prima di installare**, non quella reale occupata dopo. Scope deciso esplicitamente dall'utente: solo GOG ed Epic per ora (Steam non ha una fonte già cablata per il "non ancora installato" — `SizeOnDisk` esiste solo per manifest locali, cioè giochi già installati; Classic Console non si applica, le ROM sono già file completi).
+
+**GOG**: `lgogdownloader --list details,json --game <slug>`, on-demand per il solo gioco selezionato — deliberatamente diverso dal `--list details/json` per l'intero catalogo, già scartato in una sessione precedente (commento esistente in `gogPlugin.ts`: 128 chiamate API sequenziali per l'intero catalogo sono impraticabili; per un solo gioco alla volta non è lo stesso problema).
+
+**Epic**: `legendary info <app_name> --json`, comando documentato apposta per questo scopo ("Prints info about specified app name or manifest").
+
+**Nota onesta, non aggirabile in questo ambiente**: né `lgogdownloader` né `legendary` sono disponibili qui (servirebbero account reali) — il nome esatto del campo JSON con la dimensione non è verificato dal vivo per nessuno dei due comandi. Per questo entrambe le implementazioni loggano sempre l'output JSON grezzo per intero al primo utilizzo, e provano più nomi di campo plausibili in cascata — se il campo giusto non c'è fra quelli provati, il log mostra comunque la struttura reale per poter adattare il parsing, invece di fallire in silenzio (stessa lezione di `--appendconfig=` con RetroArch in questa sessione).
+
+Nuovo metodo `gameManager.getPredictedInstallSize(gameId)` che smista al plugin giusto in base a `game.store`; nuovo endpoint `GET /api/games/:id/predicted-size`; nuovo blocco nella sidebar (icona `HardDrive`), visibile solo per giochi GOG/Epic, fetch on-demand quando il gioco viene selezionato — non per l'intera libreria in una volta.
+
+Due refusi di sintassi trovati e corretti durante la stesura: la chiusura del metodo `login()` di `GOGPlugin` si era rotta durante un inserimento (il nuovo metodo è finito nidificato dentro quello vecchio, mai chiuso); il nuovo `useEffect` nel frontend era stato inserito prima della dichiarazione di `selectedGame` di cui ha bisogno (stessa categoria di errore, TS2448, già documentata altrove in questo stesso file per un bug simile risolto in una sessione precedente).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente riga per riga sul codice aggiunto). JSON delle traduzioni validati.
+
+## v1.1.89-dev.1 — tempo di gioco reale (GOG, Epic, Classic Console)
+
+Seconda delle tre richieste della sessione. `playTimeHours: 0` era letteralmente hardcoded in `classicPlugin.ts`, `epicPlugin.ts` e `gogPlugin.ts` — solo Steam calcola un valore reale, dalla propria Web API.
+
+Il meccanismo per tracciarlo da soli era già quasi pronto: `gameManager.ts` calcola già `elapsedMs` (durata della sessione) alla chiusura di ogni gioco, usato finora solo per un controllo interno ("uscita troppo rapida = probabile fallimento di avvio"). Mancava solo accumulare quel valore invece di scartarlo.
+
+Nuova funzione `db.addPlayTime(id, hours)` — `UPDATE` atomica (`play_time_hours = play_time_hours + ?`), non lettura-poi-scrittura, per evitare una corsa se due sessioni si chiudessero in rapida successione. Chiamata subito **dopo** il controllo "uscita rapida" esistente (una sessione troppo breve resta un probabile crash, non tempo di gioco reale) — applicata uniformemente a **qualunque store, Steam incluso**: la sua Web API resta comunque l'autorità finale a ogni sync di libreria (che sovrascrive `play_time_hours` per Steam), quindi l'accumulo locale viene semplicemente rimpiazzato al sync successivo per quei giochi — nessun rischio di doppio conteggio, persiste solo dove serve davvero (GOG/Epic/Classic Console, che non hanno alcuna fonte alternativa).
+
+Aggiunta anche una notifica esplicita alla UI subito dopo l'accumulo, così la sidebar mostra il tempo aggiornato non appena il gioco si chiude, senza aspettare il prossimo sync periodico (5 minuti).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.90-dev.1 — tre fix segnalati dall'utente con log alla mano
+
+**1) GOG restituiva sempre vuoto.** Confermato dal log: `--list details,json --game <slug>` produceva stdout completamente vuoto. Causa quasi certa: `--list` accetta un solo valore dall'elenco (games/details/json/tags/ecc.), non una combinazione separata da virgola come assunto senza verifica in v1.1.88. Sostituito con `--list details --game <slug>` — la sintassi confermata funzionante da un esempio reale trovato con una ricerca in precedenza — e il parsing cambiato da JSON a testuale (righe con una dimensione, sommate se il gioco ha più file installer). Epic (`legendary info --json`) funziona già correttamente, nessuna modifica lì.
+
+**2) Il tempo di gioco non era persistente.** Causa: `play_time_hours = excluded.play_time_hours` nell'`UPSERT` sovrascriveva incondizionatamente ad ogni sync di libreria — e GOG/Epic/Classic Console riportano sempre `0` (hardcoded), quindi la sync periodica (ogni 5 minuti) cancellava l'accumulo appena fatto. Corretto con `CASE WHEN excluded.play_time_hours > 0 THEN excluded.play_time_hours ELSE games.play_time_hours END`: un valore reale non è mai esattamente 0, quindi questa singola condizione distingue correttamente "sync con un placeholder" da "Steam con un valore reale", senza dover sapere da quale store viene la sync. Verificato con un test isolato `better-sqlite3` (sync iniziale → sessione di gioco → sync successiva → nuova sessione, più il caso Steam che deve sempre vincere) prima di considerarlo risolto.
+
+**3) Dimensione prevista e tempo di gioco resi persistenti, su richiesta esplicita dell'utente** (evitare il refetch ad ogni selezione, ed evitare che una nuova installazione azzeri le ore già accumulate — "100h + nuovo tempo giocato", non un nuovo conteggio da zero). Il tempo di gioco era già persistente per costruzione (`addPlayTime` accumula nel DB, indipendente da installazioni/disinstallazioni — il fix del punto 2 sopra ne garantisce ora anche la sopravvivenza alle sync). Per la dimensione prevista: nuova colonna `predicted_size_bytes`, scritta una volta dopo il primo recupero riuscito (`db.setPredictedSizeBytes`) — `gameManager.getPredictedInstallSize()` ora controlla prima la cache e ritorna subito quella se presente, richiamando il plugin (lgogdownloader/legendary) solo al primo utilizzo per ciascun gioco. Nessuna modifica necessaria al frontend: continua a chiamare lo stesso endpoint, che ora risponde dalla cache invece di rilanciare il comando ogni volta.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. Fix della persistenza tempo di gioco verificato con un test isolato `better-sqlite3` (non solo lettura del codice).
+
+## v1.1.91-dev.1 — GOG: trovato il vero formato, con l'output reale fornito dall'utente
+
+Il fix v1.1.90 (sintassi `--list details --game <slug>`) era corretto, ma il parsing testuale ipotizzato ("Size: 1.23 GB") non lo era: l'utente ha fornito l'output reale del comando, che mostra `size: 1048576` — un numero di byte grezzo, **senza alcuna unità**. Il vecchio pattern richiedeva un suffisso GB/MB/KB/B e quindi non trovava mai corrispondenze.
+
+Corretto sommando solo i valori `size:` dentro la sezione `installers:` (esclude `extras:` — contenuti bonus come avatar/wallpaper, non necessari per installare — ed esclude `patches:` — aggiornamenti da una versione precedente, irrilevanti per un'installazione nuova). Nota: `installers:` può elencare file per più piattaforme insieme (nell'esempio reale: `.exe`/`.bin` per Windows e `.sh` per Linux) — sommarli tutti sovrastima leggermente quando sono presenti entrambe le piattaforme, accettato come approssimazione ragionevole in assenza di un modo semplice per sapere quale verrà scaricata prima del download vero e proprio.
+
+**Verificato con un test isolato usando il testo esatto fornito dall'utente** (non solo lettura del codice): il parsing trova correttamente le 3 dimensioni della sezione `installers:` di Aragami (1.048.576 + 3.480.223.744 + 3.097.493.504 byte = 6,13 GB), escludendo correttamente le sezioni `extras:`/`patches:` successive.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. Parsing verificato con un test isolato Node usando il testo reale fornito dall'utente (non un testo sintetico).
+
+## v1.1.92-dev.1 — tab Info Hardware in Gestisci Account
+
+Terza e ultima delle tre richieste della sessione. Verificato con una ricerca reale prima di scrivere codice: tutti i valori richiesti (Motherboard, CPU, GPU, RAM, HDD, OS) sono leggibili **senza permessi elevati** — a differenza di `dmidecode` (che richiede root per leggere le info DMI dalla BIOS), il kernel Linux espone già le stesse informazioni base via sysfs in `/sys/class/dmi/id/` (`board_vendor`/`board_name`, leggibili da qualunque utente — solo il numero di serie lì dentro richiede root, non necessario qui).
+
+Nuovo modulo `src/backend/systemInfo.ts`:
+- **Motherboard**: `/sys/class/dmi/id/board_vendor` + `board_name`
+- **CPU/RAM**: API Node native (`os.cpus()`/`os.totalmem()`) — nessun comando di sistema, nessun problema di permessi possibile
+- **GPU**: `nvidia-smi` se disponibile (informazione più ricca per il caso comune di questo progetto, HTPC gaming con GPU NVIDIA), fallback su `lspci` altrimenti
+- **Disco**: `df -h /` — solo il filesystem radice, un riassunto a una riga
+- **OS**: `/etc/os-release` (`PRETTY_NAME`) + `uname -r` per il kernel
+
+Cache in memoria lato server (l'hardware non cambia durante l'esecuzione del demone) — un solo calcolo per l'intera sessione, non ricalcolato ad ogni apertura della tab. Nuovo endpoint `GET /api/system-info`.
+
+Frontend: nuova tab "Info Hardware" nell'overlay Impostazioni, **sempre in ultima posizione** come richiesto esplicitamente — vive come ultimo elemento fisico del blocco tab-bar, con un commento che segnala di inserire eventuali nuove tab future PRIMA di questa, mai dopo. Il ciclo L1/R1 fra le tab (`cycleSettingsTab`) usa già un meccanismo generico basato sui Focusable effettivamente registrati, non un elenco fisso — la nuova tab vi entra automaticamente, nessuna modifica necessaria lì oltre ad allargare un tipo.
+
+Due errori di compilazione reali trovati e corretti durante la stesura: un'icona (`Monitor`) importata due volte per errore; il tipo del parametro di `getFirstFocusableForSettingsTab` non includeva ancora `'hardware'`.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (verificato specificamente: zero errori in `systemInfo.ts`). JSON delle traduzioni validati.
+
+## v1.1.93-dev.1 — robustezza endpoint, pulizia e documentazione
+
+**Robustezza**: l'utente ha segnalato un crash (`TypeError: gameManager.getPredictedInstallSize is not a function`), risultato essere causato dall'aver avviato per errore la cartella della milestone stabile (Gaia, senza le patch introdotte successivamente) contro lo stesso database condiviso (`~/.local/share/x-launcher/x-launcher.db`, legato alla home utente e non alla cartella del codice sorgente) — non un bug del codice attuale. Aggiunto comunque `try/catch` alle route `GET /api/games/:id/predicted-size` e `GET /api/system-info`, prive di qualunque protezione: un errore async non catturato in Express 4.x può destabilizzare l'intero processo invece di restituire un errore contenuto alla sola richiesta che l'ha causato, a prescindere dalla causa specifica di questo episodio.
+
+Effetto collaterale confermato dall'utente: la versione Stable (precedente a v1.1.90) non ha la protezione `CASE WHEN` sul tempo di gioco — avviarla contro lo stesso database ha azzerato l'accumulo per un gioco. Discusso con l'utente se separare i database delle due cartelle: **deciso di mantenerlo condiviso**, prestando più attenzione a quale cartella si avvia.
+
+**Pulizia**: rimossa la cartella `patches/` (script di patch incrementali da Step 2/3/4/12g, non più in uso da tempo).
+
+**Documentazione**: `INSTALL.md` riscritto per intero — dipendenze complete prima di compilare (per compilare, per la tray, per la gestione finestre multi-DE, per browser, per store — GOG/Epic/Steam/Classic Console/Wine-Proton, tutte con pacchetto/comando specifico), compilazione, uso locale, installazione di sistema via `install.sh` (spiegato nel dettaglio cosa fa), variabili `.env`, log, dati persistiti. Rimosso ogni riferimento alla vecchia cartella `patches/`. `X-Launcher-Roadmap.md`: nuova sezione con le regole di sviluppo consolidate in questa sessione (bilingue di default, versionamento milestone/dev.N, consegna file, verificare prima di assumere, diagnosticare prima di ritentare, test isolati quando fattibile).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.94-dev.1 — RetroArch: stdout/stderr mai catturati
+
+Segnalato dall'utente con un caso reale (PSX): un gioco configurato correttamente (core giusto, BIOS al posto giusto, `.cue` funzionante se lanciato dal client ufficiale di RetroArch) falliva silenziosamente dalla Dashboard — "chiude immediatamente senza alcun log nel terminale".
+
+**Causa trovata**: `RetroArchRunner.launch()` chiamava `spawnDetached(binExe, args)` senza il parametro `logPath` — che di default fa scartare stdout/stderr (`stdio: 'ignore'`). Non era che RetroArch non stampasse nulla: X-Launcher buttava via l'output prima ancora che l'utente potesse vederlo. Wine/Proton ed Epic (legendary) passano già `logPath` correttamente — RetroArch era rimasto scoperto insieme a ScummVM/DOSBox.
+
+**Fix**: aggiunto `logPath` (via `gameLaunchLogPath(game.id)`, stessa funzione già condivisa dagli altri runner) alla chiamata `spawnDetached` di RetroArch. Il meccanismo di visualizzazione era già completamente cablato altrove — nessun'altra modifica necessaria: `gameManager.ts` legge già il file indicato da `logPath` quando un gioco si chiude entro la soglia "uscita rapida" (esattamente lo scenario descritto — "chiude immediatamente"), e ne mostra il contenuto nella notifica di errore mostrata all'utente. D'ora in poi, un errore reale di RetroArch (BIOS non trovato, core sbagliato, `.cue` non valido, ecc.) comparirà per intero nella notifica invece del messaggio generico attuale.
+
+**ScummVM e DOSBox restano scoperti allo stesso modo** — non toccati in questa voce, stesso tipo di fix applicabile se emergesse lo stesso sintomo per quei runner.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.95-dev.1 — estrazione automatica ROM PSX (immagini CD)
+
+L'utente ha diagnosticato da solo la causa reale, usando il fix v1.1.94 (log RetroArch finalmente visibile): passando lo ZIP di un gioco PSX a RetroArch il lancio fallisce, ma estraendolo a mano e puntando al file `.cue` funziona con lo stesso identico core. Causa: a differenza dei sistemi a cartuccia (SNES/Genesis/MAME — un solo file per ROM, RetroArch legge comodamente dentro lo zip), un dump PSX è un'immagine CD (`.cue` + uno o più `.bin`) — più file con riferimenti relativi fra loro, che il meccanismo generico "leggi dentro lo zip" di RetroArch non gestisce allo stesso modo.
+
+**Fix**: `classicPlugin.ts` ora estrae automaticamente lo zip di un gioco PSX (una sola volta, cache su disco tramite verifica di un `.cue` già presente nella sottocartella `.extracted/<nome>/`) e punta `executablePath` al `.cue` reale invece del pacchetto compresso — lo stesso identico percorso che l'utente ha verificato funzionare a mano. Estendibile in futuro ad altri sistemi CD (Saturn, Dreamcast, PC Engine CD) tramite `CD_BASED_SYSTEMS`, un semplice `Set` di sistemi canonici. Nessuna nuova dipendenza npm: estrazione via `unzip` di sistema (già quasi certamente presente, o installabile con `sudo pacman -S unzip`), stesso pattern già in uso per gli altri strumenti esterni del progetto.
+
+**Verificato con un test reale** (uno zip vero contenente un `.cue`+`.bin` fittizi, non solo lettura del codice): prima chiamata estrae correttamente, seconda chiamata riusa la cache senza ri-estrarre, un sistema non-CD (SNES) lascia il file invariato.
+
+Risposte alle due domande dell'utente, entrambe fuori dal perimetro di un fix di codice: il core di default è assegnato da una mappa statica in `classicPlugin.ts` senza verificare se è davvero installato (un suggerimento ragionevole, non una verifica); l'Online Updater di RetroArch che mostra un core ma non lo installa è un problema di RetroArch stesso (rete/permessi), non di X-Launcher — suggerita l'installazione diretta via pacchetto di sistema (`libretro-pcsx-rearmed`) come alternativa pratica.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. Estrazione verificata con un test isolato usando un vero file zip (non solo lettura del codice).
+
+## v1.1.96-dev.1 — PSX: default core cambiato da pcsx_rearmed a mednafen_psx
+
+Il suggerimento `libretro-pcsx-rearmed` di v1.1.95 non era installabile (né da AUR né, come poi verificato, da `pacman` dopo un aggiornamento) — una ricerca più approfondita mostra che il pacchetto **corrente** per quel nome è specifico di Arch Linux ARM (aarch64/armv7h), non x86_64: coerente col fatto che PCSX ReARMed è ottimizzato apposta per ARM. Non è quindi affidabilmente installabile su un desktop x86_64 come quello dell'utente.
+
+**Fix**: cambiato il core di default assegnato ai giochi PSX in `classicPlugin.ts`, da `pcsx_rearmed_libretro.so` a `mednafen_psx_libretro.so` — il core che l'utente ha già confermato funzionante sul proprio sistema con lo stesso gioco. Pacchetto Arch corrispondente verificato con una ricerca reale come attuale su `extra/x86_64`: `libretro-beetle-psx` ("Beetle PSX" è il nome con cui il progetto Libretro chiama il core Mednafen PSX). Riordinato anche l'elenco dei core alternativi mostrato nell'overlay (`COMPATIBLE_CORES_BY_SYSTEM`), con `mednafen_psx` per primo invece di `pcsx_rearmed`.
+
+Il cambiamento riguarda **solo i nuovi giochi PSX** scoperti da qui in avanti: `libretro_core` è già protetto da sovrascrittura nelle sync regolari (stessa categoria di `executable_path`/`scrape_title`) — la scelta manuale già fatta dall'utente per il gioco in questione resta intatta.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.97-dev.1 — "Auto-Remaster" per PSX
+
+Implementata dopo una sessione di test manuale insieme all'utente, verificando ogni passaggio da terminale prima di scrivere codice — incluso un vicolo cieco reale: `--appendconfig=` risulta letto da RetroArch (a differenza degli shader, dove veniva ignorato del tutto), ma le opzioni applicate così vengono silenziosamente sovrascritte dal file di config persistente del core (`Beetle PSX HW.opt`, riscritto ad ogni chiusura con i valori effettivamente in uso). Il meccanismo che funziona davvero è l'override **per-contenuto** nativo di RetroArch — un file con lo stesso nome del contenuto caricato, senza estensione, nella cartella di configurazione del core, con priorità più alta del file globale.
+
+**Preset confermato su hardware reale**, incluso un secondo giro per un difetto trovato durante il test (testo "posterizzato"): renderer Vulkan, risoluzione interna 2x, filtro bilineare escluso dagli sprite (mantiene il testo nitido), colore a 32bpp con dithering disabilitato (elimina il banding, più visibile a risoluzione più alta — comportamento noto, documentato dalla stessa documentazione ufficiale del core), MSAA 2x, PGXP in modalità memoria (elimina il tremolio dei poligoni, raccomandato dalla documentazione per la miglior compatibilità).
+
+**Implementazione**: il core stesso è l'interruttore — nessun campo DB dedicato. `classicPlugin.ts` espone `writePsxRemasterOptions()` (scrive il file di override per-contenuto, una sola volta, non sovrascrive se l'utente ha già personalizzato le opzioni per quel gioco specifico da RetroArch) e le costanti `PSX_REMASTER_CORE`/`PSX_DEFAULT_CORE`. Nuovo metodo `gameManager.setPsxRemaster()`: attivare scrive il preset e imposta il core hardware-accelerato; disattivare si limita a tornare al core software di default — che semplicemente non legge quel file di override (vive nella cartella di config di un core diverso), senza bisogno di rimuoverlo. Nuovo endpoint `POST /api/games/:id/psx-remaster`. Nuovo interruttore nell'overlay Game Config, visibile solo per giochi `system === 'psx'`, subito dopo il campo Libretro Core Path manuale.
+
+Verificato con un test isolato (non solo lettura del codice) che il file di override venga scritto nel percorso e formato esatti confermati dall'utente.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (un'icona duplicata trovata e corretta durante la stesura). JSON delle traduzioni validati. Scrittura del file di override verificata con un test isolato Node.
