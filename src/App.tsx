@@ -117,6 +117,16 @@ const LAUNCH_ARG_SUGGESTIONS: SuggestionItem[] = [
 // voce, esattamente per lo stesso motivo.
 const RETROARCH_CRT_SHADER_PATH = '/usr/share/libretro/shaders/shaders_slang/crt/crt-easymode.slangp';
 
+// Richiesta utente — "auto-remaster": sottostringa da cercare in
+// localGameConfig.libretroCore per capire se è già attivo per il sistema
+// del gioco selezionato, prima ancora di premere il pulsante (il valore
+// esatto del nuovo core arriva dal backend dopo il toggle, non serve
+// duplicarlo qui — solo questo hint iniziale). Va tenuta in sync con
+// REMASTER_PRESETS in classicPlugin.ts quando si aggiunge un sistema.
+const REMASTER_HINT_BY_SYSTEM: Record<string, string> = {
+  psx: 'mednafen_psx_hw',
+};
+
 const RETROARCH_LAUNCH_ARG_SUGGESTIONS: SuggestionItem[] = [
   { value: `--set-shader "${RETROARCH_CRT_SHADER_PATH}"`, label: '📺 Filtro CRT', insertMode: 'append-space', tip: 'Filtro CRT pronto all\'uso (crt-easymode) — --appendconfig= risulta ignorato da RetroArch, questo è il flag verificato funzionante' },
   { value: '-v',               insertMode: 'append-space', tip: 'Log verboso — primo passo per diagnosticare un core o una ROM che non parte' },
@@ -637,10 +647,12 @@ function MainApp() {
   // 'loading' distinto da null per non mostrare "—" durante il fetch.
   const [predictedSizeBytes, setPredictedSizeBytes] = useState<number | null>(null);
   const [predictedSizeLoading, setPredictedSizeLoading] = useState(false);
-  // Richiesta utente — "auto-remaster" PSX: il core stesso è l'interruttore
-  // (mednafen_psx_hw = attivo, mednafen_psx = originale), verificato via
-  // selectedGame.libretroCore, non un campo separato.
-  const [psxRemasterToggling, setPsxRemasterToggling] = useState(false);
+  // Richiesta utente — "auto-remaster": il core stesso è l'interruttore
+  // (verificato passo per passo a mano su hardware reale, primo caso
+  // PSX). Generalizzato per sistemi futuri (N64/Saturn/Dreamcast/PS2,
+  // rimandati) — REMASTER_HINT_BY_SYSTEM sotto va tenuta in sync con
+  // REMASTER_PRESETS in classicPlugin.ts quando se ne aggiunge uno.
+  const [remasterToggling, setRemasterToggling] = useState(false);
   // Richiesta utente — tab Info Hardware in Gestisci Account. null = non
   // ancora recuperato. Il server tiene già una cache in memoria (l'hardware
   // non cambia durante l'esecuzione del demone) — qui basta un fetch alla
@@ -722,7 +734,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.1.97-dev.1');
+  const [appVersion, setAppVersion] = useState('v1.1.100-dev.1');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -7502,52 +7514,56 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         </Focusable>
                       </label>
                     )}
-                    {/* Richiesta utente — "auto-remaster" PSX: il core
-                        stesso è l'interruttore (verificato passo per passo
-                        a mano su hardware reale prima di implementarlo).
-                        'mednafen_psx_hw_libretro.so' deve combaciare con
-                        PSX_REMASTER_CORE in classicPlugin.ts — libretroCore
-                        può essere un percorso assoluto risolto o il nome
-                        file grezzo, .includes() copre entrambi i casi. */}
-                    {selectedGame.system === 'psx' && (
+                    {/* Richiesta utente — "auto-remaster": il core stesso
+                        è l'interruttore (verificato passo per passo a
+                        mano su hardware reale, primo caso PSX). Generico
+                        per qualunque sistema con una voce in
+                        REMASTER_HINT_BY_SYSTEM sopra — aggiungere un
+                        sistema futuro (N64/Saturn/Dreamcast/PS2) non
+                        richiede toccare questo blocco, solo aggiungere
+                        una voce lì e in REMASTER_PRESETS lato backend. */}
+                    {selectedGame.system && REMASTER_HINT_BY_SYSTEM[selectedGame.system] && (
                       <label className="block">
-                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">{t('gameOptions:psxRemaster')}</span>
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">
+                          {t('gameOptions:remaster', { system: selectedGame.system.toUpperCase() })}
+                        </span>
                         <Focusable
                           group="game-options"
-                          id="field-psxRemaster"
+                          id="field-remaster"
                           onEnter={async () => {
-                            if (psxRemasterToggling) return;
-                            const isEnabled = (localGameConfig.libretroCore ?? '').includes('mednafen_psx_hw');
-                            setPsxRemasterToggling(true);
+                            if (remasterToggling) return;
+                            const hint = REMASTER_HINT_BY_SYSTEM[selectedGame.system!];
+                            const isEnabled = (localGameConfig.libretroCore ?? '').includes(hint);
+                            setRemasterToggling(true);
                             try {
-                              const res = await fetch(`/api/games/${selectedGame.id}/psx-remaster`, {
+                              const res = await fetch(`/api/games/${selectedGame.id}/remaster`, {
                                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ enabled: !isEnabled })
                               });
                               const data = await res.json();
-                              if (data.success) {
-                                const newCore = !isEnabled ? 'mednafen_psx_hw_libretro.so' : 'mednafen_psx_libretro.so';
-                                setLocalGameConfig(prev => ({ ...prev, libretroCore: newCore }));
-                                setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, libretroCore: newCore } : g));
+                              if (data.success && data.newCore) {
+                                setLocalGameConfig(prev => ({ ...prev, libretroCore: data.newCore }));
+                                setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, libretroCore: data.newCore } : g));
                                 play('select');
                               }
                             } finally {
-                              setPsxRemasterToggling(false);
+                              setRemasterToggling(false);
                             }
                           }}
                         >
                           {(isFocused) => {
-                            const isEnabled = (localGameConfig.libretroCore ?? '').includes('mednafen_psx_hw');
+                            const hint = REMASTER_HINT_BY_SYSTEM[selectedGame.system!];
+                            const isEnabled = (localGameConfig.libretroCore ?? '').includes(hint);
                             return (
                               <button className={cn(
                                 "w-full flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-black italic transition-all",
-                                isEnabled ? "bg-blue-600 text-white" : theme === 'dark' ? "bg-black/40" : "bg-white",
-                                isFocused && !isEnabled ? "border-2 border-blue-500" : isEnabled ? "" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                isEnabled ? "bg-purple-600 text-white" : theme === 'dark' ? "bg-black/40" : "bg-white",
+                                isFocused && isEnabled ? "border-2 border-purple-300" : isFocused && !isEnabled ? "border-2 border-blue-500" : isEnabled ? "" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
                               )}>
                                 <Sparkles size={14} className="shrink-0" />
-                                {psxRemasterToggling
-                                  ? t('gameOptions:psxRemasterToggling')
-                                  : isEnabled ? t('gameOptions:psxRemasterOn') : t('gameOptions:psxRemasterOff')}
+                                {remasterToggling
+                                  ? t('gameOptions:remasterToggling')
+                                  : isEnabled ? t('gameOptions:remasterOn') : t('gameOptions:remasterOff')}
                               </button>
                             );
                           }}

@@ -596,15 +596,17 @@ async function startServer() {
     res.json(getCompatProfile(req.params.id) ?? {});
   });
 
-  // Richiesta utente — "auto-remaster" PSX, on/off dall'overlay. Il core
-  // stesso è l'interruttore (vedi setPsxRemaster in gameManager.ts).
-  app.post("/api/games/:id/psx-remaster", async (req, res) => {
+  // Richiesta utente — "auto-remaster", on/off dall'overlay. Il core
+  // stesso è l'interruttore (vedi setRemasterEnabled in gameManager.ts).
+  // Generalizzato dal caso PSX (il primo verificato) — funziona per
+  // qualunque sistema con una voce in REMASTER_PRESETS.
+  app.post("/api/games/:id/remaster", async (req, res) => {
     try {
       const { enabled } = req.body as { enabled: boolean };
-      const result = await gameManager.setPsxRemaster(req.params.id, enabled === true);
+      const result = await gameManager.setRemasterEnabled(req.params.id, enabled === true);
       res.json(result);
     } catch (e: any) {
-      writeLog('error', `[API] /psx-remaster fallita per ${req.params.id}: ${e?.message ?? e}`);
+      writeLog('error', `[API] /remaster fallita per ${req.params.id}: ${e?.message ?? e}`);
       res.status(500).json({ success: false, message: e?.message ?? 'Errore interno' });
     }
   });

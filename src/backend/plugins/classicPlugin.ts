@@ -263,55 +263,94 @@ function findCueFile(dir: string): string | null {
   }
 }
 
-// Richiesta utente — "auto-remaster" per PSX, verificato passo per passo a
-// mano col vero client RetroArch prima di scrivere una riga di codice:
-// - Il core software (mednafen_psx_libretro.so, il default già in uso) non
-//   supporta upscaling della risoluzione interna — serve la variante
-//   hardware-accelerata mednafen_psx_hw_libretro.so ("Beetle PSX HW").
+// Richiesta utente — "auto-remaster", verificato passo per passo a mano
+// col vero client RetroArch prima di scrivere una riga di codice (caso
+// PSX, il primo e finora unico verificato):
+// - Il core software di default spesso non supporta upscaling della
+//   risoluzione interna — serve una variante hardware-accelerata dedicata
+//   (per PSX: mednafen_psx_hw_libretro.so, "Beetle PSX HW").
 // - --appendconfig= NON funziona in modo affidabile per queste opzioni: il
 //   log del test dal vivo mostra che RetroArch le legge, ma poi il file
-//   PERSISTENTE del core (`Beetle PSX HW.opt`, riscritto ad ogni chiusura)
-//   le sovrascrive silenziosamente con i default. Il meccanismo che
-//   funziona davvero è l'override PER-CONTENUTO che RetroArch stesso
-//   supporta nativamente: un file con lo stesso nome del contenuto (senza
-//   estensione) nella stessa cartella di config del core, con priorità più
-//   alta del file globale.
-// - Valori confermati funzionanti dall'utente su hardware reale (incluso
-//   un secondo giro per il testo "posterizzato": filtro escluso dagli
-//   sprite + colore a 32bpp con dithering disabilitato, entrambi
-//   documentati come fix noti per questo sintomo).
-export const PSX_REMASTER_CORE = 'mednafen_psx_hw_libretro.so';
-export const PSX_DEFAULT_CORE  = 'mednafen_psx_libretro.so';
+//   PERSISTENTE del core (riscritto ad ogni chiusura) le sovrascrive
+//   silenziosamente con i default. Il meccanismo che funziona davvero è
+//   l'override PER-CONTENUTO che RetroArch stesso supporta nativamente:
+//   un file con lo stesso nome del contenuto (senza estensione) nella
+//   cartella di config del core, con priorità più alta del file globale.
+//
+// Struttura pensata per essere estesa un sistema alla volta (N64/Saturn/
+// Dreamcast/PS2, discusso con l'utente e rimandato: ciascuno richiede la
+// STESSA verifica passo-passo da terminale fatta per PSX — mai assumere
+// nomi di core/opzione senza conferma reale, un core diverso ha sempre
+// nomi di opzione completamente diversi). Aggiungere un sistema significa
+// aggiungere una voce a REMASTER_PRESETS qui sotto — nessun'altra parte
+// del codice (gameManager.ts, server.ts, l'interruttore in App.tsx) ha
+// bisogno di essere toccata.
+export interface RemasterPreset {
+  /** Core hardware-accelerato/potenziato da usare quando il remaster è attivo. */
+  remasterCore: string;
+  /** Core originale (più fedele, nessun upscaling) a cui tornare quando disattivato. */
+  defaultCore: string;
+  /**
+   * Nome ESATTO con cui RetroArch chiama il core nella propria cartella di
+   * config (`~/.config/retroarch/config/<questo nome>/`) — non sempre
+   * uguale al nome del file .so, verificato dal vivo caso per caso.
+   */
+  coreDisplayName: string;
+  /** Righe `chiave = "valore"` da scrivere nel file di override per-contenuto. */
+  optionLines: string[];
+}
 
-const PSX_REMASTER_OPTIONS = [
-  'beetle_psx_hw_renderer = "hardware_vk"',
-  'beetle_psx_hw_internal_resolution = "2x"',
-  'beetle_psx_hw_filter = "bilinear"',
-  'beetle_psx_hw_filter_exclude_sprite = "enabled"',
-  'beetle_psx_hw_depth = "32bpp"',
-  'beetle_psx_hw_dither_mode = "disabled"',
-  'beetle_psx_hw_msaa = "2x"',
-  'beetle_psx_hw_pgxp_mode = "memory"',
-].join('\n') + '\n';
+export const REMASTER_PRESETS: Record<string, RemasterPreset> = {
+  // Verificato su hardware reale dall'utente, incluso un secondo giro per
+  // un difetto emerso nel test (testo "posterizzato": risolto escludendo
+  // il filtro dagli sprite + colore a 32bpp con dithering disabilitato,
+  // entrambi documentati come fix noti per questo sintomo).
+  psx: {
+    remasterCore:    'mednafen_psx_hw_libretro.so',
+    defaultCore:     'mednafen_psx_libretro.so',
+    coreDisplayName: 'Beetle PSX HW',
+    optionLines: [
+      'beetle_psx_hw_renderer = "hardware_vk"',
+      'beetle_psx_hw_internal_resolution = "2x"',
+      'beetle_psx_hw_filter = "bilinear"',
+      'beetle_psx_hw_filter_exclude_sprite = "enabled"',
+      'beetle_psx_hw_depth = "32bpp"',
+      'beetle_psx_hw_dither_mode = "disabled"',
+      'beetle_psx_hw_msaa = "2x"',
+      'beetle_psx_hw_pgxp_mode = "memory"',
+    ],
+  },
+  // n64/saturn/dreamcast/ps2: da aggiungere quando verrà ripreso il
+  // lavoro, dopo la stessa verifica da terminale fatta per psx sopra.
+};
+
+/** true se questo sistema canonico ha un preset auto-remaster verificato. */
+export function hasRemasterPreset(canonicalSystem: string | undefined): boolean {
+  return !!canonicalSystem && canonicalSystem in REMASTER_PRESETS;
+}
 
 /**
  * Scrive il file di override per-contenuto con il preset auto-remaster,
  * se non esiste già — richiamata quando l'utente attiva l'opzione per un
- * gioco PSX specifico. Il nome del file deve combaciare ESATTAMENTE col
- * nome del contenuto caricato (senza estensione) — verificato dal vivo:
- * "Crash Bandicoot (USA).cue" → "Crash Bandicoot (USA).opt".
+ * gioco specifico. Il nome del file deve combaciare ESATTAMENTE col nome
+ * del contenuto caricato (senza estensione) — verificato dal vivo per
+ * PSX: "Crash Bandicoot (USA).cue" → "Crash Bandicoot (USA).opt".
  *
  * Non serve mai RIMUOVERE questo file per tornare all'emulazione
  * originale: disattivare l'opzione si limita a cambiare il core in uso
- * (vedi PSX_DEFAULT_CORE) — un core diverso legge da una cartella di
- * config diversa ("Beetle PSX", non "Beetle PSX HW"), quindi questo file
- * semplicemente smette di essere rilevante, senza doverlo toccare.
+ * (vedi defaultCore) — un core diverso legge da una cartella di config
+ * diversa, quindi questo file semplicemente smette di essere rilevante,
+ * senza doverlo toccare.
  */
-export function writePsxRemasterOptions(cueFilePath: string): void {
+export function writeRemasterOptions(contentPath: string, canonicalSystem: string): void {
+  const preset = REMASTER_PRESETS[canonicalSystem];
+  if (!preset) return;
+
   const configHome = process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config');
-  const optDir = path.join(configHome, 'retroarch', 'config', 'Beetle PSX HW');
-  const contentName = path.basename(cueFilePath, path.extname(cueFilePath));
+  const optDir = path.join(configHome, 'retroarch', 'config', preset.coreDisplayName);
+  const contentName = path.basename(contentPath, path.extname(contentPath));
   const optPath = path.join(optDir, `${contentName}.opt`);
+  const optContent = preset.optionLines.join('\n') + '\n';
 
   try {
     mkdirSync(optDir, { recursive: true });
@@ -320,11 +359,11 @@ export function writePsxRemasterOptions(cueFilePath: string): void {
     // (es. dal menu rapido), non vogliamo sovrascrivere le sue scelte
     // ogni volta che riattiva l'opzione dalla Dashboard.
     if (!existsSync(optPath)) {
-      writeFileSync(optPath, PSX_REMASTER_OPTIONS, 'utf-8');
-      writeLog('info', `[CLASSIC] Preset auto-remaster PSX scritto: ${optPath}`);
+      writeFileSync(optPath, optContent, 'utf-8');
+      writeLog('info', `[CLASSIC] Preset auto-remaster (${canonicalSystem}) scritto: ${optPath}`);
     }
   } catch (e) {
-    writeLog('warning', `[CLASSIC] Scrittura preset auto-remaster PSX fallita (${optPath}): ${e}`);
+    writeLog('warning', `[CLASSIC] Scrittura preset auto-remaster (${canonicalSystem}) fallita (${optPath}): ${e}`);
   }
 }
 

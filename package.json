@@ -1,7 +1,7 @@
 {
   "name": "x-launcher",
   "private": true,
-  "version": "1.1.97-dev.1",
+  "version": "1.1.100-dev.1",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",

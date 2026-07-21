@@ -3573,3 +3573,39 @@ Verificato con un test isolato (non solo lettura del codice) che il file di over
 ### Verifica
 
 `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo (un'icona duplicata trovata e corretta durante la stesura). JSON delle traduzioni validati. Scrittura del file di override verificata con un test isolato Node.
+
+## v1.1.98-dev.1 — Auto-Remaster: architettura generalizzata
+
+Richiesto dall'utente prima di riprendere la roadmap: generalizzare l'infrastruttura costruita per PSX, così aggiungere un futuro sistema (N64/Saturn/Dreamcast/PS2, discussi e rimandati) significhi aggiungere una voce a un registro, non ripetere l'intero lavoro da capo.
+
+**`classicPlugin.ts`**: `PSX_REMASTER_CORE`/`PSX_DEFAULT_CORE`/`writePsxRemasterOptions()` sostituiti da un registro `REMASTER_PRESETS: Record<string, RemasterPreset>` (core remaster, core di default, nome esatto della cartella di config di RetroArch, righe di opzione) con una sola voce per ora (`psx`), più `hasRemasterPreset()` e `writeRemasterOptions()` generici che vi si appoggiano.
+
+**`gameManager.ts`**: `setPsxRemaster()` → `setRemasterEnabled()`, cerca il preset in base a `game.system` invece di assumere PSX; ora restituisce anche il nuovo valore del core (`newCore`), così il frontend non deve duplicare i nomi esatti dei core.
+
+**`server.ts`**: endpoint `POST /api/games/:id/psx-remaster` → `POST /api/games/:id/remaster`.
+
+**Frontend**: nuova mappa a livello di modulo `REMASTER_HINT_BY_SYSTEM` (una sottostringa per capire se il remaster è già attivo, prima ancora di premere il pulsante — da tenere in sync con `REMASTER_PRESETS`), interruttore generalizzato per qualunque sistema presente in quella mappa, etichetta dinamica ("Auto-Remaster (PSX)", interpolata da `selectedGame.system`, pronta a mostrare "Auto-Remaster (N64)" ecc. senza una nuova chiave di traduzione per ogni sistema).
+
+Verificato con un test isolato (non solo lettura del codice) che il registro distingua correttamente un sistema con preset (`psx`) da uno senza (`saturn`, non ancora aggiunto) e scriva il file nel formato corretto.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. Nessun riferimento residuo al vecchio codice PSX-specifico. JSON delle traduzioni validati.
+
+## v1.1.99-dev.1 — colore viola per l'interruttore auto-remaster attivo
+
+Richiesto dall'utente: `bg-purple-600` (abbinato all'icona `Sparkles`) è già il linguaggio visivo consolidato per "opzione intelligente" nella tab AI Advisor (badge dei suggerimenti AI, righe attive dei provider). Il pulsante auto-remaster usava `bg-blue-600` quando attivo, lo stesso blu generico di ogni altro elemento selezionato dell'interfaccia — cambiato in `bg-purple-600` per coerenza. Il bordo di focus (navigazione controller) resta blu, invariato: è l'indicatore universale di navigazione dell'app, non specifico del tema AI.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.100-dev.1 — fix: nessuna selezione visibile sul pulsante auto-remaster attivo
+
+Segnalato dall'utente: quando l'auto-remaster è attivo (sfondo viola pieno) e si naviga fino al pulsante col controller per disattivarlo, non compare alcun indicatore di selezione. Causa: la logica del bordo assegnava una stringa vuota (`""`) ogni volta che `isEnabled` era vero, indipendentemente dal focus — il ramo `isFocused` veniva controllato solo nel caso `!isEnabled`.
+
+Fix: quando attivo e con il focus, il pulsante mostra ora un bordo viola più chiaro (`border-purple-300`) invece di un bordo blu che stonerebbe su uno sfondo già viola pieno — il bordo blu standard resta per lo stato "non attivo", invariato.
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.

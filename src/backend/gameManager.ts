@@ -9,7 +9,7 @@ import { SteamPlugin } from './plugins/steamPlugin';
 import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
-import { ClassicPlugin, PSX_REMASTER_CORE, PSX_DEFAULT_CORE, writePsxRemasterOptions } from './plugins/classicPlugin';
+import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
 import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary } from './runners/implementations';
 import { downloadManager, resolveGogExe } from './downloadManager';
@@ -1290,26 +1290,32 @@ class GameManager {
    * volta e lo scrive per le volte successive.
    */
   /**
-   * Richiesta utente — "auto-remaster" per PSX: attiva/disattiva passando
-   * dal core software (mednafen_psx, default — più fedele, nessun
-   * upscaling) al core hardware-accelerato (mednafen_psx_hw, "Beetle PSX
-   * HW") con un preset di risoluzione/AA/PGXP verificato passo per passo
-   * a mano dall'utente su hardware reale. Il core stesso è l'interruttore
-   * — nessun campo DB dedicato: disattivare si limita a tornare al core
-   * di default, che semplicemente ignora il file di preset (vive nella
-   * cartella di config di un core diverso).
+   * Richiesta utente — "auto-remaster": attiva/disattiva passando dal core
+   * originale (più fedele, nessun upscaling) al core hardware-accelerato
+   * con un preset di risoluzione/AA/PGXP registrato in REMASTER_PRESETS
+   * (classicPlugin.ts). Il core stesso è l'interruttore — nessun campo DB
+   * dedicato: disattivare si limita a tornare al core di default, che
+   * semplicemente ignora il file di preset (vive nella cartella di config
+   * di un core diverso).
+   *
+   * Generalizzata dal caso PSX (il primo verificato passo-passo a mano su
+   * hardware reale) — funziona per qualunque sistema con una voce in
+   * REMASTER_PRESETS, senza bisogno di altre modifiche qui quando in
+   * futuro si aggiungeranno N64/Saturn/Dreamcast/PS2.
    */
-  async setPsxRemaster(gameId: string, enabled: boolean): Promise<{ success: boolean; message?: string }> {
+  async setRemasterEnabled(gameId: string, enabled: boolean): Promise<{ success: boolean; message?: string; newCore?: string }> {
     const game = db.getGameById(gameId);
-    if (!game || game.system !== 'psx') {
-      return { success: false, message: 'Non è un gioco PSX' };
+    if (!game || !hasRemasterPreset(game.system)) {
+      return { success: false, message: 'Nessun preset auto-remaster disponibile per questo gioco' };
     }
+    const preset = REMASTER_PRESETS[game.system!];
     if (enabled && game.executablePath) {
-      writePsxRemasterOptions(game.executablePath);
+      writeRemasterOptions(game.executablePath, game.system!);
     }
-    db.updateGameConfig(gameId, { libretroCore: enabled ? PSX_REMASTER_CORE : PSX_DEFAULT_CORE });
-    this.addLog(`[CLASSIC] Auto-remaster PSX ${enabled ? 'attivato' : 'disattivato'} per ${game.title}.`, 'system');
-    return { success: true };
+    const newCore = enabled ? preset.remasterCore : preset.defaultCore;
+    db.updateGameConfig(gameId, { libretroCore: newCore });
+    this.addLog(`[CLASSIC] Auto-remaster (${game.system}) ${enabled ? 'attivato' : 'disattivato'} per ${game.title}.`, 'system');
+    return { success: true, newCore };
   }
 
   async getPredictedInstallSize(gameId: string): Promise<number | null> {

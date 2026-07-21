@@ -181,10 +181,93 @@
                 "metadata.json",
                 "X-Launcher-Roadmap.md"
             ]
+        },
+        {
+            "id": "gaia-xlaunch-retroarch-keyboard",
+            "description": "Step 19a (xlaunch://) completo: protocollo URI progettato insieme all'utente prima di scrivere codice, xlaunch-handler.sh (delega a POST /api/launch, nessuna logica di lancio duplicata), registrazione xdg-mime via install.sh esteso, avvio a freddo con Dashboard nascosta (X_LAUNCHER_START_HIDDEN in kiosk-launch.sh), campo id contestuale nel Game Config per testare senza aprire DB/log. Due bugfix Proton (library folder Steam multiple, poi appmanifest .acf). Migliorie RetroArch: Launch Arguments contestuali, campo di override del titolo di scraping metadati (con rifetch immediato e correzione anche del titolo mostrato una volta confermato un abbinamento IGDB reale), preset shader CRT via --set-shader (--appendconfig= risulta ignorato da RetroArch). Cronologia \"giochi recenti\" nel menu contestuale della tray, con una saga di regressioni risolte fino alla causa reale (output soppresso su /dev/null, poi un vero crash pystray). Quattro fix alla tastiera virtuale: focus iniziale, navigazione ciclica orizzontale/verticale, un bug di FocusProvider che intrappolava la navigazione dai suggerimenti, apostrofo mancante.",
+            "appliedAt": "2026-07-18T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/FocusProvider.tsx",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/metadataManager.ts",
+                "src/backend/compatibilityManager.ts",
+                "src/backend/plugins/steamPlugin.ts",
+                "server.ts",
+                "kiosk-launch.sh",
+                "xlaunch-handler.sh",
+                "xlaunch-protocol.desktop",
+                "install.sh",
+                "tray.py",
+                "assets/retroarch-presets/crt-easymode.cfg",
+                "package.json",
+                "metadata.json",
+                "X-Launcher-Roadmap.md"
+            ]
+        },
+        {
+            "id": "post-gaia-crossde-sidebar-hardware",
+            "description": "Cross-DE per il kiosk mode (XFCE/MATE/GNOME/Plasma): rilevamento DE via XDG_CURRENT_DESKTOP, rimozione decorazioni con _MOTIF_WM_HINTS + dispatch per-DE (xfwm4 titleless_maximize su XFCE, confermato funzionante su hardware reale per Chromium e Firefox), fix Firefox (profilo dedicato con -no-remote, userChrome.css per nascondere barra indirizzi/tab, media.autoplay.default per l'audio), fix Gamepad API X/Y invertiti in Firefox (bug noto Mozilla su Linux). Tre nuove funzioni: dimensione prevista di installazione GOG/Epic con cache persistente (predicted_size_bytes), tempo di gioco reale accumulato per tutti gli store con protezione contro le sync di libreria (CASE WHEN su play_time_hours), tab Info Hardware in Gestisci Account (systemInfo.ts, sempre in ultima posizione). Rimossa cartella patches/ obsoleta, INSTALL.md riscritto, regole di sviluppo consolidate in X-Launcher-Roadmap.md.",
+            "appliedAt": "2026-07-20T00:00:00.000Z",
+            "files": [
+                "kiosk-launch.sh",
+                "build.sh",
+                "src/App.tsx",
+                "src/components/VirtualKeyboard.tsx",
+                "src/input/InputManager.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/systemInfo.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/types.ts",
+                "server.ts",
+                "public/locales/it/dashboard.json",
+                "public/locales/en/dashboard.json",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json",
+                "INSTALL.md",
+                "CHANGELOG.md",
+                "X-Launcher-Roadmap.md",
+                "package.json",
+                "metadata.json"
+            ]
+        },
+        {
+            "id": "post-v93-avatar-sidebar-retroarch-remaster",
+            "description": "Fix persistenza avatar (spostata da localStorage a server) e versione stantia nel menu (secondo useEffect che sovrascriveva silenziosamente appVersion, rimosso). Tre funzioni sidebar/Gestisci Account confermate su hardware reale: dimensione prevista installazione GOG/Epic (cache persistente, sintassi lgogdownloader e formato dimensione corretti dopo test reali), tempo di gioco reale tutti gli store (fix persistenza CASE WHEN contro le sync di libreria), tab Info Hardware (systemInfo.ts, tutto leggibile senza permessi elevati, sempre ultima tab). Saga RetroArch: cattura stdout/stderr mai avvenuta (logPath mancante in spawnDetached), poi bug PSX reale (zip CD multi-file richiede estrazione automatica, core di default pcsx_rearmed non pacchettizzato per x86_64 sostituito con mednafen_psx). Funzione 'Auto-Remaster' PSX verificata da terminale (override per-contenuto nativo RetroArch, non --appendconfig=), poi generalizzata in un registro REMASTER_PRESETS estendibile per futuri sistemi. Rimossa patches/, INSTALL.md riscritto, regole di sviluppo consolidate.",
+            "appliedAt": "2026-07-21T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/types.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/systemInfo.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/backend/runners/implementations.ts",
+                "server.ts",
+                "public/locales/it/dashboard.json",
+                "public/locales/en/dashboard.json",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json",
+                "public/locales/it/gameOptions.json",
+                "public/locales/en/gameOptions.json",
+                "INSTALL.md",
+                "CHANGELOG.md",
+                "X-Launcher-Roadmap.md",
+                "package.json",
+                "metadata.json"
+            ]
         }
     ],
-    "version": "1.1.65-rc.3",
-    "milestone": "v1.1.65-rc.3 — MILESTONE: INTERFACCIA INTERAMENTE BILINGUE IT/EN (Step 19b completo) + BUGFIX. Fondamenta i18next/react-i18next con pacchetti caricabili (public/locales/), otto namespace (settings, quickMenu, dashboard, gameOptions, downloads, notifications, avatarLibrary, unsupportedLanguageNotices), selettore di lingua manuale in Settings, autorilevamento della lingua di sistema al primo avvio con fallback inglese e avviso multilingua (ES/DE/FR/ZH) per lingue non ancora supportate. Knowledge Base dell'AI Advisor bilingue (34 voci) e prompt di sistema AI parametrizzato sulla lingua invece di \"in italiano\" fisso. Log di debug (writeLog/console.*) unificati in sola lingua inglese in tutto il backend — non più bilingue, per convenzione da qui in avanti. Numerosi fix di layout responsivo e bug di navigazione emersi durante la migrazione, tutti verificati su hardware reale. Precede questa milestone lo Step 18 (consolidamento fetch libreria giochi).",
-    "date": "2026-07-16",
-    "notes": "Sessione molto estesa in due parti principali. Prima parte: Step 18, consolidamento dei cinque punti di fetch della libreria giochi in una singola funzione condivisa (refreshGamesList()) — scoperta in corso d'opera che tre di quei cinque punti (login/logout/polling OAuth) erano non solo da consolidare ma del tutto ridondanti, perché il backend scatena comunque l'evento SSE library-updated per le stesse azioni. Seconda parte, la più estesa: Step 19b, i18n completo dell'intera dashboard. Approccio a sezioni successive (stessa strategia già usata per Settings): tab di Settings, Quick Menu, header Dashboard/ricerca/filtri, sidebar dettagli gioco, overlay Game Options, Downloads e Notifiche, Avatar Library, barra footer, tastiera virtuale, Knowledge Base e prompt AI, fino all'audit completo del contenuto delle notifiche generate in giro per il codice. Pattern ricorrente: l'utente ha trovato con test reali su hardware diversi punti mancati o bug di layout non catturabili da un'analisi statica del codice (titoli h2 rimasti letterali nonostante due fix precedenti sullo stesso overlay, wrap di testo che va da 2 a 4 righe solo in italiano, una race condition sul selettore di lingua che si manifesta solo al primo boot a freddo) — ogni volta corretto e documentato puntualmente. Decisioni di design esplicite: layout della tastiera virtuale mantenuto indipendente dalla lingua della UI (un utente può digitare in layout italiano con interfaccia inglese); nomi tecnici di progetto (Runner Bridge, Peer Hash Cache, RetroArch Core) lasciati non tradotti, mentre nomi propri del progetto senza valore di brand (Classic Console, Controller Generico, Deployment Manager) tradotti; log di debug unificati in sola lingua inglese per convenzione permanente da questa milestone in poi, essendo la lingua franca dello sviluppo. Deprioritizzato e documentato come fuori scope: il Debug Console (strumento di sviluppo) e due punti minori con nome store grezzo in frasi di notifica costruite a runtime.\\n\\nNuova convenzione permanente adottata da questa sessione in poi: ogni nuova feature accompagnata da testo va realizzata in italiano E inglese per default, non più italiano-poi-tradotto-dopo."
+    "version": "1.1.100-dev.1",
+    "milestone": "v1.1.79-Gaia — MILESTONE STABILE. Prima release con la nuova convenzione di nomi: da qui in poi ogni milestone stabile prende il nome di un pianeta o satellite del sistema solare. Tutte le funzioni core giudicate sufficientemente mature: libreria unificata GOG/Epic/Steam/Classic Console, i18n completo IT/EN (Step 19b chiuso), protocollo xlaunch:// funzionante end-to-end (Step 19a chiuso, testato su hardware reale — avvio a freddo nascosto, ripristino corretto, campo id contestuale per il testing), Knowledge Base e risposte AI Advisor bilingui, tray con cronologia giochi recenti, migliorie RetroArch (launch argument contestuali, titolo di scraping manuale per ROM con nome poco significativo, preset shader CRT), tastiera virtuale con navigazione ciclica e fix di focus/apostrofo. Precede questa milestone v1.1.65-rc.3 (interfaccia bilingue + log in inglese).",
+    "date": "2026-07-21",
+    "notes": "Snapshot di sviluppo, NON una nuova milestone stabile (quella di riferimento resta v1.1.79-Gaia). Pensato per riprendere il lavoro in una nuova sessione di chat (questa ha raggiunto la saturazione). Include tutto il lavoro dopo lo snapshot precedente (v1.1.93-dev1): fix persistenza avatar/versione menu; tre nuove funzioni sidebar/Gestisci Account confermate funzionanti su hardware reale (dimensione prevista di installazione GOG/Epic con cache persistente, tempo di gioco reale per tutti gli store con protezione contro le sync, tab Info Hardware sempre in ultima posizione); saga di bug RetroArch risolti con diagnosi progressiva (cattura mai avvenuta di stdout/stderr, poi un bug PSX reale diagnosticato dall'utente stesso — zip CD multi-file che richiede estrazione automatica, core di default non pacchettizzato per x86_64); funzione \"Auto-Remaster\" per PSX verificata passo-passo da terminale insieme all'utente (override per-contenuto nativo di RetroArch, non --appendconfig=, risoluzione/AA/PGXP), poi generalizzata in un registro estendibile per futuri sistemi (N64/Saturn/Dreamcast/PS2, discussi e rimandati); due fix estetici (colore/focus del pulsante auto-remaster). Cartella patches/ rimossa, INSTALL.md riscritto, regole di sviluppo consolidate in X-Launcher-Roadmap.md."
 }
