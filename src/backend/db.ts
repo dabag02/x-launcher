@@ -174,7 +174,15 @@ db.exec(`
     api_key     TEXT,
     base_url    TEXT,
     model       TEXT,
-    priority    INTEGER NOT NULL DEFAULT 999
+    priority    INTEGER NOT NULL DEFAULT 999,
+    -- v1.1.108-dev.1: budget token mensile PER PROVIDER (richiesto
+    -- dall'utente, sostituisce l'unico numero globale di prima). NULL per
+    -- i provider locali (Ollama — nessun vincolo di consumo, mostrato come
+    -- ∞ in UI). budget_warned_month traccia l'ultimo mese in cui è già
+    -- stata inviata la notifica di soglia 80% per questo provider, per
+    -- non ripeterla a ogni chiamata dopo la soglia.
+    token_budget         INTEGER,
+    budget_warned_month  TEXT
   );
 
   -- v0.99.90 — Step 15d: log di utilizzo token, una riga per chiamata a
@@ -246,6 +254,16 @@ if (!existingCols.includes('scrape_title')) {
 // NULL = non ancora recuperata (o store senza questa fonte).
 if (!existingCols.includes('predicted_size_bytes')) {
   db.exec("ALTER TABLE games ADD COLUMN predicted_size_bytes INTEGER");
+}
+// v1.1.108-dev.1: budget token per-provider (sostituisce l'unico numero
+// globale precedente, vedi appConfig.ts) + tracciamento mese già avvisato
+// alla soglia 80%.
+const aiProviderCols = (db.prepare("PRAGMA table_info(ai_provider_credentials)").all() as any[]).map(r => r.name);
+if (!aiProviderCols.includes('token_budget')) {
+  db.exec("ALTER TABLE ai_provider_credentials ADD COLUMN token_budget INTEGER");
+}
+if (!aiProviderCols.includes('budget_warned_month')) {
+  db.exec("ALTER TABLE ai_provider_credentials ADD COLUMN budget_warned_month TEXT");
 }
 const compatCols = (db.prepare("PRAGMA table_info(compat_profiles)").all() as any[]).map(r => r.name);
 if (!compatCols.includes('winetricks_verbs')) {
@@ -987,6 +1005,12 @@ export interface AiProviderCredential {
   baseUrl?:   string;
   model?:     string;
   priority:   number;
+  // v1.1.108-dev.1: undefined/null = provider locale senza vincolo di
+  // consumo (Ollama — mostrato come ∞ in UI, mai bloccato). Per i
+  // provider cloud, il tetto oltre il quale l'orchestrator smette di
+  // instradare richieste — vedi orchestrator.ts.
+  tokenBudget?:       number;
+  budgetWarnedMonth?: string;
 }
 
 export function getAiProviderCredential(providerId: string): AiProviderCredential | undefined {
@@ -999,6 +1023,8 @@ export function getAiProviderCredential(providerId: string): AiProviderCredentia
     baseUrl:    row.base_url   ?? undefined,
     model:      row.model      ?? undefined,
     priority:   row.priority,
+    tokenBudget:       row.token_budget         ?? undefined,
+    budgetWarnedMonth: row.budget_warned_month  ?? undefined,
   };
 }
 
@@ -1012,19 +1038,31 @@ export function getAllAiProviderCredentials(): AiProviderCredential[] {
       baseUrl:    row.base_url ?? undefined,
       model:      row.model    ?? undefined,
       priority:   row.priority,
+      tokenBudget:       row.token_budget        ?? undefined,
+      budgetWarnedMonth: row.budget_warned_month ?? undefined,
     }));
 }
 
 export function upsertAiProviderCredential(cred: AiProviderCredential): void {
+  // v1.1.108-dev.1 — richiesta utente: un solo provider AI attivo alla
+  // volta, come i runner. Attivarne uno disattiva automaticamente TUTTI
+  // gli altri (Ollama compreso) — fatto qui, punto unico, cosi vale
+  // indipendentemente da quale chiamante (route cloud provider, route
+  // Ollama, test futuro) invoca l'upsert con enabled:true.
+  if (cred.enabled) {
+    db.prepare('UPDATE ai_provider_credentials SET enabled = 0 WHERE provider_id != ?').run(cred.providerId);
+  }
   db.prepare(`
-    INSERT INTO ai_provider_credentials (provider_id, enabled, api_key, base_url, model, priority)
-    VALUES (@providerId, @enabled, @apiKey, @baseUrl, @model, @priority)
+    INSERT INTO ai_provider_credentials (provider_id, enabled, api_key, base_url, model, priority, token_budget, budget_warned_month)
+    VALUES (@providerId, @enabled, @apiKey, @baseUrl, @model, @priority, @tokenBudget, @budgetWarnedMonth)
     ON CONFLICT(provider_id) DO UPDATE SET
       enabled  = excluded.enabled,
       api_key  = excluded.api_key,
       base_url = excluded.base_url,
       model    = excluded.model,
-      priority = excluded.priority
+      priority = excluded.priority,
+      token_budget        = excluded.token_budget,
+      budget_warned_month = excluded.budget_warned_month
   `).run({
     providerId: cred.providerId,
     enabled:    cred.enabled ? 1 : 0,
@@ -1032,7 +1070,19 @@ export function upsertAiProviderCredential(cred: AiProviderCredential): void {
     baseUrl:    cred.baseUrl ?? null,
     model:      cred.model   ?? null,
     priority:   cred.priority,
+    tokenBudget:       cred.tokenBudget       ?? null,
+    budgetWarnedMonth: cred.budgetWarnedMonth ?? null,
   });
+}
+
+/**
+ * v1.1.108-dev.1 — segna che l'avviso di soglia 80% è già stato inviato
+ * per questo provider nel mese indicato (formato 'YYYY-MM'), senza
+ * toccare nessun altro campo della credenziale — usata da
+ * orchestrator.ts subito dopo l'invio della notifica.
+ */
+export function markAiBudgetWarned(providerId: string, month: string): void {
+  db.prepare('UPDATE ai_provider_credentials SET budget_warned_month = ? WHERE provider_id = ?').run(month, providerId);
 }
 
 // v1.1.12 — mancava un modo per cancellare una API key salvata: prima

@@ -7,7 +7,7 @@ export interface RunnerConfig {
   cwd?:      string;
   fsr?:      boolean;
   gameMode?: boolean;
-  mangohud?: boolean;
+  mangohud?: 0 | 1 | 2;
   eac?:      boolean;
   battleye?: boolean;
 }

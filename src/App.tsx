@@ -550,12 +550,13 @@ function MainApp() {
   // modello userebbe se fosse acceso (premere A sulla riga già
   // selezionata deve spegnere Ollama, non limitarsi a riselezionarla).
   const [ollamaEnabled, setOllamaEnabled] = useState(false);
-  // v0.99.90 — Step 15d: consumo token del mese corrente e budget
-  // configurato — il contatore "hai usato X di Y token" discusso in fase
-  // di progettazione, mostrato sia qui (tab AI Models) sia nelle notifiche
-  // stesse (costruito lato server in notificationEngine.ts).
-  const [aiUsage, setAiUsage] = useState<{ totalTokens: number; budget: number }>({ totalTokens: 0, budget: 50_000 });
-  const [budgetDraft, setBudgetDraft] = useState<string>('');
+  // v1.1.108-dev.1 — richiesta utente: il budget non è più un unico
+  // numero aggregato fra tutti i provider (era aiUsage/budgetDraft) ma
+  // per-provider, incluso direttamente nella risposta di
+  // /api/ai/providers — vedi cloudProviderState sotto (tokenBudget +
+  // usageThisMonth per ciascuno) e ollamaUsageThisMonth per Ollama
+  // (informativo, nessun budget: mostrato come ∞ in UI).
+  const [ollamaUsageThisMonth, setOllamaUsageThisMonth] = useState<number>(0);
   // v0.99.90 — Step 15d: stato dei quattro provider cloud (Gemini/
   // DeepSeek/ChatGPT/Claude). apiKeyDraft è ciò che l'utente ha digitato
   // in QUESTA sessione tramite la tastiera on-screen — mai il vero
@@ -570,6 +571,13 @@ function MainApp() {
     apiKeyDraft: string;
     testing: boolean;
     testResult: { success: boolean; message: string } | null;
+    // v1.1.108-dev.1 — budget per-provider (richiesto dall'utente: ogni
+    // provider cloud mostra il proprio credito reale, non un totale
+    // mescolato). tokenBudget è sempre presente per un provider cloud
+    // (default 5.000.000 assegnato da server.ts alla prima
+    // configurazione) — undefined solo prima che la GET iniziale risponda.
+    tokenBudget?: number;
+    usageThisMonth?: number;
   }>>({});
   const [runnerInstallProgress, setRunnerInstallProgress] = useState<Record<string, string[]>>({});
   const [runnerInstalling, setRunnerInstalling] = useState<string | null>(null);
@@ -2937,7 +2945,7 @@ Vuoi provare ad avviarlo comunque?`);
   // un toggle binario, non serve una vera "direzione" come cycleSettingsTab
   // (rimasta come nome per coerenza col pattern, ma ignorata nella scelta
   // del prossimo valore). Persistita in app.conf con lo stesso meccanismo
-  // già in uso per displayMode/aiMonthlyTokenBudget (PATCH /api/config).
+  // già in uso per displayMode/fullscreen (PATCH /api/config).
   const cycleUiLanguage = useCallback(() => {
     // v1.1.49 — segnala all'effetto di boot (vedi commento esteso lì) che
     // l'utente ha già scelto manualmente: se il fetch di /api/config
@@ -3410,12 +3418,16 @@ Vuoi provare ad avviarlo comunque?`);
         const ollama = providers.find(p => p.providerId === 'ollama');
         setActiveOllamaModel(ollama?.model ?? null);
         setOllamaEnabled(Boolean(ollama?.enabled));
+        // v1.1.108-dev.1 — Ollama non ha budget (provider locale, vedi
+        // requiresApiKey===false in registry.ts) ma il consumo resta
+        // informativo da mostrare comunque, accanto al simbolo ∞.
+        setOllamaUsageThisMonth(ollama?.usageThisMonth ?? 0);
 
         // v0.99.90 — stato dei quattro provider cloud dalla stessa
         // risposta — nessuna chiamata separata. Preserva apiKeyDraft
         // già digitato in questa sessione (non sovrascriverlo con
         // vuoto solo perché abbiamo ri-fatto il fetch), aggiorna solo
-        // enabled/hasStoredKey/testResult.
+        // enabled/hasStoredKey/testResult/tokenBudget/usageThisMonth.
         setCloudProviderState(prev => {
           const next = { ...prev };
           for (const id of ['gemini', 'deepseek', 'chatgpt', 'claude']) {
@@ -3426,19 +3438,14 @@ Vuoi provare ad avviarlo comunque?`);
               apiKeyDraft:  prev[id]?.apiKeyDraft ?? '',
               testing:      false,
               testResult:   prev[id]?.testResult ?? null,
+              // v1.1.108-dev.1 — budget per-provider, incluso qui invece
+              // che in una chiamata /api/ai/usage separata (rimossa).
+              tokenBudget:     p?.tokenBudget ?? 5_000_000,
+              usageThisMonth:  p?.usageThisMonth ?? 0,
             };
           }
           return next;
         });
-      })
-      .catch(() => {});
-    // v0.99.90 — consumo/budget token, stesso ciclo di refresh (boot +
-    // ogni apertura di Impostazioni) delle altre informazioni di questa tab.
-    fetch('/api/ai/usage')
-      .then(r => r.json())
-      .then(data => {
-        setAiUsage({ totalTokens: data?.totalTokens ?? 0, budget: data?.budget ?? 50_000 });
-        setBudgetDraft(String(data?.budget ?? 50_000));
       })
       .catch(() => {});
   }, []);
@@ -3450,14 +3457,18 @@ Vuoi provare ad avviarlo comunque?`);
   // Aggiornamento parziale lato server (vedi fix in server.ts) — inviare
   // solo apiKeyDraft se non vuoto evita di cancellare una key già salvata
   // quando l'utente tocca solo il toggle enabled.
-  const saveCloudProvider = React.useCallback((id: string, patch: { enabled?: boolean; apiKey?: string }) => {
+  // v1.1.108-dev.1 — patch.tokenBudget: quando l'utente alza il budget
+  // dopo aver esaurito quello configurato (segnale implicito di "ho
+  // pagato per continuare", vedi orchestrator.ts), passa da qui.
+  const saveCloudProvider = React.useCallback((id: string, patch: { enabled?: boolean; apiKey?: string; tokenBudget?: number }) => {
     const state = cloudProviderState[id];
     fetch(`/api/ai/providers/${id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        enabled: patch.enabled ?? state?.enabled ?? false,
-        apiKey:  patch.apiKey,
+        enabled:     patch.enabled ?? state?.enabled ?? false,
+        apiKey:      patch.apiKey,
+        tokenBudget: patch.tokenBudget ?? state?.tokenBudget,
         priority: CLOUD_PROVIDERS.findIndex(p => p.id === id) + 1, // 0 è Ollama
       }),
     }).then(() => refreshOllamaModels()).catch(() => {});
@@ -5403,7 +5414,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   } else if (activeSettingsTab === 'input') {
                     firstTabContentId = inputPlugins.length > 0 ? `input-plugin-toggle-${inputPlugins[0].id}` : undefined;
                   } else if (activeSettingsTab === 'ai-models') {
-                    firstTabContentId = 'ai-budget-input';
+                    // v1.1.108-dev.1 — il vecchio widget budget aggregato
+                    // (primo elemento di questa tab) non esiste più: ora
+                    // il primo elemento reale è il primo modello Ollama
+                    // installato, o — se non ce n'è nessuno — il toggle
+                    // del primo provider cloud.
+                    firstTabContentId = ollamaModels.length > 0
+                      ? `ollama-model-select-${ollamaModels[0].name}`
+                      : `cloud-provider-toggle-${CLOUD_PROVIDERS[0].id}`;
                   }
                   return (
                 <Focusable
@@ -6314,81 +6332,23 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {t('aiAdvisor.modelsIntro')}
                     </p>
 
-                    {/* v0.99.90 — Step 15d: contatore budget token, condiviso
-                        tra tutti i provider (non solo Ollama) — vive qui
-                        perché è l'unica tab AI esistente finora, non perché
-                        sia specifico di Ollama. */}
-                    <div>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('aiAdvisor.monthlyBudget')}</h3>
-                      <div className={cn(
-                        "rounded-xl p-4",
-                        theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
-                      )}>
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-xs font-mono">
-                            {t('aiAdvisor.tokensThisMonth', { used: aiUsage.totalTokens.toLocaleString(i18n.language), budget: aiUsage.budget.toLocaleString(i18n.language) })}
-                          </span>
-                          <span className={cn(
-                            "text-[9px] font-black uppercase tracking-widest",
-                            aiUsage.totalTokens >= aiUsage.budget ? "text-red-400" : aiUsage.totalTokens >= aiUsage.budget * 0.8 ? "text-orange-400" : "text-green-400"
-                          )}>
-                            {Math.min(100, Math.round((aiUsage.totalTokens / Math.max(aiUsage.budget, 1)) * 100))}%
-                          </span>
-                        </div>
-                        <div className={cn("w-full h-1.5 rounded-full overflow-hidden mb-4", theme === 'dark' ? "bg-white/10" : "bg-gray-200")}>
-                          <div
-                            className={cn(
-                              "h-full rounded-full transition-all",
-                              aiUsage.totalTokens >= aiUsage.budget ? "bg-red-500" : aiUsage.totalTokens >= aiUsage.budget * 0.8 ? "bg-orange-400" : "bg-green-500"
-                            )}
-                            style={{ width: `${Math.min(100, (aiUsage.totalTokens / Math.max(aiUsage.budget, 1)) * 100)}%` }}
-                          />
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0">{t('aiAdvisor.setBudget')}</span>
-                          <Focusable
-                            group="settings"
-                            id="ai-budget-input"
-                            neighbors={{ down: ollamaModels[0] ? `ollama-model-select-${ollamaModels[0].name}` : undefined }}
-                            onEnter={() => openKeyboardForField(
-                              'ai-budget-input',
-                              t('aiAdvisor.budgetFieldLabel'),
-                              String(aiUsage.budget),
-                              async (val) => {
-                                const n = parseInt(val, 10);
-                                if (!isNaN(n) && n >= 0) {
-                                  setAiUsage(u => ({ ...u, budget: n }));
-                                  setBudgetDraft(String(n));
-                                  await fetch('/api/ai/usage/budget', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ budget: n }),
-                                  }).catch(() => {});
-                                }
-                              },
-                              'settings'
-                            )}
-                          >
-                            {(isFocused) => (
-                              <input
-                                type="text"
-                                readOnly
-                                value={budgetDraft}
-                                className={cn(
-                                  "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
-                                  theme === 'dark' ? "bg-black/40" : "bg-white",
-                                  isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
-                                )}
-                              />
-                            )}
-                          </Focusable>
-                          <span className="text-[9px] font-mono opacity-30 shrink-0">{t('aiAdvisor.tokensPerMonth')}</span>
-                        </div>
-                      </div>
-                    </div>
-
+                    {/* v1.1.108-dev.1 — richiesta utente: niente più un
+                        budget aggregato fra tutti i provider (era qui,
+                        con un campo editabile) — Ollama è locale e
+                        gratuito, nessun vincolo di consumo: mostra solo
+                        quanto ha processato questo mese, a puro titolo
+                        informativo, col simbolo ∞ al posto di un tetto.
+                        Il budget vero (editabile, con blocco reale
+                        all'esaurimento) vive ora dentro ogni card
+                        provider cloud più sotto — vedi CLOUD_PROVIDERS. */}
                     <div>
                       <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('aiAdvisor.installedModels')}</h3>
+                      {/* v1.1.108-dev.1 — informativo, non focalizzabile:
+                          Ollama non ha budget, quindi niente da editare
+                          qui, solo quanto ha processato questo mese. */}
+                      <p className={cn("text-[10px] font-mono mb-4", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                        {t('aiAdvisor.tokensThisMonth', { used: ollamaUsageThisMonth.toLocaleString(i18n.language), budget: '∞' })}
+                      </p>
                       <div className="space-y-2">
                         {ollamaModels.length === 0 && (
                           <p className="text-xs opacity-40 italic">{t('aiAdvisor.noModelsFound')}</p>
@@ -6410,7 +6370,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           // dovrebbe già funzionare da solo, ma un percorso
                           // esplicito costa poco e toglie ogni dubbio quando
                           // i modelli diventeranno 2 o più.
-                          const prevId = idx === 0 ? 'ai-budget-input' : `ollama-model-select-${ollamaModels[idx - 1].name}`;
+                          const prevId = idx === 0 ? undefined : `ollama-model-select-${ollamaModels[idx - 1].name}`;
                           const nextId = idx === ollamaModels.length - 1 ? undefined : `ollama-model-select-${ollamaModels[idx + 1].name}`;
                           // v0.99.90 — stesso segnale visivo già usato per le
                           // righe Runner in System: l'intera riga si
@@ -6502,7 +6462,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           //    servizio", risolvibile solo scendendo al
                           //    provider dopo e tornando su per sbaglio.
                           const toggleUpNeighbor = idx === 0
-                            ? (ollamaModels[ollamaModels.length - 1] ? `ollama-model-select-${ollamaModels[ollamaModels.length - 1].name}` : 'ai-budget-input')
+                            ? (ollamaModels[ollamaModels.length - 1] ? `ollama-model-select-${ollamaModels[ollamaModels.length - 1].name}` : undefined)
                             : `cloud-provider-toggle-${CLOUD_PROVIDERS[idx - 1].id}`;
                           const nextProvider = CLOUD_PROVIDERS[idx + 1];
                           const toggleDownNeighbor = state.enabled
@@ -6638,7 +6598,69 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       )}
                                     </Focusable>
                                   )}
+                                  {/* v1.1.108-dev.1 — richiesta utente: budget
+                                      PER PROVIDER (prima un unico numero
+                                      aggregato altrove in questa tab), col
+                                      credito reale — gratuito o a pagamento
+                                      — di questo servizio specifico. Stesso
+                                      sequentialChain orizzontale della riga:
+                                      appena aggiunto in coda, nessun'altra
+                                      modifica ai vicini di navigazione. */}
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-provider-budget-${cp.id}`}
+                                    sequentialChain={`cloud-provider-row-${cp.id}`}
+                                    chainAxis="horizontal"
+                                    onEnter={() => openKeyboardForField(
+                                      `cloud-provider-budget-${cp.id}`,
+                                      `${cp.name} — ${t('aiAdvisor.budgetFieldLabel')}`,
+                                      String(state.tokenBudget ?? 5_000_000),
+                                      (val) => {
+                                        const n = parseInt(val, 10);
+                                        if (!isNaN(n) && n >= 0) {
+                                          setCloudProviderState(prev => ({ ...prev, [cp.id]: { ...prev[cp.id], tokenBudget: n } }));
+                                          saveCloudProvider(cp.id, { tokenBudget: n });
+                                        }
+                                      },
+                                      'settings'
+                                    )}
+                                  >
+                                    {(isFocused) => (
+                                      <input
+                                        type="text"
+                                        readOnly
+                                        value={String(state.tokenBudget ?? 5_000_000)}
+                                        className={cn(
+                                          "w-24 px-2 py-1.5 rounded-lg text-[10px] font-mono text-center focus:outline-none transition-colors cursor-pointer shrink-0",
+                                          theme === 'dark' ? "bg-black/40" : "bg-white",
+                                          isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                        )}
+                                      />
+                                    )}
+                                  </Focusable>
                                 </div>
+                              )}
+                              {state.enabled && (
+                                // v1.1.108-dev.1 — sostituisce il vecchio
+                                // contatore aggregato: usati/budget REALI
+                                // di questo provider specifico. Rosso a
+                                // budget esaurito (nessuna richiesta verrà
+                                // instradata, vedi orchestrator.ts),
+                                // arancio oltre l'80% (stessa soglia della
+                                // notifica automatica).
+                                <p className={cn(
+                                  "text-[9px] font-mono mt-2",
+                                  (state.usageThisMonth ?? 0) >= (state.tokenBudget ?? 5_000_000)
+                                    ? "text-red-400"
+                                    : (state.usageThisMonth ?? 0) >= (state.tokenBudget ?? 5_000_000) * 0.8
+                                      ? "text-orange-400"
+                                      : theme === 'dark' ? "text-white/30" : "text-gray-500"
+                                )}>
+                                  {t('aiAdvisor.tokensThisMonth', {
+                                    used:   (state.usageThisMonth ?? 0).toLocaleString(i18n.language),
+                                    budget: (state.tokenBudget ?? 5_000_000).toLocaleString(i18n.language),
+                                  })}
+                                </p>
                               )}
                               {state.testResult && (
                                 <p className={cn("text-[9px] font-mono mt-2", state.testResult.success ? "text-green-400" : "text-red-400")}>

@@ -42,12 +42,6 @@ export type Language = 'it' | 'en';
 export interface AppConfig {
   fullscreen: boolean;
   displayMode: DisplayMode;
-  // v0.99.90 — Step 15d: budget mensile di token per l'AI Advisor,
-  // condiviso tra tutti i provider (non per-provider) — deciso in fase di
-  // progettazione: un unico numero ha lo stesso significato per l'utente
-  // indipendentemente da quale provider stia effettivamente rispondendo
-  // in un dato momento (fallback silenzioso tra più provider abilitati).
-  aiMonthlyTokenBudget: number;
   // Step 19b (v1.1.38) — lingua UI scelta manualmente in Settings. Nessun
   // autorilevamento della lingua di sistema ancora implementato (roadmap):
   // il default resta 'it' finché quella parte non viene costruita.
@@ -65,10 +59,6 @@ export interface AppConfig {
 const DEFAULTS: AppConfig = {
   fullscreen: true,        // comportamento storico: kiosk-launch.sh avviava sempre a tutto schermo
   displayMode: 'kiosk',    // equivalente a fullscreen=true prima di v0.99.9
-  // Una sessione di debug tipica pesa ~5.000 token (vedi discussione sui
-  // costi) — 50.000 permette circa 10 sessioni al mese prima di avvicinarsi
-  // al limite, un default ragionevole senza essere arbitrariamente basso.
-  aiMonthlyTokenBudget: 50_000,
   language: 'it',
   avatarUrl: null,
 };
@@ -85,10 +75,6 @@ function parseConfFile(raw: string): Partial<AppConfig> {
     if (key === 'fullscreen') out.fullscreen = val === 'true';
     if (key === 'displayMode' && (val === 'kiosk' || val === 'window' || val === 'borderless')) {
       out.displayMode = val;
-    }
-    if (key === 'aiMonthlyTokenBudget') {
-      const n = parseInt(val, 10);
-      if (!isNaN(n) && n >= 0) out.aiMonthlyTokenBudget = n;
     }
     if (key === 'language' && (val === 'it' || val === 'en')) {
       out.language = val;
@@ -150,7 +136,6 @@ export function writeAppConfig(partial: Partial<AppConfig>): AppConfig {
     '# X-Launcher — preferenze persistite (formato chiave=valore, letto anche da kiosk-launch.sh)',
     `fullscreen=${next.fullscreen}`,
     `displayMode=${next.displayMode}`,
-    `aiMonthlyTokenBudget=${next.aiMonthlyTokenBudget}`,
     `language=${next.language}`,
     `avatarUrl=${next.avatarUrl ?? ''}`,
     '',

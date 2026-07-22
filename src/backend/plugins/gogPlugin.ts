@@ -96,6 +96,62 @@ function parseSlug(line: string): string {
 // Sorgente 1: lgogdownloader --list (asincrono, non bloccante)
 // ---------------------------------------------------------------------------
 
+/**
+ * Uno slug GOG valido contiene solo lettere minuscole, cifre e underscore,
+ * con un eventuale suffisso "[N]" per edizioni multi-parte — MAI ':', '/',
+ * '.', '?', '=', '&'. Artefatto reale trovato dall'utente: quando il token
+ * è scaduto/non valido, lgogdownloader può stampare sullo stesso stream un
+ * URL di ri-autenticazione (https://auth.gog.com/auth?client_id=...&...) —
+ * il vecchio filtro (`/^[a-z0-9]/`) lo accettava comunque, perché un URL
+ * comincia anch'esso con una lettera minuscola. Risultato osservato: una
+ * card fantasma in libreria con l'URL intero come "titolo" (title-cased
+ * dallo split su '_', da cui il testo spezzettato in maiuscolo visto a
+ * schermo), mai installabile.
+ */
+const GOG_SLUG_PATTERN = /^[a-z0-9_]+(?:\s*\[\d+\])?$/;
+
+/**
+ * Alcuni elementi della libreria GOG non sono giochi installabili ma
+ * pacchetti bonus a sé stanti (colonna sonora, wallpaper, artwork...) — GOG
+ * li chiama "Goodies Collection" e li elenca con lo stesso meccanismo degli
+ * slug di gioco veri, quindi non c'è modo di distinguerli da `--list games`
+ * da soli. Verificato dal vivo con `cyberpunk_2077_goodies_collection`:
+ * `--list details --game` conferma solo una sezione "extras:", nessuna
+ * "installers:" — non installabile, non è un gioco. Elenco di suffissi
+ * noti, estendibile se ne emergono altri in futuro.
+ */
+const NON_GAME_SLUG_SUFFIXES = ['_goodies_collection'];
+
+/** true se la riga (già trim()ata) è uno slug di gioco valido — non una
+ *  riga di progresso, non un artefatto tipo URL, non un pacchetto bonus
+ *  noto. Condivisa tra lo stream handler e il flush finale sotto, per non
+ *  duplicare la stessa logica di validazione due volte. */
+function isValidGameSlugLine(trimmed: string): boolean {
+  if (!trimmed) return false;
+  if (trimmed.startsWith('Getting ') || trimmed.startsWith('Loaded ') || trimmed.startsWith('Error')) return false;
+  const clean = stripAnsi(trimmed);
+  if (!GOG_SLUG_PATTERN.test(clean)) return false;
+  const withoutSuffixTag = clean.replace(/\s*\[\d+\]\s*$/, '');
+  if (NON_GAME_SLUG_SUFFIXES.some(suffix => withoutSuffixTag.endsWith(suffix))) return false;
+  return true;
+}
+
+/**
+ * v1.1.106-dev.2 — richiesta utente ("non è cambiato nulla"): il fix sopra
+ * impedisce che NUOVE voci spazzatura vengano create, ma non rimuove
+ * quelle già scritte nel DB da scansioni precedenti (GOG non è un plugin a
+ * scansione esaustiva — vedi gameManager.ts, deliberatamente escluso per
+ * gli store online: un risultato parziale per un errore di rete/auth non
+ * deve svuotare la libreria). Questa funzione è la pulizia mirata: prende
+ * solo lo slug (senza il prefisso "gog-" dell'id) e dice se sarebbe stato
+ * scartato dal filtro sopra se generato oggi — usata da gameManager per
+ * ripulire selettivamente il DB, senza dipendere dal risultato della
+ * scansione corrente.
+ */
+export function isJunkGogSlug(slug: string): boolean {
+  return !isValidGameSlugLine(slug);
+}
+
 function getLibraryFromLgog(): Promise<Game[]> {
   return new Promise((resolve) => {
     // v0.99.27 — CAUSA REALE TROVATA, confermata da test diretto
@@ -150,11 +206,7 @@ function getLibraryFromLgog(): Promise<Game[]> {
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed) continue;
-        // Filtra righe di progresso lgogdownloader (usano \r come separatore)
-        if (trimmed.startsWith('Getting ') || trimmed.startsWith('Loaded ') || trimmed.startsWith('Error')) continue;
-        // Filtra righe che non sembrano slug (devono iniziare con lettera minuscola o cifra)
-        if (!/^[a-z0-9]/.test(stripAnsi(trimmed))) continue;
+        if (!isValidGameSlugLine(trimmed)) continue;
         const slug  = parseSlug(trimmed);
         const title = slugToTitle(trimmed);
         games.push({
@@ -180,7 +232,7 @@ function getLibraryFromLgog(): Promise<Game[]> {
     proc.on('close', () => {
       clearTimeout(timer);
       // Processa eventuale ultima riga senza newline finale
-      if (buffer.trim() && !buffer.trim().startsWith('Getting ')) {
+      if (isValidGameSlugLine(buffer.trim())) {
         const slug  = parseSlug(buffer.trim());
         const title = slugToTitle(buffer.trim());
         games.push({

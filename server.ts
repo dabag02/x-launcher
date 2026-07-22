@@ -849,6 +849,12 @@ async function startServer() {
   // aspettare quella UI — non è pensata per restare l'unico modo di
   // configurare i provider a lungo termine.
   app.get('/api/ai/providers', (_req, res) => {
+    // v1.1.108-dev.1 — usageThisMonth per-provider incluso qui: prima era
+    // una chiamata separata (/api/ai/usage) con un unico totale
+    // aggregato; ora il budget è per-provider (vedi db.ts), quindi ogni
+    // riga porta con sé sia il proprio tetto configurato sia il proprio
+    // consumo — nessuna seconda chiamata necessaria lato client.
+    const usage = db.getAiUsageThisMonth();
     res.json(db.getAllAiProviderCredentials().map(c => ({
       ...c,
       // Non rimandare mai la key in chiaro nella risposta GET, anche se
@@ -856,11 +862,12 @@ async function startServer() {
       // di esporla di nuovo lato client oltre al momento in cui viene
       // scritta.
       apiKey: c.apiKey ? '••••••••' : undefined,
+      usageThisMonth: usage.byProvider[c.providerId] ?? 0,
     })));
   });
 
-  app.post('/api/ai/providers/:id', (req, res) => {
-    const { enabled, apiKey, baseUrl, model, priority } = req.body;
+  app.post('/api/ai/providers/:id', async (req, res) => {
+    const { enabled, apiKey, baseUrl, model, priority, tokenBudget } = req.body;
     // v0.99.90 — fix: prima questa route sovrascriveva SEMPRE apiKey/
     // baseUrl/model con quanto ricevuto, incluso undefined→null. Il
     // frontend non ha mai il vero valore dell'API key (mascherata come
@@ -869,6 +876,20 @@ async function startServer() {
     // parziale: un campo omesso (o stringa vuota per apiKey) preserva il
     // valore già salvato invece di azzerarlo.
     const existing = db.getAiProviderCredential(req.params.id);
+    // v1.1.108-dev.1 — richiesto dall'utente: i provider locali (solo
+    // Ollama oggi, riconosciuto via requiresApiKey===false — non
+    // hardcoded sull'id, cosi vale anche per un futuro provider locale
+    // diverso) non hanno mai un budget: sempre null/∞, qualunque valore
+    // arrivi dal client viene ignorato. Per i provider cloud, un valore
+    // esplicito nel body vince; altrimenti si preserva quello già
+    // salvato; se è la primissima configurazione (nessun existing) si
+    // parte da 5.000.000 (default deciso con l'utente).
+    const { buildProvider } = await import('./src/backend/aiProviders/registry');
+    const probe = buildProvider({ providerId: req.params.id, enabled: false, priority: 0 });
+    const isLocalProvider = probe ? !probe.requiresApiKey : false;
+    const resolvedTokenBudget = isLocalProvider
+      ? undefined
+      : (typeof tokenBudget === 'number' ? tokenBudget : (existing?.tokenBudget ?? 5_000_000));
     db.upsertAiProviderCredential({
       providerId: req.params.id,
       enabled:    Boolean(enabled),
@@ -876,6 +897,8 @@ async function startServer() {
       baseUrl:    baseUrl !== undefined ? baseUrl : existing?.baseUrl,
       model:      model   !== undefined ? model   : existing?.model,
       priority:   typeof priority === 'number' ? priority : (existing?.priority ?? 999),
+      tokenBudget:       resolvedTokenBudget,
+      budgetWarnedMonth: existing?.budgetWarnedMonth,
     });
     res.json({ success: true });
   });
@@ -976,25 +999,11 @@ async function startServer() {
     }
   });
 
-  // GET /api/ai/usage — v0.99.90, Step 15d: consumo token del mese
-  // corrente e budget configurato, per il contatore mostrato sia nelle
-  // notifiche sia nella tab AI Models.
-  app.get('/api/ai/usage', (_req, res) => {
-    const usage = db.getAiUsageThisMonth();
-    const budget = readAppConfig().aiMonthlyTokenBudget;
-    res.json({ ...usage, budget });
-  });
-
-  // POST /api/ai/usage/budget — imposta il budget mensile (condiviso tra
-  // tutti i provider, non per-provider — vedi motivazione in appConfig.ts).
-  app.post('/api/ai/usage/budget', (req, res) => {
-    const { budget } = req.body;
-    if (typeof budget !== 'number' || budget < 0) {
-      return res.status(400).json({ error: 'budget deve essere un numero >= 0' });
-    }
-    writeAppConfig({ aiMonthlyTokenBudget: Math.round(budget) });
-    res.json({ success: true });
-  });
+  // v1.1.108-dev.1 — GET /api/ai/usage e POST /api/ai/usage/budget
+  // rimosse: il budget non è più un unico numero globale ma per-provider
+  // (vedi ai_provider_credentials in db.ts), già incluso nella risposta
+  // di GET /api/ai/providers sopra (tokenBudget + usageThisMonth per
+  // riga) — nessuna chiamata separata più necessaria.
 
   // POST /api/kb/writeback/failed — soluzione AI fallita
   app.post('/api/kb/writeback/failed', (req, res) => {

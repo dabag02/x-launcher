@@ -3609,3 +3609,27 @@ Fix: quando attivo e con il focus, il pulsante mostra ora un bordo viola più ch
 ### Verifica
 
 `tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo.
+
+## v1.1.108-dev.1 — AI Advisor: un solo provider attivo alla volta, budget token reale e per-provider
+
+Richiesta esplicita dell'utente, ragionata insieme prima di implementare: è improbabile che servano più AI Advisor attivi insieme — ognuno userà il provider che ha pagato o Ollama in locale. Due vincoli nuovi, entrambi confermati esplicitamente prima di scrivere il codice.
+
+**1. Un solo provider attivo alla volta.** Prima `getActiveProviders()` non aveva nessun vincolo di esclusività — più provider potevano tecnicamente essere `enabled` insieme, con fallback silenzioso tra loro. Ora attivare un provider (cloud o Ollama) disattiva automaticamente tutti gli altri, compreso quello attivo in precedenza — stesso comportamento dei runner. Applicato in un punto solo, `db.upsertAiProviderCredential()`: quando `enabled` è vero, disattiva prima tutti gli altri provider nella stessa tabella — vale per qualunque chiamante (route cloud, route Ollama), non serve replicarlo altrove.
+
+**2. Budget non più aggregato, ma per-provider, con blocco REALE.** Prima `aiMonthlyTokenBudget` era un unico numero globale in `appConfig.ts`, mai davvero applicato: verificato nel codice che `orchestrator.ts` non controllava mai il budget prima di chiamare un provider, era solo un contatore mostrato. Inoltre Ollama (locale, gratuito) veniva sommato allo stesso totale dei provider cloud a pagamento, gonfiando il numero senza motivo.
+
+Ora: 
+- Ogni provider cloud ha il proprio `token_budget` in `ai_provider_credentials` (nuove colonne `token_budget`/`budget_warned_month`, migrazione automatica sui DB esistenti). Default **5.000.000** alla prima configurazione.
+- **Blocco reale**: a budget esaurito, `orchestrator.ts` non instrada più alcuna richiesta a quel provider — niente rete, niente consumo — finché l'utente non alza manualmente il budget (segnale implicito di "ho pagato per continuare", nessun flag separato: il numero stesso è la prova).
+- **Avviso all'80%**: una notifica di sistema parte automaticamente al raggiungimento dell'80% del budget di un provider, una sola volta al mese per provider (`budget_warned_month` evita ripetizioni).
+- **Ollama e provider locali → nessun budget**, riconosciuti genericamente via `requiresApiKey === false` (non hardcoded su `'ollama'`, cosi vale anche per un futuro provider locale diverso) — mostrato come **∞** in interfaccia, mai bloccato.
+- Rimossi `aiMonthlyTokenBudget` da `appConfig.ts` e le vecchie route aggregate `GET /api/ai/usage`/`POST /api/ai/usage/budget` — tutto ora dentro `GET /api/ai/providers` (tokenBudget + usageThisMonth per riga, una sola chiamata).
+- `App.tsx`: il vecchio widget "Budget mensile" aggregato è sparito; ogni card provider cloud ha ora il proprio campo budget editabile + contatore "usati X di Y" (rosso a esaurimento, arancio oltre l'80%); la sezione Ollama mostra "usati X di ∞", puramente informativo.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+### Nota per chi applica questo pacchetto
+
+Questa sessione ha subito un reset dell'ambiente di lavoro a metà: il CHANGELOG di partenza qui è tornato a v1.1.100-dev.1, quindi questa voce salta direttamente da lì a v1.1.108-dev.1 — le voci intermedie (v1.1.101 → v1.1.107, già consegnate come file separati nei turni precedenti di questa stessa conversazione) restano valide ma non compaiono qui: vanno unite a mano se si vuole un unico CHANGELOG.md continuo.

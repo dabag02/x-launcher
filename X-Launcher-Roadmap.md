@@ -49,6 +49,12 @@ Tre richieste dell'utente, tutte confermate funzionanti su hardware reale dopo a
 2. **Chromium come default post-build**: dopo la compilazione, il launcher
    usa `./kiosk-launch.sh chromium` come comando di avvio predefinito.
 
+3. **i18n fin da subito**: ogni nuova funzione con testo visibile in
+   interfaccia va proposta con il supporto a entrambe le lingue già
+   supportate dalla dashboard (EN + IT, `public/locales/{en,it}/*.json`)
+   incluso fin dalla prima implementazione — non aggiunto dopo su
+   segnalazione. Vedi CHANGELOG.md v1.1.104-dev.2.
+
 -----
 
 ## Stato attuale (punto di partenza)

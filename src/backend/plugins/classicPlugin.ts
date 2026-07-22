@@ -25,7 +25,7 @@ import { Game } from '../../types';
 import { existsSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { findExtractorFor, extractArchive, ARCHIVE_EXTRACTORS } from '../archiveExtractors';
 
 // ---------------------------------------------------------------------------
 // Mappa nome cartella → { runner, core libretro, sistema visualizzato }
@@ -209,17 +209,20 @@ function makeGameId(romPath: string): string {
     hash = hash >>> 0; // unsigned 32-bit — nessun valore negativo, nessuna collisione
   }
   const hex = hash.toString(16).padStart(8, '0');
-  const safeName = path.basename(romPath, '.zip')
+  const safeName = path.basename(romPath, path.extname(romPath))
     .replace(/[^a-zA-Z0-9]/g, '_')
     .slice(0, 16)
     .toLowerCase();
   return `classic-${safeName}-${hex}`;
 }
 
-// Estensioni ROM valide. Ogni console ha il suo formato nativo;
-// molte raccolte distribuiscono anche .zip/.7z compressi.
+// Estensioni ROM valide. Ogni console ha il suo formato nativo; molte
+// raccolte distribuiscono anche archivi compressi — quali siano
+// riconosciuti dipende dal registry in archiveExtractors.ts (solo quelli
+// con supported:true, altrimenti si ripeterebbe il problema del .7z: file
+// visto in libreria ma che non parte mai perché non sappiamo estrarlo).
 const ROM_EXTENSIONS = new Set([
-  '.zip', '.7z',
+  ...ARCHIVE_EXTRACTORS.filter(e => e.supported).flatMap(e => e.extensions),
   '.nes', '.fds',                    // NES / Famicom
   '.smc', '.sfc',                    // SNES / Super Famicom
   '.gb', '.gbc', '.gba',             // Game Boy line
@@ -258,6 +261,44 @@ function findCueFile(dir: string): string | null {
   try {
     const cue = readdirSync(dir).find(f => f.toLowerCase().endsWith('.cue'));
     return cue ? path.join(dir, cue) : null;
+  } catch {
+    return null;
+  }
+}
+
+// v1.1.103-dev.1 — richiesta utente: se ha già estratto lo zip a mano
+// DIRETTAMENTE nella cartella di emulazione (PSX/, DREAMCAST/, SATURN/,
+// ecc. — non necessariamente dentro .extracted/<nome>/, dove la guardava
+// solo la cache sotto), trova quel .cue e usalo invece di ritentare
+// un'estrazione automatica ad ogni sync. Caso reale che ha fatto emergere
+// il problema: uno zip PSX corrotto ("End-of-central-directory signature
+// not found") falliva ad ogni sync periodica (ogni 5 minuti, vedi
+// gameManager.ts LIBRARY_REFRESH_INTERVAL_MS), rilogando lo stesso errore
+// all'infinito, anche se l'utente aveva già risolto a mano.
+//
+// Cerca in due punti, in ordine: (1) un .cue sciolto direttamente nella
+// cartella di sistema il cui nome inizia con quello dello zip — tollera
+// tag regione/revisione tipo "Crash Bandicoot (USA).cue"; (2) un .cue
+// dentro una sottocartella con lo stesso nome dello zip, nel caso
+// l'estrazione a mano abbia ricreato una struttura a cartelle (comune se
+// lo zip stesso conteneva già una cartella di primo livello).
+function findMatchingCueInDir(dir: string, zipBaseName: string): string | null {
+  try {
+    const normalizedBase = zipBaseName.toLowerCase();
+    const entries = readdirSync(dir, { withFileTypes: true });
+
+    const looseCue = entries
+      .filter(e => e.isFile() && e.name.toLowerCase().endsWith('.cue'))
+      .find(e => e.name.toLowerCase().startsWith(normalizedBase));
+    if (looseCue) return path.join(dir, looseCue.name);
+
+    const subDir = entries.find(e => e.isDirectory() && e.name.toLowerCase() === normalizedBase);
+    if (subDir) {
+      const cue = findCueFile(path.join(dir, subDir.name));
+      if (cue) return cue;
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -456,31 +497,48 @@ export class ClassicPlugin extends StorePlugin {
   // altri sistemi CD (Saturn, Dreamcast, PC Engine CD) aggiungendoli qui.
   private extractCdImageIfNeeded(romPath: string, canonicalSystem: string | undefined): string {
     if (!canonicalSystem || !CD_BASED_SYSTEMS.has(canonicalSystem)) return romPath;
-    if (!romPath.toLowerCase().endsWith('.zip')) return romPath;
 
-    const extractDir = path.join(path.dirname(romPath), '.extracted', path.basename(romPath, path.extname(romPath)));
+    const systemDir   = path.dirname(romPath);
+    const zipBaseName = path.basename(romPath, path.extname(romPath));
+
+    // v1.1.105-dev.1 — spostato PRIMA di qualunque controllo sull'estensione
+    // (prima era dopo un `if (!romPath.endsWith('.zip')) return romPath`,
+    // quindi non scattava mai per .7z/.rar): se il gioco è già scompattato
+    // — a mano o da una scansione precedente, qualunque fosse il formato
+    // originale — non ha senso cercare di ri-decomprimere nulla.
+    const manualCue = findMatchingCueInDir(systemDir, zipBaseName);
+    if (manualCue) return manualCue;
+
+    // v1.1.105-dev.1 — utility-agnostic: quale estrattore usare (unzip,
+    // 7z, in futuro altro) è deciso da archiveExtractors.ts, non più
+    // hardcoded qui. Se il file non è un archivio riconosciuto (es. è già
+    // un .cue diretto) o l'estensione è nota ma non ancora supportata per
+    // l'estrazione reale (es. .rar oggi), esce senza tentare nulla.
+    const extractor = findExtractorFor(romPath);
+    if (!extractor || !extractor.supported) return romPath;
+
+    const extractDir = path.join(systemDir, '.extracted', zipBaseName);
 
     // Cache su disco: se già estratto in un giro precedente (.cue già
-    // presente), non ripetere — l'unzip di un'immagine CD (centinaia di
-    // MB) è sincrono e bloccante, accettabile solo perché avviene una
+    // presente), non ripetere — l'estrazione di un'immagine CD (centinaia
+    // di MB) è sincrona e bloccante, accettabile solo perché avviene una
     // volta sola per gioco, non ad ogni scansione della libreria.
     const cached = findCueFile(extractDir);
     if (cached) return cached;
 
-    try {
-      mkdirSync(extractDir, { recursive: true });
-      execFileSync('unzip', ['-o', '-q', romPath, '-d', extractDir], { timeout: 120_000 });
+    mkdirSync(extractDir, { recursive: true });
+    const result = extractArchive(romPath, extractDir);
+    if (result.success) {
       const cue = findCueFile(extractDir);
       if (cue) {
         writeLog('info', `[CLASSIC] Estratto ${path.basename(romPath)} → ${cue}`);
         return cue;
       }
-      writeLog('warning', `[CLASSIC] Estrazione di ${path.basename(romPath)} riuscita ma nessun .cue trovato dentro — uso lo zip originale (probabilmente non partirà).`);
-      return romPath;
-    } catch (e) {
-      writeLog('warning', `[CLASSIC] Estrazione di ${path.basename(romPath)} fallita (manca 'unzip'? installa con: sudo pacman -S unzip): ${e} — uso lo zip originale.`);
+      writeLog('warning', `[CLASSIC] Estrazione di ${path.basename(romPath)} riuscita ma nessun .cue trovato dentro — uso l'archivio originale (probabilmente non partirà).`);
       return romPath;
     }
+    writeLog('warning', `[CLASSIC] Estrazione di ${path.basename(romPath)} fallita (${result.message}) — uso l'archivio originale.`);
+    return romPath;
   }
 
   private buildGame(romPath: string, system: SystemInfo, systemDir: string): Game {

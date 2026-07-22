@@ -64,7 +64,11 @@ if ! curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null; then
     exit 1 
   fi 
 
-  ENV_FILE="$PROJECT_DIR/.env" 
+  # v1.1.102-dev.1 — .env spostato da $PROJECT_DIR a ~/.local/share/x-launcher/
+  # (stessa cartella di db/log/config), cosi non serve piu che sia "nella
+  # cartella giusta": e sempre nello stesso posto per qualunque modo si
+  # avvii il daemon (dev, questo script, o xdash.service — vedi anche li).
+  ENV_FILE="$HOME/.local/share/x-launcher/.env" 
   if [ -f "$ENV_FILE" ]; then 
     NODE_ENV=production node --env-file="$ENV_FILE" dist/server.cjs & 
   else

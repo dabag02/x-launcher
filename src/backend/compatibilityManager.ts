@@ -258,7 +258,7 @@ class CompatibilityManager {
       vkd3d: true,
       fsr: false,
       gameMode: this.binaryExists('gamemoderun'),
-      mangohud: this.binaryExists('mangohud'),
+      mangohud: this.binaryExists('mangohud') ? 1 : 0,
     };
   }
 
@@ -313,6 +313,13 @@ class CompatibilityManager {
       battleye:  !!bePath,
       eacPath:   eacPath ?? '',
       bePath:    bePath  ?? '',
+      // v1.1.105-dev.1 — tool di decompressione per Classic Console (vedi
+      // archiveExtractors.ts). unrar è solo rilevato: l'estrazione .rar
+      // non è ancora implementata, ma vale la pena mostrare all'utente se
+      // il binario è già presente sul sistema per quando lo sarà.
+      unzip:     this.binaryExists('unzip'),
+      p7zip:     this.binaryExists('7z'),
+      unrar:     this.binaryExists('unrar'),
     };
   }
 

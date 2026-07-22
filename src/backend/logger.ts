@@ -7,11 +7,10 @@
  * Livelli: debug | info | system | warning | error | auth | download | launch
  */
 import { mkdirSync, statSync, renameSync, appendFileSync, existsSync } from 'fs';
-import { homedir } from 'os';
 import path from 'path';
 import type { LogLevel } from '../types';
+import { DATA_DIR } from './paths';
 
-const DATA_DIR  = path.join(homedir(), '.local', 'share', 'x-launcher');
 const LOG_PATH  = path.join(DATA_DIR, 'daemon.log');
 const MAX_BYTES = 5 * 1024 * 1024; // 5MB
 

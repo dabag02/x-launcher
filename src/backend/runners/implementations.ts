@@ -16,6 +16,7 @@ import { existsSync, readdirSync, mkdirSync, openSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
 import { writeLog } from '../logger';
+import { DATA_DIR } from '../paths';
 
 // ---------------------------------------------------------------------------
 // Utility helpers
@@ -85,7 +86,7 @@ function spawnDetached(bin: string, args: string[], env: Record<string, string> 
  * di uscita rapida sospetta, non mostrati di default nell'interfaccia).
  */
 function gameLaunchLogPath(gameId: string): string {
-  const dir = path.join(homedir(), '.local', 'share', 'x-launcher', 'game-logs');
+  const dir = path.join(DATA_DIR, 'game-logs');
   return path.join(dir, `${gameId}-${Date.now()}.log`);
 }
 
@@ -135,6 +136,43 @@ function resolveCaseInsensitive(base: string, relPath: string): string {
   return current;
 }
 
+/**
+ * v1.1.101-dev.1 — estratta da WineRunner.launch(), dove finora era l'unico
+ * runner a calcolarla: ProtonRunner passava sempre `cwd: undefined` allo
+ * spawn, quindi il processo Proton (e DXVK al suo interno) ereditava la cwd
+ * del daemon Node stesso invece di quella del gioco. Innocuo in sviluppo
+ * (cwd del daemon = cartella del progetto, scrivibile) ma scoperto con test
+ * reale cambiando runner da Wine a Proton: un file `<exe>-dxvk.cache`
+ * comparso nella cartella del progetto invece che accanto all'eseguibile.
+ * Diventa un problema serio una volta installato in /opt (WorkingDirectory
+ * del systemd service, cartella root:root non scrivibile da TUOUTENTE) —
+ * DXVK perderebbe silenziosamente la cache degli shader ad ogni lancio.
+ *
+ * Risolve config.cwd (launchCwd, es. da goggame-*.info) relativo o assoluto
+ * rispetto alla directory dell'eseguibile, con fallback finale sempre alla
+ * directory dell'eseguibile stesso — mai alla cwd del processo chiamante.
+ */
+function resolveLaunchCwd(exePath: string, configCwd?: string): string {
+  const exeDir = path.dirname(exePath);
+  if (!configCwd) return exeDir;
+
+  const expandedCwd = expandHome(configCwd);
+  let cwd: string;
+  if (path.isAbsolute(expandedCwd) && existsSync(expandedCwd)) {
+    cwd = expandedCwd;
+  } else if (path.isAbsolute(expandedCwd)) {
+    cwd = existsSync(expandedCwd) ? expandedCwd : resolveCaseInsensitive(exeDir, path.basename(expandedCwd));
+  } else {
+    cwd = resolveCaseInsensitive(exeDir, expandedCwd);
+  }
+
+  if (!existsSync(cwd)) {
+    writeLog('warning', `[LAUNCH] launchCwd not found: ${cwd} — using exe directory`);
+    return exeDir;
+  }
+  return cwd;
+}
+
 // ---------------------------------------------------------------------------
 // WineRunner
 // ---------------------------------------------------------------------------
@@ -156,31 +194,10 @@ export class WineRunner extends BaseRunner {
     const exePath = expandHome(game.executablePath);
 
     // launchCwd può essere un path relativo all'installPath (es. "ScummVM" o "scummvm").
-    // Su Linux il filesystem è case-sensitive: usiamo resolveCaseInsensitive per trovare
-    // la directory corretta indipendentemente dal case usato da innoextract/Windows.
-    let cwd: string;
-    if (config?.cwd) {
-      const expandedCwd = expandHome(config.cwd);
-      // Se è già assoluto e esiste, usalo direttamente
-      if (path.isAbsolute(expandedCwd) && existsSync(expandedCwd)) {
-        cwd = expandedCwd;
-      } else if (path.isAbsolute(expandedCwd)) {
-        // Assoluto ma non trovato: prova risoluzione case-insensitive dalla root
-        const base = path.dirname(exePath);
-        cwd = existsSync(expandedCwd) ? expandedCwd : resolveCaseInsensitive(base, path.basename(expandedCwd));
-      } else {
-        // Relativo: risolvi rispetto alla directory dell'eseguibile
-        const base = path.dirname(exePath);
-        cwd = resolveCaseInsensitive(base, expandedCwd);
-      }
-      // Fallback finale: directory dell'exe
-      if (!existsSync(cwd)) {
-        writeLog('warning', `[WINE] launchCwd not found: ${cwd} — using exe directory`);
-        cwd = path.dirname(exePath);
-      }
-    } else {
-      cwd = path.dirname(exePath);
-    }
+    // Su Linux il filesystem è case-sensitive: resolveLaunchCwd usa una risoluzione
+    // case-insensitive per trovare la directory corretta indipendentemente dal case
+    // usato da innoextract/Windows, con fallback alla directory dell'eseguibile.
+    const cwd = resolveLaunchCwd(exePath, config?.cwd);
 
     const env: Record<string, string> = {
       WINEPREFIX:  prefix,
@@ -195,11 +212,18 @@ export class WineRunner extends BaseRunner {
       env.WINE_FULLSCREEN_FSR_STRENGTH = '2';
     }
 
-    // MangoHud — overlay FPS/GPU/CPU
+    // MangoHud — overlay FPS/GPU/CPU. v1.1.104-dev.1: da booleano a 3
+    // livelli (richiesta utente — poche info coi soli MANGOHUD=1/0).
+    // Livello 1 (compatta) invariato: nessun MANGOHUD_CONFIG, il default
+    // MangoHud di sempre. Livello 2 (completa): preset "Detailed"
+    // ufficiale di MangoHud (preset=4 — verificato sulla documentazione
+    // upstream, preferito a una lista di opzioni scritte a mano che
+    // rischierebbe di usare nomi non più validi in una versione futura).
     if (config?.mangohud) {
       if (binaryExists('mangohud')) {
         env.MANGOHUD      = '1';
         env.MANGOHUD_DLSYM = '1';
+        if (config.mangohud === 2) env.MANGOHUD_CONFIG = 'preset=4';
       } else {
         writeLog('warning', '[WINE] MangoHud requested but not found — install mangohud');
       }
@@ -300,10 +324,26 @@ export class ProtonRunner extends BaseRunner {
       ...(config?.env ?? {}),
     };
 
+    // v1.1.104-dev.1 — MangoHud mancava del tutto qui: WineRunner lo
+    // supportava (vedi sopra), ProtonRunner no — stessa classe di gap
+    // già trovata per il cwd (v1.1.101-dev.1). Stessa logica di
+    // WineRunner: livello 1 (compatta) = solo MANGOHUD=1, livello 2
+    // (completa) = preset "Detailed" ufficiale (preset=4).
+    if (config?.mangohud) {
+      if (binaryExists('mangohud')) {
+        env.MANGOHUD      = '1';
+        env.MANGOHUD_DLSYM = '1';
+        if (config.mangohud === 2) env.MANGOHUD_CONFIG = 'preset=4';
+      } else {
+        writeLog('warning', '[PROTON] MangoHud requested but not found — install mangohud');
+      }
+    }
+
     const exePath = expandHome(game.executablePath);
-    writeLog('launch', `[PROTON] ${protonBin} run ${exePath}`);
+    const cwd = resolveLaunchCwd(exePath, config?.cwd);
+    writeLog('launch', `[PROTON] cwd=${cwd} ${protonBin} run ${exePath}`);
     const logPath = gameLaunchLogPath(game.id);
-    const { pid } = spawnDetached(protonBin, ['run', exePath, ...(config?.args ?? [])], env, undefined, logPath);
+    const { pid } = spawnDetached(protonBin, ['run', exePath, ...(config?.args ?? [])], env, cwd, logPath);
     return { success: true, pid, message: `Launched via ${this.name}`, logPath };
   }
 

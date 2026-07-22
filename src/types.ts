@@ -9,7 +9,14 @@ export type Theme = 'light' | 'dark';
 export interface CompatibilityProfile {
   fsr:        boolean;   // AMD FidelityFX Super Resolution (WINE_FULLSCREEN_FSR=1)
   gameMode:   boolean;   // Feral GameMode (gamemoderun wrapper)
-  mangohud:   boolean;   // MangoHud overlay (MANGOHUD=1)
+  // v1.1.104-dev.1 — da booleano a 3 stati, richiesta utente (poche info
+  // coi soli MANGOHUD=1/0, MangoHud offre preset ufficiali più dettagliati):
+  // 0 = spento, 1 = compatta (comportamento INVARIATO di prima, MANGOHUD=1
+  // senza MANGOHUD_CONFIG), 2 = completa (MANGOHUD_CONFIG=preset=4, il
+  // preset "Detailed" ufficiale di MangoHud). La colonna DB era già
+  // INTEGER (non serve migrazione): chi aveva 1 resta su "compatta",
+  // stesso comportamento di sempre.
+  mangohud:   0 | 1 | 2;  // MangoHud overlay — vedi runners/implementations.ts
   eac:        boolean;   // EasyAntiCheat compatibilità (PROTON_EAC_RUNTIME)
   battleye:   boolean;   // BattlEye compatibilità (PROTON_BATTLEYE_RUNTIME)
   // v0.99.35 — disabilita il driver kernel ntsync (WINE_DISABLE_FAST_SYNC=1)
@@ -269,6 +276,12 @@ export interface SystemTools {
   battleye:  boolean;
   eacPath:   string;
   bePath:    string;
+  // v1.1.105-dev.1 — tool di decompressione (Classic Console), vedi
+  // archiveExtractors.ts. unrar è solo rilevato, estrazione non ancora
+  // implementata.
+  unzip:     boolean;
+  p7zip:     boolean;
+  unrar:     boolean;
   [key: string]: boolean | string;
 }
 

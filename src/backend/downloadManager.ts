@@ -912,7 +912,7 @@ class DownloadManager {
           this.log(task, 'system', `[GOG] Known fix trovato (Heroic, id ${numericId}): ${fix.winetricks.join(', ')}`);
           try {
             const currentProfile = db.getCompatProfile(task.gameId) ?? {
-              fsr: false, gameMode: false, mangohud: false, eac: false, battleye: false,
+              fsr: false, gameMode: false, mangohud: 0, eac: false, battleye: false,
             };
             db.upsertCompatProfile(task.gameId, {
               ...currentProfile,
@@ -1176,7 +1176,7 @@ class DownloadManager {
         // configurati prima del lookup.
         try {
           const currentProfile = db.getCompatProfile(task.gameId) ?? {
-            fsr: false, gameMode: false, mangohud: false, eac: false, battleye: false,
+            fsr: false, gameMode: false, mangohud: 0, eac: false, battleye: false,
           };
           db.upsertCompatProfile(task.gameId, {
             ...currentProfile,

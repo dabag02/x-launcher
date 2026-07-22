@@ -13,9 +13,9 @@
  */
 
 import Database from 'better-sqlite3';
-import { homedir } from 'os';
 import path from 'path';
 import { mkdirSync } from 'fs';
+import { DATA_DIR } from './paths';
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -74,9 +74,8 @@ class NotificationStore {
   private db: InstanceType<typeof Database>;
 
   constructor() {
-    const dataDir = path.join(homedir(), '.local', 'share', 'x-launcher');
-    mkdirSync(dataDir, { recursive: true });
-    this.db = new Database(path.join(dataDir, 'x-launcher.db'));
+    mkdirSync(DATA_DIR, { recursive: true });
+    this.db = new Database(path.join(DATA_DIR, 'x-launcher.db'));
     this.db.pragma('journal_mode = WAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS notifications (

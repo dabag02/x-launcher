@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'child_process';
 import path from 'path';
 import { MOCK_LOGS } from '../mockData';
 import { StorePlugin } from './plugins/base';
-import { GOGPlugin } from './plugins/gogPlugin';
+import { GOGPlugin, isJunkGogSlug } from './plugins/gogPlugin';
 import { SteamPlugin } from './plugins/steamPlugin';
 import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
@@ -762,6 +762,24 @@ class GameManager {
       }
     }
 
+    // v1.1.106-dev.2 — richiesta utente ("non è cambiato nulla"): il fix
+    // in gogPlugin.ts impedisce SOLO che nuove voci spazzatura vengano
+    // create — quelle già scritte in DB da scansioni precedenti (goodies
+    // collection, URL di re-auth scambiati per titoli) restavano lì per
+    // sempre, dato che GOG non è un plugin a scansione esaustiva (sopra)
+    // e quindi non viene mai ripulito in base a "cosa manca dalla
+    // scansione attuale". Questa pulizia è mirata e diversa: non dipende
+    // dal risultato della scansione corrente (sicura anche se parziale
+    // per un errore di rete/auth), rimuove solo le righe già in DB che
+    // isJunkGogSlug identifica positivamente come spazzatura.
+    const gogJunkIds = db.getAllGames()
+      .filter(g => g.store === 'GOG Galaxy' && isJunkGogSlug(g.id.replace(/^gog-/, '')))
+      .map(g => g.id);
+    if (gogJunkIds.length > 0) {
+      const removedJunk = db.deleteGamesById(gogJunkIds);
+      this.addLog(`[DAEMON] GOG Galaxy: ${removedJunk} voci non-gioco rimosse dal DB (goodies collection / artefatti di parsing).`, 'info');
+    }
+
     this.addLog(`[DAEMON] ${allGames.length} titoli persistiti su DB.`, 'system');
     this.notifyLibraryRefreshed();
 
@@ -995,7 +1013,7 @@ class GameManager {
         cwd:      game.launchCwd,
         fsr:      profile?.fsr      ?? false,
         gameMode: profile?.gameMode ?? false,
-        mangohud: profile?.mangohud ?? false,
+        mangohud: profile?.mangohud ?? 0,
         eac:      profile?.eac      ?? false,
         battleye: profile?.battleye ?? false,
       };

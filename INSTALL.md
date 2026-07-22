@@ -87,7 +87,8 @@ La modalità "sessione dedicata senza desktop sotto" è **oggi incompleta e non 
 
 ```bash
 cd x-launcher
-cp .env.example .env      # poi modifica .env con le tue chiavi (vedi sezione 5)
+mkdir -p ~/.local/share/x-launcher
+cp .env.example ~/.local/share/x-launcher/.env      # poi modifica .env con le tue chiavi (vedi sezione 5)
 chmod +x build.sh kiosk-launch.sh install.sh
 npm install
 ./build.sh compile
@@ -144,7 +145,9 @@ node /opt/x-launcher/scripts/setup-steam-shortcut.cjs
 
 ## 5. Variabili d'ambiente (`.env`)
 
-Tutte opzionali — X-Launcher funziona anche a `.env` vuoto, con funzionalità ridotte dove manca una chiave.
+Il file vive in `~/.local/share/x-launcher/.env` — **non** nella cartella del progetto: così è sempre nello stesso posto qualunque sia il modo in cui avvii il daemon (`npm run dev`, `./kiosk-launch.sh`, o il servizio systemd `xdash.service`), sopravvive agli aggiornamenti del progetto, e con un'installazione di sistema (`/opt`) non richiede sudo per essere modificato. `.env.example` resta invece nel repository, solo come template da copiare.
+
+Tutte le variabili sono opzionali — X-Launcher funziona anche senza `.env`, con funzionalità ridotte dove manca una chiave.
 
 | Variabile | Descrizione |
 |---|---|
@@ -174,10 +177,14 @@ cat ~/.local/share/x-launcher/daemon.log
 
 ```
 ~/.local/share/x-launcher/
-  ├── x-launcher.db          # database SQLite (libreria, config di gioco, tempo di gioco, ecc.)
+  ├── .env                    # variabili d'ambiente (vedi sezione 5) — v1.1.102-dev.1
+  ├── x-launcher.db          # database SQLite (libreria, config di gioco, tempo di gioco,
+  │                          #   credenziali provider AI Advisor, ecc.)
   ├── tokens.json             # token OAuth (permessi 600)
+  ├── app.conf                # preferenze persistite (display mode, lingua, ecc.)
   ├── daemon.log              # log del demone Node
   ├── tray.log                # log dell'icona tray
+  ├── game-logs/               # stdout/stderr dell'ultimo lancio per gioco (diagnosi avvio)
   ├── firefox-profile/        # profilo Firefox dedicato (solo se usi Firefox)
   └── avatars/                # immagini avatar caricate dall'utente
 ```

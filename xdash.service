@@ -61,6 +61,13 @@ Environment=HOME=/home/TUOUTENTE
 # sessione grafica su questo DISPLAY è effettivamente attiva.
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+# v1.1.102-dev.1 — PRIMA questo servizio non caricava .env in nessun caso
+# (nessuna riga lo faceva): le chiavi API (IGDB/SteamGridDB/Steam) non
+# arrivavano mai al processo se avviato da systemd. Il "-" iniziale rende
+# il file opzionale (il servizio parte lo stesso se manca, stesso
+# comportamento del controllo "if -f" gia in kiosk-launch.sh). Sostituisci
+# TUOUTENTE come per le righe sopra.
+EnvironmentFile=-/home/TUOUTENTE/.local/share/x-launcher/.env
 
 # Sicurezza: limita accesso al filesystem
 ProtectSystem=full
