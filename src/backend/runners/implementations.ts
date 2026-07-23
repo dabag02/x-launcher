@@ -136,21 +136,17 @@ function resolveCaseInsensitive(base: string, relPath: string): string {
   return current;
 }
 
+// ---------------------------------------------------------------------------
+// WineRunner
+// ---------------------------------------------------------------------------
+
 /**
- * v1.1.101-dev.1 — estratta da WineRunner.launch(), dove finora era l'unico
- * runner a calcolarla: ProtonRunner passava sempre `cwd: undefined` allo
- * spawn, quindi il processo Proton (e DXVK al suo interno) ereditava la cwd
- * del daemon Node stesso invece di quella del gioco. Innocuo in sviluppo
- * (cwd del daemon = cartella del progetto, scrivibile) ma scoperto con test
- * reale cambiando runner da Wine a Proton: un file `<exe>-dxvk.cache`
- * comparso nella cartella del progetto invece che accanto all'eseguibile.
- * Diventa un problema serio una volta installato in /opt (WorkingDirectory
- * del systemd service, cartella root:root non scrivibile da TUOUTENTE) —
- * DXVK perderebbe silenziosamente la cache degli shader ad ogni lancio.
- *
- * Risolve config.cwd (launchCwd, es. da goggame-*.info) relativo o assoluto
- * rispetto alla directory dell'eseguibile, con fallback finale sempre alla
- * directory dell'eseguibile stesso — mai alla cwd del processo chiamante.
+ * resolveLaunchCwd — v1.1.101-dev.1. Estratta dalla logica (corretta) che
+ * WineRunner aveva già, per essere condivisa anche da ProtonRunner: prima
+ * quest'ultimo passava sempre cwd:undefined a spawnDetached, ereditando
+ * la cwd del daemon Node invece di quella del gioco — bug reale trovato
+ * dall'utente (cache DXVK scritta nella cartella del progetto invece che
+ * accanto all'eseguibile).
  */
 function resolveLaunchCwd(exePath: string, configCwd?: string): string {
   const exeDir = path.dirname(exePath);
@@ -173,10 +169,6 @@ function resolveLaunchCwd(exePath: string, configCwd?: string): string {
   return cwd;
 }
 
-// ---------------------------------------------------------------------------
-// WineRunner
-// ---------------------------------------------------------------------------
-
 export class WineRunner extends BaseRunner {
   readonly id = 'Wine-Lutris';
   readonly name = 'Wine (Lutris Build)';
@@ -193,10 +185,6 @@ export class WineRunner extends BaseRunner {
     const prefix  = expandHome(config?.prefix ?? `~/.local/share/wineprefixes/${game.id}`);
     const exePath = expandHome(game.executablePath);
 
-    // launchCwd può essere un path relativo all'installPath (es. "ScummVM" o "scummvm").
-    // Su Linux il filesystem è case-sensitive: resolveLaunchCwd usa una risoluzione
-    // case-insensitive per trovare la directory corretta indipendentemente dal case
-    // usato da innoextract/Windows, con fallback alla directory dell'eseguibile.
     const cwd = resolveLaunchCwd(exePath, config?.cwd);
 
     const env: Record<string, string> = {
@@ -213,12 +201,10 @@ export class WineRunner extends BaseRunner {
     }
 
     // MangoHud — overlay FPS/GPU/CPU. v1.1.104-dev.1: da booleano a 3
-    // livelli (richiesta utente — poche info coi soli MANGOHUD=1/0).
-    // Livello 1 (compatta) invariato: nessun MANGOHUD_CONFIG, il default
-    // MangoHud di sempre. Livello 2 (completa): preset "Detailed"
+    // livelli. Livello 1 (compatta) invariato: nessun MANGOHUD_CONFIG, il
+    // default MangoHud di sempre. Livello 2 (completa): preset "Detailed"
     // ufficiale di MangoHud (preset=4 — verificato sulla documentazione
-    // upstream, preferito a una lista di opzioni scritte a mano che
-    // rischierebbe di usare nomi non più validi in una versione futura).
+    // upstream).
     if (config?.mangohud) {
       if (binaryExists('mangohud')) {
         env.MANGOHUD      = '1';
@@ -325,10 +311,7 @@ export class ProtonRunner extends BaseRunner {
     };
 
     // v1.1.104-dev.1 — MangoHud mancava del tutto qui: WineRunner lo
-    // supportava (vedi sopra), ProtonRunner no — stessa classe di gap
-    // già trovata per il cwd (v1.1.101-dev.1). Stessa logica di
-    // WineRunner: livello 1 (compatta) = solo MANGOHUD=1, livello 2
-    // (completa) = preset "Detailed" ufficiale (preset=4).
+    // supportava, ProtonRunner no — stessa classe di gap del cwd sotto.
     if (config?.mangohud) {
       if (binaryExists('mangohud')) {
         env.MANGOHUD      = '1';
@@ -340,8 +323,13 @@ export class ProtonRunner extends BaseRunner {
     }
 
     const exePath = expandHome(game.executablePath);
+    // v1.1.101-dev.1 — bug reale: prima passava sempre cwd:undefined a
+    // spawnDetached, ereditando la cwd del daemon Node invece di quella
+    // del gioco (cache DXVK finiva nella cartella progetto invece che
+    // accanto all'eseguibile). Stessa resolveLaunchCwd già usata da
+    // WineRunner sopra.
     const cwd = resolveLaunchCwd(exePath, config?.cwd);
-    writeLog('launch', `[PROTON] cwd=${cwd} ${protonBin} run ${exePath}`);
+    writeLog('launch', `[PROTON] ${protonBin} run ${exePath}`);
     const logPath = gameLaunchLogPath(game.id);
     const { pid } = spawnDetached(protonBin, ['run', exePath, ...(config?.args ?? [])], env, cwd, logPath);
     return { success: true, pid, message: `Launched via ${this.name}`, logPath };

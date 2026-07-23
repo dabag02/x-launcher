@@ -6,10 +6,9 @@
  * File: ~/.local/share/x-launcher/app.conf
  */
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
 import path from 'path';
+import { DATA_DIR } from './paths';
 
-const DATA_DIR    = path.join(homedir(), '.local', 'share', 'x-launcher');
 const CONFIG_PATH = path.join(DATA_DIR, 'app.conf');
 
 mkdirSync(DATA_DIR, { recursive: true });

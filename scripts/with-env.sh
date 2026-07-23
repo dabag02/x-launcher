@@ -9,9 +9,7 @@
 #  "start" di package.json.
 #
 #  Senza questo file, "npm run dev" non ha mai caricato .env in
-#  nessun caso (nessun --env-file/dotenv nello script originale) —
-#  le chiavi API (IGDB/SteamGridDB/Steam) non arrivavano mai al
-#  processo in modalita sviluppo.
+#  nessun caso.
 #
 #  Uso: ./scripts/with-env.sh tsx server.ts
 #       ./scripts/with-env.sh node dist/server.cjs

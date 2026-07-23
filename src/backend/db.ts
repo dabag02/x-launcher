@@ -19,9 +19,9 @@
 
 import Database from 'better-sqlite3';
 import { mkdirSync, chmodSync, existsSync } from 'fs';
-import { homedir } from 'os';
 import path from 'path';
 import { Game, CompatibilityProfile, LogEntry, DownloadTask } from '../types';
+import { DATA_DIR } from './paths';
 // v1.1.25 — diagnostica mirata: quattro fix reali (v1.1.20→v1.1.24) non
 // hanno chiuso il bug "isInstalled/executablePath incoerenti dopo
 // install/uninstall, corretto solo da un riavvio" — serve tracciare CHI
@@ -32,7 +32,6 @@ import { writeLog } from './logger';
 // Percorso DB
 // ---------------------------------------------------------------------------
 
-const DATA_DIR  = path.join(homedir(), '.local', 'share', 'x-launcher');
 const DB_PATH   = path.join(DATA_DIR, 'x-launcher.db');
 const TOK_PATH  = path.join(DATA_DIR, 'tokens.json'); // permessi 600
 
@@ -106,6 +105,9 @@ db.exec(`
     game_id   TEXT PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
     fsr       INTEGER NOT NULL DEFAULT 0,
     game_mode INTEGER NOT NULL DEFAULT 0,
+    -- v1.1.104-dev.1: da booleano a 3 stati (0=off, 1=compatta, 2=completa)
+    -- — colonna già INTEGER, nessuna migrazione necessaria, 1 esistente
+    -- resta "compatta" (comportamento invariato).
     mangohud  INTEGER NOT NULL DEFAULT 0,
     eac       INTEGER NOT NULL DEFAULT 0,
     battleye  INTEGER NOT NULL DEFAULT 0,
@@ -574,6 +576,24 @@ export function deleteGamesByStoreNotIn(store: string, validIds: string[]): numb
   return result.changes;
 }
 
+/**
+ * deleteGamesById — v1.1.106-dev.2. Rimuove righe con id espliciti,
+ * indipendentemente dallo store. A differenza di deleteGamesByStoreNotIn
+ * sopra (che cancella tutto ciò che NON è nella scansione corrente —
+ * rischioso per store online con scan parziali per errori di rete/auth),
+ * questa cancella SOLO gli id passati esplicitamente: sicura anche per
+ * GOG/Steam/Epic, perché non dipende affatto dal risultato — completo o
+ * parziale — della scansione in corso. Usata per la pulizia mirata delle
+ * voci-spazzatura GOG già in DB da prima del fix (goodies collection,
+ * URL di re-auth scambiati per titoli) — vedi gameManager.ts.
+ */
+export function deleteGamesById(ids: string[]): number {
+  if (ids.length === 0) return 0;
+  const placeholders = ids.map(() => '?').join(',');
+  const result = db.prepare(`DELETE FROM games WHERE id IN (${placeholders})`).run(...ids);
+  return result.changes;
+}
+
 export function getAllGames(): Game[] {
   return (db.prepare('SELECT * FROM games ORDER BY title ASC').all() as any[]).map(rowToGame);
 }
@@ -773,7 +793,7 @@ export function upsertCompatProfile(gameId: string, profile: CompatibilityProfil
     gameId,
     fsr:             profile.fsr       ? 1 : 0,
     gameMode:        profile.gameMode  ? 1 : 0,
-    mangohud:        profile.mangohud  ? 1 : 0,
+    mangohud:        profile.mangohud  ?? 0,
     eac:             profile.eac       ? 1 : 0,
     battleye:        profile.battleye  ? 1 : 0,
     customEnv:       JSON.stringify(profile.customEnv ?? {}),
@@ -790,7 +810,7 @@ export function getCompatProfile(gameId: string): CompatibilityProfile | undefin
   return {
     fsr:             row.fsr       === 1,
     gameMode:        row.game_mode === 1,
-    mangohud:        row.mangohud  === 1,
+    mangohud:        (row.mangohud ?? 0) as 0 | 1 | 2,
     eac:             row.eac       === 1,
     battleye:        row.battleye  === 1,
     customEnv:       JSON.parse(row.custom_env ?? '{}'),

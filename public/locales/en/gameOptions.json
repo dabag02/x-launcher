@@ -23,6 +23,8 @@
   "remasterToggling": "Applying…",
   "wineDependencies": "Wine Dependencies",
   "savedForThisGame": "saved for this game",
+  "wineDepsCompact": "compact",
+  "wineDepsExpanded": "expanded",
   "recommended": "recommended",
   "slowOnlyIfNeeded": "slow · only if required",
   "keyValuePerLine": "KEY=VALUE per line",

@@ -1,12 +1,12 @@
 {
   "name": "x-launcher",
   "private": true,
-  "version": "1.1.108-dev.1",
+  "version": "1.1.109-dev.2",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "bash scripts/with-env.sh tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "NODE_ENV=production node dist/server.cjs",
+    "start": "NODE_ENV=production bash scripts/with-env.sh node dist/server.cjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

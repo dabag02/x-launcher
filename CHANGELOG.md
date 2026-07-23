@@ -3633,3 +3633,41 @@ Ora:
 ### Nota per chi applica questo pacchetto
 
 Questa sessione ha subito un reset dell'ambiente di lavoro a metà: il CHANGELOG di partenza qui è tornato a v1.1.100-dev.1, quindi questa voce salta direttamente da lì a v1.1.108-dev.1 — le voci intermedie (v1.1.101 → v1.1.107, già consegnate come file separati nei turni precedenti di questa stessa conversazione) restano valide ma non compaiono qui: vanno unite a mano se si vuole un unico CHANGELOG.md continuo.
+
+## v1.1.108-dev.2 — ricostruzione completa dopo il reset del sandbox + fix mutua esclusività Ollama
+
+Il reset dell'ambiente di lavoro segnalato in v1.1.108-dev.1 aveva lasciato diversi file (in particolare `db.ts`) regrediti a prima di fix già consegnati nella stessa conversazione — scoperto dall'utente con un warning reale di build: `Import "deleteGamesById" will always be undefined because there is no matching export in "src/backend/db.ts"`. Causa confermata: quel `db.ts` era tornato indietro a prima di v1.1.106-dev.2 (che l'aveva introdotta) e di v1.1.102-dev.1 (consolidamento `DATA_DIR`).
+
+**Fix aggiuntivo segnalato dall'utente nello stesso giro**: i provider cloud si disattivavano correttamente a vicenda e disattivavano Ollama quando selezionati, ma selezionare/attivare un modello Ollama non escludeva più i provider cloud già attivi. Causa reale: il backend (`db.upsertAiProviderCredential`) applicava già correttamente la mutua esclusività per qualunque provider, Ollama incluso — mancava solo il refresh lato client: l'handler di selezione modello Ollama non richiamava `refreshOllamaModels()` dopo il salvataggio (a differenza di `saveCloudProvider`, che lo fa sempre), quindi le pillole dei provider cloud restavano visivamente "attive" nella sessione anche se il DB le aveva già spente.
+
+**Ricostruiti in questo giro** (tutti riverificati con `tsc --noEmit` contro lo zip originale, stessi 23 errori pre-esistenti, zero nuovi): `paths.ts` e `archiveExtractors.ts` (ricreati da zero), `db.ts` (DATA_DIR consolidato, `deleteGamesById`, mangohud a 3 stati), `appConfig.ts`/`logger.ts`/`knowledgeBase.ts`/`notificationEngine.ts`/`server.ts` (DATA_DIR/ENV_PATH da `paths.ts`), `runners/implementations.ts` (fix cwd Proton + MangoHud completo su entrambi i runner), `runners/base.ts` e `types.ts` (mangohud 3 stati, SystemTools con unzip/p7zip/unrar), `classicPlugin.ts` (estrazione manuale sempre-prima + supporto `.7z`), `gogPlugin.ts` (filtro voci spazzatura + pulizia mirata), `gameManager.ts` (passthrough mangohud + pulizia GOG), `compatibilityManager.ts` e `downloadManager.ts` (fix mangohud), `App.tsx` (cursore MangoHud a 3 posizioni con i18n, griglia System tools, i due pulsanti Aggiorna, fix mutua esclusività Ollama), file di traduzione `gameOptions` (IT/EN), `kiosk-launch.sh`/`xdash.service`/`package.json`/`install.sh`/`INSTALL.md`/`scripts/with-env.sh` (trasloco `.env`).
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi — verificato incrementalmente ad ogni blocco di file ricostruito, non solo alla fine.
+
+## v1.1.109-dev.1 — vista compatta/estesa per il widget Dipendenze Wine
+
+Richiesta utente: il widget "Dipendenze Wine" mostrava sempre tutti i 15 verb (4 consigliati + 11 opzionali), allungando la navigazione fino in fondo all'overlay anche quando l'utente non deve toccare nulla oltre ai default. Proposta: vista compatta di default (solo i 4 verb consigliati), estesa a richiesta (tutti e 15), con uno switch accanto al titolo — stesso stile pill già usato altrove nella dashboard (es. griglia Compatibility Layer) — invece di un on/off nuovo di zecca.
+
+**Implementato**: l'intestazione del widget ha ora uno switch navigabile col controller (`wine-deps-expand-toggle`) che alterna `wineDepsExpanded` — spento (default) mostra solo `DEFAULT_WINE_VERBS`, acceso aggiunge `OPTIONAL_WINE_VERBS`. Stato puramente di visualizzazione (non salvato per-gioco, non tocca il DB): riparte sempre da compatta ad ogni apertura/cambio gioco, coerente con l'idea che sia una scorciatoia di navigazione e non una preferenza di configurazione. La lista dei verb effettivamente togglabili (checkbox coi propri Focusable) resta identica in entrambe le viste — cambia solo quanti se ne vedono, l'ultimo elemento visibile si aggancia sempre correttamente alla riga successiva dell'overlay (Custom Env Variables), qualunque sia la vista attiva.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi. Nuove chiavi di traduzione (`wineDepsCompact`/`wineDepsExpanded`) aggiunte a entrambe le lingue fin da subito, come da regola di progetto.
+
+## v1.1.109-dev.2 — fix navigazione switch Dipendenze Wine
+
+Segnalazione utente: lo switch compatta/estesa introdotto in v1.1.109-dev.1 era raggiungibile SOLO premendo la leva a destra — scorrendo la selezione dall'alto verso il basso o viceversa, veniva scavalcato del tutto.
+
+**Causa reale**: due punti di scoring geometrico che saltavano lo switch senza un vicino esplicito.
+1. `field-steamAppId` (il campo "xlaunch:// App ID", sempre presente per store non-Steam — quindi anche GOG/Epic, unico caso in cui il widget Winetricks esiste) non aveva alcun vicino esplicito verso il basso: scendendo dall'alto, lo scoring atterrava direttamente sulla prima checkbox, scavalcando lo switch.
+2. Lo switch stesso non aveva alcun vicino esplicito: risalendo dalla lista verb, lo scoring non lo trovava mai.
+
+**Fix**: collegamento esplicito a tre punti — `field-steamAppId` → switch (down) → prima checkbox (`verb-${DEFAULT_WINE_VERBS[0]}`, sempre lo stesso id sia in vista compatta sia estesa) → switch (up dalla prima checkbox). Ora raggiungibile scorrendo su/giù come qualunque altro elemento dell'overlay, non solo con la leva destra.
+
+Verificate anche le due domande poste dall'utente nello stesso giro (nessun fix necessario, solo chiarimento — vedi conversazione): `DEFAULT_WINE_VERBS` non è stato alterato; le differenze osservate tra card di giochi non ancora installati sono spiegate dal meccanismo "Usa Known Fixes (Heroic)" in `downloadManager.ts`, che quando trova un fix noto SOSTITUISCE (non unisce) l'intero array `winetricksVerbs` e lo scrive in modo permanente nel DB molto presto nel flusso d'installazione — anche se l'installazione fallisce o viene annullata dopo, indipendentemente dallo stato attuale del toggle. I verb richiesti da un fix Heroic ma non visibili in vista compatta vengono comunque installati (la vista è solo un filtro di visualizzazione, l'installazione legge l'array completo persistito) e appaiono correttamente spuntati passando alla vista estesa. Nessuna modifica al comportamento di sostituzione richiesta esplicitamente dall'utente ("lasciamo la questione dei verb così com'è").
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.

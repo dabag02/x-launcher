@@ -65,16 +65,13 @@ if [ ! -d "$PROJECT_DIR/dist" ]; then
 fi
 
 echo "[INSTALL] Copio il progetto in ${INSTALL_DIR}..."
-mkdir -p "$INSTALL_DIR"
 # rsync preserva i permessi eseguibili degli script (.sh) e aggiorna solo i
 # file cambiati su una reinstallazione successiva, invece di un cp -r pieno
 # ogni volta — più adatto per ri-applicare aggiornamenti del progetto.
 #
 # v1.1.102-dev.1 — .env non vive più in $PROJECT_DIR (spostato in
-# ~/.local/share/x-launcher/.env, letto da kiosk-launch.sh/xdash.service/
-# npm run dev da lì): l'esclusione qui sotto resta solo come rete di
-# sicurezza per chi avesse ancora un .env residuo nella vecchia posizione,
-# così da non copiarlo per errore in /opt (mondo-leggibile).
+# ~/.local/share/x-launcher/.env): l'esclusione resta solo come rete di
+# sicurezza per chi avesse ancora un .env residuo nella vecchia posizione.
 if command -v rsync &>/dev/null; then
   rsync -a --delete \
     --exclude='.git' \

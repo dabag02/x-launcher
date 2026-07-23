@@ -177,7 +177,7 @@ cat ~/.local/share/x-launcher/daemon.log
 
 ```
 ~/.local/share/x-launcher/
-  ├── .env                    # variabili d'ambiente (vedi sezione 5) — v1.1.102-dev.1
+  ├── .env                    # variabili d'ambiente (vedi sezione 5)
   ├── x-launcher.db          # database SQLite (libreria, config di gioco, tempo di gioco,
   │                          #   credenziali provider AI Advisor, ecc.)
   ├── tokens.json             # token OAuth (permessi 600)

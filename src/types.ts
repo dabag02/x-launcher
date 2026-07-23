@@ -9,13 +9,10 @@ export type Theme = 'light' | 'dark';
 export interface CompatibilityProfile {
   fsr:        boolean;   // AMD FidelityFX Super Resolution (WINE_FULLSCREEN_FSR=1)
   gameMode:   boolean;   // Feral GameMode (gamemoderun wrapper)
-  // v1.1.104-dev.1 — da booleano a 3 stati, richiesta utente (poche info
-  // coi soli MANGOHUD=1/0, MangoHud offre preset ufficiali più dettagliati):
-  // 0 = spento, 1 = compatta (comportamento INVARIATO di prima, MANGOHUD=1
-  // senza MANGOHUD_CONFIG), 2 = completa (MANGOHUD_CONFIG=preset=4, il
-  // preset "Detailed" ufficiale di MangoHud). La colonna DB era già
-  // INTEGER (non serve migrazione): chi aveva 1 resta su "compatta",
-  // stesso comportamento di sempre.
+  // v1.1.104-dev.1 — da booleano a 3 stati: 0 = spento, 1 = compatta
+  // (MANGOHUD=1 senza MANGOHUD_CONFIG), 2 = completa (MANGOHUD_CONFIG=
+  // preset=4, preset "Detailed" ufficiale di MangoHud). Colonna DB già
+  // INTEGER, nessuna migrazione (chi aveva 1 resta su "compatta").
   mangohud:   0 | 1 | 2;  // MangoHud overlay — vedi runners/implementations.ts
   eac:        boolean;   // EasyAntiCheat compatibilità (PROTON_EAC_RUNTIME)
   battleye:   boolean;   // BattlEye compatibilità (PROTON_BATTLEYE_RUNTIME)

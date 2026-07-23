@@ -23,6 +23,8 @@
   "remasterToggling": "Applicazione in corso…",
   "wineDependencies": "Dipendenze Wine",
   "savedForThisGame": "salvate per questo gioco",
+  "wineDepsCompact": "compatta",
+  "wineDepsExpanded": "estesa",
   "recommended": "consigliato",
   "slowOnlyIfNeeded": "lento · solo se richiesto",
   "keyValuePerLine": "KEY=VALUE per riga",

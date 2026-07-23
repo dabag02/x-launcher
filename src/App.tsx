@@ -611,7 +611,7 @@ function MainApp() {
   const [retroarchDefaultCore, setRetroarchDefaultCore] = useState<string>('');
   const [retroarchAvailable, setRetroarchAvailable] = useState<boolean | null>(null);
   // Step 4 — stato locale del profilo compat per toggle reattivi (ottimistic UI)
-  const [localCompatProfile, setLocalCompatProfile] = useState<Record<string,boolean>>({});
+  const [localCompatProfile, setLocalCompatProfile] = useState<Record<string, boolean | number>>({});
   // Step 4 — stato locale config per-game per input reattivi
   const [localGameConfig, setLocalGameConfig] = useState<Record<string,string>>({});
   // Step 4 — custom env come stringa KEY=VALUE per riga
@@ -631,6 +631,13 @@ function MainApp() {
   const DEFAULT_WINE_VERBS = ['vcrun2022', 'dxvk', 'vkd3d', 'corefonts'];
   const OPTIONAL_WINE_VERBS = ['vcrun2019', 'vcrun2017', 'vcrun2015', 'xna40', 'd3dcompiler_47', 'physx', 'msxml6', 'mfc140', 'dotnet48', 'dotnet40', 'dotnet35'];
   const [winetricksVerbs, setWinetricksVerbs] = useState<string[]>(DEFAULT_WINE_VERBS);
+  // v1.1.109-dev.1 — richiesta utente: vista compatta di default (solo i
+  // verb consigliati) per accorciare la navigazione nell'overlay; quella
+  // estesa (tutti i verb opzionali) resta disponibile a richiesta. Stato
+  // puramente di visualizzazione, non salvato per-gioco — riparte
+  // sempre da compatta ad ogni apertura dell'overlay, coerente con
+  // l'idea che sia una scorciatoia di navigazione, non una preferenza.
+  const [wineDepsExpanded, setWineDepsExpanded] = useState(false);
   // v0.99.35 — switch overlay "Disabilita sync NT veloce", persistito
   // nel compat profile come gli altri toggle (fsr/gameMode/ecc.)
   const [disableWineSync, setDisableWineSync] = useState<boolean>(false);
@@ -2077,7 +2084,7 @@ function MainApp() {
         setLocalCompatProfile({
           fsr:      !!profile.fsr,
           gameMode: !!profile.gameMode,
-          mangohud: !!profile.mangohud,
+          mangohud: Number(profile.mangohud ?? 0),
           eac:      !!profile.eac,
           battleye: !!profile.battleye,
         });
@@ -2101,6 +2108,10 @@ function MainApp() {
         }
         setDisableWineSync(!!profile.disableWineSync);
         setUseKnownFixes(!!profile.useKnownFixes);
+        // v1.1.109-dev.1 — riparte sempre da vista compatta ad ogni
+        // apertura/cambio gioco, stesso principio di setCustomEnvPersistentFlags
+        // sopra: è uno stato di visualizzazione, non di configurazione.
+        setWineDepsExpanded(false);
       })
       .catch(() => { setWinetricksVerbs(DEFAULT_WINE_VERBS); });
     setLocalGameConfig({
@@ -5793,10 +5804,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           {(isFocused) => (
                             <button
                               className={cn(
-                                "ml-auto text-[9px] font-black uppercase tracking-widest transition-all px-2 py-1 rounded-lg",
-                                isFocused
-                                  ? "bg-red-600/20 text-red-400"
-                                  : theme === 'dark' ? "text-white/30 hover:bg-red-600/20 hover:text-red-400" : "text-gray-400 hover:bg-red-600/20 hover:text-red-400"
+                                // v1.1.107-dev.1 — stile unificato con
+                                // disk-usage-refresh più sotto: celeste
+                                // semplice a riposo, pillola rossa SOLO
+                                // quando isFocused (selezione volontaria).
+                                "text-[9px] font-black uppercase tracking-widest transition-all px-2 py-1 rounded-lg",
+                                isFocused ? "bg-red-600/20 text-red-400" : "text-blue-400/70"
                               )}
                             >
                               {t('system.refresh')}
@@ -6001,6 +6014,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               ['fsr',       'FSR (Wine ≥7)'],
                               ['eac',       'EAC Runtime'],
                               ['battleye',  'BattlEye Runtime'],
+                              // v1.1.105-dev.1 — tool di decompressione
+                              // Classic Console, vedi archiveExtractors.ts.
+                              ['unzip',     'Unzip'],
+                              ['p7zip',     '7-Zip'],
+                              ['unrar',     'UnRAR'],
                             ] as [string, string][]).map(([key, label]) => {
                               const val = systemTools[key];
                               const ok  = val === true || (typeof val === 'string' && val.length > 0);
@@ -6023,7 +6041,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                     {/* Spazio disco */}
                     <div>
-                      <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-3 mb-4">
                         <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30">{t('system.diskSpace')}</h3>
                         <Focusable
                           group="settings"
@@ -6033,8 +6051,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         >
                           {(isFocused) => (
                             <button className={cn(
-                              "text-[9px] font-black uppercase tracking-widest transition-opacity",
-                              isFocused ? "opacity-100 text-blue-400" : "opacity-30 hover:opacity-80"
+                              // v1.1.107-dev.1 — stesso stile unificato di
+                              // runners-refresh sopra.
+                              "text-[9px] font-black uppercase tracking-widest transition-all px-2 py-1 rounded-lg",
+                              isFocused ? "bg-red-600/20 text-red-400" : "text-blue-400/70"
                             )}>{t('system.refresh')}</button>
                           )}
                         </Focusable>
@@ -6408,11 +6428,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   const nextEnabled = !turningOff;
                                   setOllamaEnabled(nextEnabled);
                                   if (!turningOff) setActiveOllamaModel(m.name);
+                                  // v1.1.108-dev.2 — fix: db.upsertAiProviderCredential
+                                  // disattiva già correttamente tutti gli altri
+                                  // provider quando questo viene abilitato (vale
+                                  // per qualunque id, Ollama compreso) — ma senza
+                                  // questo refreshOllamaModels() la UI non lo
+                                  // scopriva mai: i pill dei provider cloud
+                                  // restavano visivamente "attivi" nella sessione
+                                  // corrente anche se il DB li aveva già spenti.
+                                  // Stesso identico refresh già fatto da
+                                  // saveCloudProvider() per il caso simmetrico.
                                   fetch('/api/ai/providers/ollama', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ enabled: nextEnabled, model: m.name, priority: 0 }),
-                                  }).catch(() => {});
+                                  }).then(() => refreshOllamaModels()).catch(() => {});
                                   play('select');
                                 }}
                               >
@@ -7101,7 +7131,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         { key: 'eac',      label: 'EasyAntiCheat', desc: 'EAC runtime',           sysKey: 'eac'      },
                         { key: 'battleye', label: 'BattlEye',      desc: 'BE runtime',            sysKey: 'battleye' },
                       ] as const).map(({ key, label, desc, sysKey }, idx, arr) => {
-                        const enabled   = (localCompatProfile as any)[key] ?? false;
+                        // v1.1.104-dev.1 — mangohud non è più booleano ma
+                        // un livello 0/1/2 (spento/compatta/completa).
+                        const mangohudLevel = key === 'mangohud' ? (Number((localCompatProfile as any).mangohud) || 0) : 0;
+                        const enabled   = key === 'mangohud' ? mangohudLevel > 0 : ((localCompatProfile as any)[key] ?? false);
                         const available = !!systemTools[sysKey];
                         // v1.0.0 — collega esplicitamente il primo elemento
                         // a Runner Bridge (sopra) e l'ultimo a Executable
@@ -7109,6 +7142,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         const compatNeighbors: { up?: string; down?: string } = {};
                         if (idx === 0) compatNeighbors.up = overlayNavAnchors.lastRunnerBridgeId;
                         if (idx === arr.length - 1) compatNeighbors.down = 'field-executablePath';
+                        // v1.1.104-dev.2 — didascalia dinamica solo per
+                        // MangoHud tramite i18next (non stringhe hardcoded).
+                        const tileDesc = key === 'mangohud'
+                          ? (mangohudLevel === 0 ? t('gameOptions:mangohudOff') : mangohudLevel === 1 ? t('gameOptions:mangohudCompact') : t('gameOptions:mangohudFull'))
+                          : desc;
                         return (
                           <Focusable
                             key={key}
@@ -7116,7 +7154,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             id={`compat-${key}`}
                             neighbors={compatNeighbors}
                             onEnter={async () => {
-                              const next = !enabled;
+                              // v1.1.104-dev.1 — MangoHud cicla 0→1→2→0 ad
+                              // ogni conferma (stesso meccanismo già usato
+                              // da cycleDisplayMode), le altre 4 voci
+                              // restano un semplice toggle booleano.
+                              const next = key === 'mangohud' ? ((mangohudLevel + 1) % 3) : !enabled;
                               setLocalCompatProfile(prev => ({ ...prev, [key]: next }));
                               const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
                               const current = compatRes.ok ? await compatRes.json() : {};
@@ -7167,11 +7209,22 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       {available ? '✓' : '✗'}
                                     </span>
                                   </div>
-                                  <span className="text-[8px] font-mono opacity-30 normal-case">{desc}</span>
+                                  <span className="text-[8px] font-mono opacity-30 normal-case">{tileDesc}</span>
                                 </div>
-                                <div className={cn("w-8 h-4 rounded-full transition-all relative shrink-0", enabled ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
-                                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", enabled ? "left-4" : "left-0.5")} />
-                                </div>
+                                {key === 'mangohud' ? (
+                                  // v1.1.104-dev.1 — cursore a 3 posizioni:
+                                  // sx spento, centro compatta, dx completa.
+                                  <div className={cn("w-10 h-4 rounded-full transition-all relative shrink-0", mangohudLevel > 0 ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
+                                    <div className={cn(
+                                      "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                                      mangohudLevel === 0 ? "left-0.5" : mangohudLevel === 1 ? "left-[14px]" : "left-[26px]"
+                                    )} />
+                                  </div>
+                                ) : (
+                                  <div className={cn("w-8 h-4 rounded-full transition-all relative shrink-0", enabled ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
+                                    <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", enabled ? "left-4" : "left-0.5")} />
+                                  </div>
+                                )}
                               </button>
                             )}
                           </Focusable>
@@ -7401,6 +7454,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <Focusable
                             group="game-options"
                             id="field-steamAppId"
+                            // v1.1.109-dev.2 — bug reale segnalato
+                            // dall'utente: scendendo dall'alto lo scoring
+                            // geometrico saltava del tutto lo switch
+                            // "Dipendenze Wine" sotto, atterrando
+                            // direttamente sulla prima checkbox — questo
+                            // campo è sempre l'ultimo prima del widget
+                            // Winetricks per GOG/Epic (unico caso in cui
+                            // quel widget esiste), quindi è il punto
+                            // giusto per un collegamento esplicito.
+                            neighbors={{ down: 'wine-deps-expand-toggle' }}
                             onEnter={() => {
                               // Nessuna tastiera virtuale: non è un campo
                               // modificabile, è l'id reale del gioco —
@@ -7601,10 +7664,42 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     <div className="flex items-center gap-3 mb-4">
                       <Package size={16} className="text-blue-400" />
                       <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:wineDependencies')}</span>
-                      <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:savedForThisGame')}</span>
+                      <span className="text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:savedForThisGame')}</span>
+                      {/* v1.1.109-dev.1 — richiesta utente: vista compatta
+                          di default (solo verb consigliati) per accorciare
+                          la navigazione, estesa a richiesta. Switch con lo
+                          stesso stile pill già usato altrove nella
+                          dashboard (es. griglia Compatibility Layer),
+                          navigabile col controller come tutto il resto. */}
+                      <Focusable
+                        group="game-options"
+                        id="wine-deps-expand-toggle"
+                        // v1.1.109-dev.2 — collegamento esplicito verso la
+                        // prima checkbox: DEFAULT_WINE_VERBS[0] è sempre la
+                        // prima voce sia in vista compatta sia estesa,
+                        // quindi questo id esiste sempre indipendentemente
+                        // da wineDepsExpanded.
+                        neighbors={{ down: `verb-${DEFAULT_WINE_VERBS[0]}` }}
+                        onEnter={() => { setWineDepsExpanded(v => !v); play('select'); }}
+                      >
+                        {(isFocused) => (
+                          <div className="ml-auto flex items-center gap-2 cursor-pointer">
+                            <span className="text-[9px] font-black uppercase tracking-widest opacity-50">
+                              {wineDepsExpanded ? t('gameOptions:wineDepsExpanded') : t('gameOptions:wineDepsCompact')}
+                            </span>
+                            <div className={cn(
+                              "w-8 h-4 rounded-full transition-all relative shrink-0 border",
+                              wineDepsExpanded ? "bg-blue-500 border-blue-400" : theme === 'dark' ? "bg-white/20 border-white/10" : "bg-gray-300 border-gray-400",
+                              isFocused && "ring-2 ring-blue-400 ring-offset-1 ring-offset-transparent"
+                            )}>
+                              <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", wineDepsExpanded ? "left-4" : "left-0.5")} />
+                            </div>
+                          </div>
+                        )}
+                      </Focusable>
                     </div>
                     <div className="space-y-1">
-                      {[...DEFAULT_WINE_VERBS, ...OPTIONAL_WINE_VERBS].map((verb, verbIdx, verbsArr) => {
+                      {(wineDepsExpanded ? [...DEFAULT_WINE_VERBS, ...OPTIONAL_WINE_VERBS] : [...DEFAULT_WINE_VERBS]).map((verb, verbIdx, verbsArr) => {
                         const isChecked = winetricksVerbs.includes(verb);
                         const isLastVerb = verbIdx === verbsArr.length - 1;
                         const toggleVerb = async () => {
@@ -7634,7 +7729,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             // comunque un elemento). Un solo link di
                             // confine, non uno per riga: l'interno della
                             // catena si muove da solo (sequentialChain).
-                            neighbors={isLastVerb ? { down: 'envvar-0' } : undefined}
+                            // v1.1.109-dev.2 — stesso principio per il
+                            // confine SUPERIORE: la prima checkbox collega
+                            // esplicitamente allo switch compatta/estesa,
+                            // altrimenti lo scoring lo scavalcava del
+                            // tutto (bug segnalato dall'utente — prima
+                            // raggiungibile solo premendo destra).
+                            neighbors={
+                              verbIdx === 0 ? { up: 'wine-deps-expand-toggle' }
+                              : isLastVerb ? { down: 'envvar-0' }
+                              : undefined
+                            }
                           >
                             {(isFocused) => (
                               <div className={cn(

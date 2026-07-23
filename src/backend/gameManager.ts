@@ -762,16 +762,12 @@ class GameManager {
       }
     }
 
-    // v1.1.106-dev.2 — richiesta utente ("non è cambiato nulla"): il fix
-    // in gogPlugin.ts impedisce SOLO che nuove voci spazzatura vengano
-    // create — quelle già scritte in DB da scansioni precedenti (goodies
-    // collection, URL di re-auth scambiati per titoli) restavano lì per
-    // sempre, dato che GOG non è un plugin a scansione esaustiva (sopra)
-    // e quindi non viene mai ripulito in base a "cosa manca dalla
-    // scansione attuale". Questa pulizia è mirata e diversa: non dipende
-    // dal risultato della scansione corrente (sicura anche se parziale
-    // per un errore di rete/auth), rimuove solo le righe già in DB che
-    // isJunkGogSlug identifica positivamente come spazzatura.
+    // v1.1.106-dev.2 — pulizia mirata per GOG: rimuove SOLO le voci già in
+    // DB che isJunkGogSlug identifica positivamente come spazzatura
+    // (goodies collection, URL di re-auth scambiati per titoli) — non
+    // dipende dal risultato della scansione corrente (sicura anche se
+    // parziale per un errore di rete/auth), a differenza della pulizia
+    // esaustiva sopra.
     const gogJunkIds = db.getAllGames()
       .filter(g => g.store === 'GOG Galaxy' && isJunkGogSlug(g.id.replace(/^gog-/, '')))
       .map(g => g.id);

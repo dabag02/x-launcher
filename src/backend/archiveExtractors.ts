@@ -54,8 +54,8 @@ export const ARCHIVE_EXTRACTORS: ArchiveExtractor[] = [
 ];
 
 /** Estensioni di TUTTI gli estrattori registrati, supportati o no — usata
- *  per riconoscere "questo è un archivio", indipendentemente dal fatto che
- *  sappiamo già estrarlo. */
+ *  per riconoscere "questo è un archivio", indipendentemente dal fatto
+ *  che sappiamo già estrarlo. */
 export const ARCHIVE_EXTENSIONS = new Set(ARCHIVE_EXTRACTORS.flatMap(e => e.extensions));
 
 export function findExtractorFor(filePath: string): ArchiveExtractor | undefined {

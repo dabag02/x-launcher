@@ -12,6 +12,7 @@ import * as db from './src/backend/db';
 import * as attemptTracker from './src/backend/aiProviders/attemptTracker';
 import { readAppConfig, writeAppConfig, hasLanguageBeenSet } from './src/backend/appConfig';
 import { getSystemInfo } from './src/backend/systemInfo';
+import { DATA_DIR, ENV_PATH } from './src/backend/paths';
 import fs from 'fs';
 import os from 'os';
 import { spawn, execSync } from 'child_process';
@@ -27,13 +28,7 @@ function binaryExists(bin: string): boolean {
 
 async function startServer() {
   const app = express();
-    const AVATAR_DIR = path.join(
-      os.homedir(),
-      '.local',
-      'share',
-      'x-launcher',
-      'avatars'
-    );
+    const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
 
     fs.mkdirSync(AVATAR_DIR, {
       recursive: true
@@ -42,6 +37,16 @@ async function startServer() {
   writeLog(
     'system',
     `[AVATAR] Avatar directory: ${AVATAR_DIR}`
+  );
+
+  // v1.1.102-dev.1 — .env non vive più nella cartella progetto: caricato
+  // esternamente (--env-file, dal launcher o da systemd) da ENV_PATH
+  // (~/.local/share/x-launcher/.env). Log diagnostico: se qualcuno si
+  // aspetta chiavi API e non arrivano, questa riga dice subito se il
+  // file è stato trovato.
+  writeLog(
+    'system',
+    `[ENV] .env ${fs.existsSync(ENV_PATH) ? 'trovato' : 'NON trovato'}: ${ENV_PATH}`
   );
   // In AI Studio NODE_ENV veniva iniettato automaticamente dalla piattaforma.
   // Su Linux locale si imposta qui come fallback sicuro.

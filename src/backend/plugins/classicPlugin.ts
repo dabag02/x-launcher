@@ -268,20 +268,14 @@ function findCueFile(dir: string): string | null {
 
 // v1.1.103-dev.1 — richiesta utente: se ha già estratto lo zip a mano
 // DIRETTAMENTE nella cartella di emulazione (PSX/, DREAMCAST/, SATURN/,
-// ecc. — non necessariamente dentro .extracted/<nome>/, dove la guardava
-// solo la cache sotto), trova quel .cue e usalo invece di ritentare
-// un'estrazione automatica ad ogni sync. Caso reale che ha fatto emergere
-// il problema: uno zip PSX corrotto ("End-of-central-directory signature
-// not found") falliva ad ogni sync periodica (ogni 5 minuti, vedi
-// gameManager.ts LIBRARY_REFRESH_INTERVAL_MS), rilogando lo stesso errore
-// all'infinito, anche se l'utente aveva già risolto a mano.
+// ecc. — non necessariamente dentro .extracted/<nome>/), trova quel .cue
+// e usalo invece di ritentare un'estrazione automatica ad ogni sync.
 //
 // Cerca in due punti, in ordine: (1) un .cue sciolto direttamente nella
 // cartella di sistema il cui nome inizia con quello dello zip — tollera
 // tag regione/revisione tipo "Crash Bandicoot (USA).cue"; (2) un .cue
 // dentro una sottocartella con lo stesso nome dello zip, nel caso
-// l'estrazione a mano abbia ricreato una struttura a cartelle (comune se
-// lo zip stesso conteneva già una cartella di primo livello).
+// l'estrazione a mano abbia ricreato una struttura a cartelle.
 function findMatchingCueInDir(dir: string, zipBaseName: string): string | null {
   try {
     const normalizedBase = zipBaseName.toLowerCase();
@@ -511,9 +505,7 @@ export class ClassicPlugin extends StorePlugin {
 
     // v1.1.105-dev.1 — utility-agnostic: quale estrattore usare (unzip,
     // 7z, in futuro altro) è deciso da archiveExtractors.ts, non più
-    // hardcoded qui. Se il file non è un archivio riconosciuto (es. è già
-    // un .cue diretto) o l'estensione è nota ma non ancora supportata per
-    // l'estrazione reale (es. .rar oggi), esce senza tentare nulla.
+    // hardcoded qui.
     const extractor = findExtractorFor(romPath);
     if (!extractor || !extractor.supported) return romPath;
 
