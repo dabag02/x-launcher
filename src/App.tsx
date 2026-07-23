@@ -1777,7 +1777,7 @@ function MainApp() {
   // prima — stessa categoria di errore (TS2448) già documentata più sotto
   // per keyboardAltSuggestions/overlayNavAnchors in questo stesso file.
   useEffect(() => {
-    if (!selectedGame || (selectedGame.store !== 'GOG Galaxy' && selectedGame.store !== 'Epic Games')) {
+    if (!selectedGame || (selectedGame.store !== 'GOG Galaxy' && selectedGame.store !== 'Epic Games' && selectedGame.store !== 'Amazon Games')) {
       setPredictedSizeBytes(null);
       setPredictedSizeLoading(false);
       return;
@@ -2213,7 +2213,7 @@ function MainApp() {
     // senza un vero concetto di login (Steam, Amazon, Battle.net, Classic
     // Console), per cui isConnected non implica una sessione da poter
     // perdere nello stesso senso.
-    const NO_LOGIN_STORES = new Set(['Steam', 'Amazon Games', 'Battle.net', 'Classic Console']);
+    const NO_LOGIN_STORES = new Set(['Steam', 'Battle.net', 'Classic Console']);
     result = result.filter(g => {
       const store = g.store as string;
       if (NO_LOGIN_STORES.has(store)) return true;
@@ -2330,7 +2330,7 @@ function MainApp() {
     // come sopra — il gioco potrebbe comunque funzionare (cache locale,
     // modalità offline), ma l'utente deve sapere del rischio prima di
     // procedere, dato che la sessione non è più valida.
-    const NO_LOGIN_STORES_HANDLEPLAY = new Set(['Steam', 'Amazon Games', 'Battle.net', 'Classic Console']);
+    const NO_LOGIN_STORES_HANDLEPLAY = new Set(['Steam', 'Battle.net', 'Classic Console']);
     if (ps && !ps.drmFree && !NO_LOGIN_STORES_HANDLEPLAY.has(game.store as string)) {
       const connected = storeConnectedMapRef.current.get(game.store as string);
       if (connected === false) {
@@ -2889,7 +2889,7 @@ Vuoi provare ad avviarlo comunque?`);
         });
         const first = visibleAccountStores[0];
         if (!first) return null;
-        const noLogin = ['Amazon Games', 'Battle.net', 'Classic Console'].includes(first.id);
+        const noLogin = ['Battle.net', 'Classic Console'].includes(first.id);
         if (noLogin) return null; // nessun controllo interattivo su questa card
         return first.isConnected ? `store-unlink-${first.id}` : `store-connect-${first.id}`;
       }
@@ -4445,12 +4445,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 </div>
 
                 {/* Dimensione prevista di installazione — richiesta utente,
-                    solo GOG/Epic per ora (Steam/Classic Console non hanno
-                    una fonte già cablata per questo, vedi discussione).
+                    GOG/Epic/Amazon (v1.1.112-dev.1: getPredictedInstallSizeBytes
+                    implementata anche per Amazon via nile install --info --json,
+                    vedi amazonPlugin.ts). Steam/Classic Console non hanno una
+                    fonte già cablata per questo, vedi discussione.
                     Blocco nascosto del tutto per gli altri store, invece di
                     mostrare sempre un "—" che implicherebbe un dato mancante
                     anziché "non applicabile a questo store". */}
-                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games') && (
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games') && (
                   <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/5 shrink-0">
                     <HardDrive size={14} className="text-blue-400 shrink-0" />
                     <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{t('dashboard:sidebar.predictedSize')}</span>
@@ -5469,7 +5471,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       const isWaiting = authPolling === store.id;
                       const msg       = authMessage[store.id];
                       const url       = authUrl[store.id];
-                      const noLogin   = ['Amazon Games', 'Battle.net', 'Classic Console'].includes(store.id);
+                      const noLogin   = ['Battle.net', 'Classic Console'].includes(store.id);
                       // Steam ha login (rileva il client locale) ma nessun
                       // vero concetto di logout — non è un account OAuth.
                       // Il backend già risponde success:false di default per
@@ -7658,8 +7660,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   </div>
                 </div>
 
-                {/* Step 10 — Winetricks dipendenze (solo GOG e Epic) */}
-                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games') && (
+                {/* Step 10 — Winetricks dipendenze (GOG, Epic, Amazon —
+                    v1.1.114-dev.1: runAmazon() in downloadManager.ts usa
+                    già filterVerbsForEnv(task.winetricksVerbs) esattamente
+                    come GOG/Epic, mancava solo qui il permesso di
+                    mostrarlo/modificarlo dall'overlay) */}
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games') && (
                   <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Package size={16} className="text-blue-400" />
@@ -8019,10 +8025,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 )}
 
                 {/* v0.99.35 — Switch "Disabilita sync NT veloce", solo
-                    GOG/Epic e solo quando il gioco non è ancora
-                    installato (riguarda esclusivamente la fase di
-                    creazione prefix/dipendenze, non il lancio). */}
-                {!selectedGame.isInstalled && (selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games') && (
+                    quando il gioco non è ancora installato (riguarda
+                    esclusivamente la fase di creazione prefix/dipendenze,
+                    non il lancio). v1.1.114-dev.1: esteso ad Amazon —
+                    runAmazon() passa già disableWineSync a
+                    prepareWinePrefix() esattamente come GOG/Epic, mancava
+                    solo il permesso di attivarlo dall'overlay. */}
+                {!selectedGame.isInstalled && (selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games') && (
                   <Focusable
                     group="game-options"
                     id="toggle-disable-wine-sync"
@@ -8075,7 +8084,18 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     insieme al resto o il toggle sarebbe stato scritto nel
                     backend ma mai visibile/attivabile per GOG dall'overlay.
                     Visibile solo quando il gioco non è ancora installato,
-                    per entrambi gli store. */}
+                    per entrambi gli store.
+                    v1.1.114-dev.1 — Amazon Games DELIBERATAMENTE ESCLUSO
+                    qui, non dimenticato: runAmazon() in downloadManager.ts
+                    ignora task.useKnownFixes per ora (commento esplicito
+                    lì) perché il percorso del repository Heroic Known
+                    Fixes è verificato solo per gog/epic, non per una
+                    cartella Amazon equivalente. Mostrare questo switch
+                    per Amazon sarebbe fuorviante: l'utente potrebbe
+                    attivarlo aspettandosi un effetto che il backend non
+                    applica affatto. Va aggiunto qui SOLO insieme
+                    all'implementazione reale in downloadManager.ts, non
+                    prima. */}
                 {!selectedGame.isInstalled && (selectedGame.store === 'Epic Games' || selectedGame.store === 'GOG Galaxy') && (
                   <Focusable
                     group="game-options"

@@ -3671,3 +3671,98 @@ Verificate anche le due domande poste dall'utente nello stesso giro (nessun fix 
 ### Verifica
 
 `tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.110-dev.1 — Amazon Games: prima implementazione reale via nile (Step 19c)
+
+Sostituito lo stub esistente (`amazonPlugin.ts`, `getLibrary()` sempre `[]`) con una prima implementazione vera, verificata passo per passo con output reale fornito dall'utente (stesso approccio già usato per GOG — mai indovinare un formato non verificato):
+
+- **`nile library --help` / `install --help` / `launch --help`** reali → confermato `--json` su `library list` e `--installed` per il filtro solo-installati, `--info --json` su `install` per la dimensione prevista.
+- **`nile auth --login`** reale eseguito dall'utente → confermato il flusso di login (URL browser + incolla redirect), libreria sincronizzata con successo.
+- **`nile library list --json`** reale (un titolo completo) → confermata la struttura: `product.id` (`amzn1.adg.product.<uuid>`) è l'identificativo giusto per install/launch/uninstall — verificato per esclusione anche `product.sku` (`amzn1.resource.<uuid>`), NON è quello corretto. Nessun campo "boxart" verticale dedicato come GOG/Epic: usata `productDetail.iconUrl` (quadrata) per la cover, `productDetail.details.backgroundUrl1` (landscape) per l'anteprima.
+- **`nile install <id> --info --json`** reale → risposta esatta `{"download_size": N}`, agganciato a `getPredictedInstallSizeBytes()` per la stessa funzione "Dimensione Prevista" già in sidebar per GOG/Epic — qui verificato dal vivo, a differenza della stessa funzione in `epicPlugin.ts` che ha un'onesta nota "non testato dal vivo".
+
+**Ancora da fare, esplicitamente non indovinato**: `isAuthenticated()`/`login()`/`logout()` restano il comportamento di default ereditato da `StorePlugin` (non un'implementazione reale) — serve `nile auth --help` per sapere il comando esatto di stato/logout, sullo stesso modello di `legendary status --json`/`legendary auth --delete` in `epicPlugin.ts`. L'orchestrazione reale del download/installazione (`runAmazon` in `downloadManager.ts`, sul modello di `runEpic`/`runGog` — progresso, prefix Wine, winetricks, ricerca eseguibile finale) non è ancora scritta: `installGame`/`uninstallGame` restano stub che rimandano al comando giusto, stesso pattern transitorio già usato storicamente da `epicPlugin.ts` prima che `downloadManager.ts` venisse esteso.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.110-dev.2 — Amazon Games: login/logout reali
+
+Verificato `nile auth --help` reale: `--login` (flusso interattivo, già visto dal vivo dall'utente nel turno precedente), `--status`, `--logout` ("Logout from the accout and deregister" — nessuna ambiguità di formato).
+
+**Implementato**: `login()` sul modello già collaudato di `epicPlugin.ts` — il backend non ha un terminale interattivo reale a cui collegarsi, quindi istruisce l'utente sul comando esatto (`nile auth --login`) invece di tentare di automatizzare un flusso che richiede incollare un URL a mano; la card si aggiorna da sola al termine via polling su `isAuthenticated()`. `logout()` via `nile auth --logout`, diretto (nessun JSON da interpretare).
+
+**Ancora non indovinato**: `isAuthenticated()` resta il comportamento di default ereditato da `StorePlugin` — serve l'output reale di `nile auth --status` per sapere se è testo semplice o JSON e quale campo distingue autenticato/non autenticato. Cautela non casuale: `epicPlugin.ts` ha un bug storico documentato proprio su questo punto (`legendary status --json` confrontato contro la stringa sbagliata, `'not logged in'` invece del vero `'<not logged in>'` con parentesi — qualunque account risultava sempre autenticato).
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.110-dev.3 — Amazon Games: autenticazione completa (login/logout/isAuthenticated)
+
+Verificato output reale di `nile auth --status`: `{"Username": "Daniele", "LoggedIn": true}` — JSON pulito, campo booleano `LoggedIn` senza ambiguità (a differenza del caso storico Epic, dove `legendary status --json` usava una stringa placeholder con un dettaglio facile da sbagliare — le parentesi angolari di `<not logged in>` — che aveva causato un bug reale documentato in `epicPlugin.ts`).
+
+**Implementato**: `isAuthenticated()` legge `parsed.LoggedIn === true` da `nile auth --status`. Con questo, l'autenticazione Amazon è completa: `login()`, `logout()`, `isAuthenticated()` tutti verificati con output reale, nessuna parte indovinata.
+
+**Unica parte ancora mancante per un plugin Amazon Games funzionante end-to-end**: l'orchestrazione reale del download/installazione (`runAmazon` in `downloadManager.ts`, sul modello di `runEpic`/`runGog`) — progresso durante `nile install`, creazione prefix Wine, winetricks, ricerca dell'eseguibile installato. `installGame`/`uninstallGame` restano stub che rimandano al comando giusto, in attesa di quella parte.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.111-dev.1 — Amazon Games: orchestrazione reale download/installazione (runAmazon)
+
+Ultimo pezzo mancante per un plugin Amazon Games funzionante end-to-end. Verificato con un log reale completo fornito dall'utente (installazione di "Art of Fighting 3: The Path of The Warrior", ~53MB, dall'inizio alla fine).
+
+**Scoperta importante nel log**: a differenza di legendary/lgogdownloader (che aggiornano la stessa riga via `\r`), `nile install` stampa una riga `INFO [PROGRESS]` completa e separata da newline normale per ogni aggiornamento — parsing più semplice, nessuna gestione di `\r` necessaria. **Artefatto scoperto e deliberatamente non replicato**: la percentuale che nile stampa prima della frazione byte è "in ritardo" di una riga rispetto alla vera frazione (es. una riga con `Progress: 19.84 41670335/55301823` mostra 19.84%, ma quella frazione byte fa in realtà ~75.3% — il 19.84% corrisponde invece alla riga precedente). Il nuovo `makeNileProgressParser()` ricalcola quindi sempre la percentuale dal rapporto byte scaricati/totale, mai dal numero già stampato da nile.
+
+**Nuovo `runAmazon()`** in `downloadManager.ts`, sul modello di `runEpic`/`runGog`: `nile install <product.id> --base-path <path>` (verificato: `--install --help` conferma lo stesso comportamento di `--base-path` di legendary), poi le stesse funzioni condivise già collaudate per gli altri store — `prepareWinePrefix`, `resolveRunnerWineEnv`, `filterVerbsForEnv`, `findMainExe` per la ricerca dell'eseguibile finale. Collegato nel dispatch di `startTask()`.
+
+**Esplicitamente non implementato, non indovinato**: il lookup Known Fixes Heroic (`fetchKnownFixes`) non è stato esteso ad Amazon — il percorso del repository è verificato solo per `gog`/`epic`, non per una cartella Amazon equivalente, quindi `task.useKnownFixes` viene ignorato per ora invece di puntare a un percorso non verificato. Nessun sottocomando `nile info` equivalente a `legendary info --json` per risolvere l'eseguibile via API — usa direttamente `findMainExe()` su filesystem, lo stesso fallback già collaudato e affidabile usato da Epic quando l'API non risolve.
+
+Con questo, il plugin Amazon Games (Step 19c) è completo: libreria, autenticazione, download/installazione con prefix Wine e winetricks, lancio tramite il runner Wine/Proton standard (nessuna dipendenza da `nile launch`, stesso principio già in uso per GOG/Epic).
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.112-dev.1 — Amazon Games: residui mock corretti (3 su 4 problemi segnalati)
+
+Segnalati dall'utente dopo aver attivato il plugin per davvero. Tre erano residui del vecchio stub, mai aggiornati quando il plugin è diventato reale — il quarto (isInstalled sempre vero) resta in indagine, vedi sotto.
+
+**1. Tab Store Accounts: "Accesso non richiesto" invece di "Account Collegato".** Causa: `'Amazon Games'` era ancora hardcoded in QUATTRO elenchi/insiemi diversi in `App.tsx` (`NO_LOGIN_STORES`, `NO_LOGIN_STORES_HANDLEPLAY`, e due varianti locali di `noLogin`) — tutti pensati per store senza un vero concetto di login (Steam, Battle.net, Classic Console), dove Amazon era stato messo per errore quando il plugin era solo uno stub. Rimosso da tutti e quattro.
+
+**2. Tab Plugin: descrizione "Amazon Games — non ancora supportato".** Causa: non un mock nel codice — una chiave di traduzione i18next (`storePluginDescriptions.Amazon_Games` in `public/locales/{it,en}/settings.json`) che sovrascriveva la descrizione reale già corretta inviata dal backend (`amazonPlugin.ts`). Aggiornata in entrambe le lingue, stesso pattern già usato per GOG/Epic (specchio italiano + traduzione inglese, invece di lasciare che la chiave assente faccia da fallback al testo del backend).
+
+**3. Widget "Dimensione Prevista" mancante in sidebar.** Causa: due controlli hardcoded (`selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games'`, uno per il fetch e uno per il rendering) non includevano `'Amazon Games'` — nonostante `getPredictedInstallSizeBytes()` fosse già implementata e verificata per Amazon in `amazonPlugin.ts` (v1.1.110-dev.1). Aggiunto `'Amazon Games'` a entrambi.
+
+**4. "Tutti i giochi risultano installati" — ANCORA IN INDAGINE, non corretto alla cieca.** Ipotesi più probabile: `nile library --help` mostra la sintassi come `nile library [OPTIONS] {list,sync}` — cioè le opzioni (incluso `--installed`) PRIMA del sottocomando, non dopo come nel codice attuale (`nile library list --json --installed`). Se `--installed` piazzato dopo `list` viene silenziosamente ignorato, `nile library list --json --installed` restituirebbe l'intera libreria invece di quella filtrata, facendo risultare "installato" ogni titolo. Richiesta verifica diretta prima di correggere.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.113-dev.1 — Amazon Games: risolto il quarto bug (tutti i giochi risultavano installati)
+
+Verificato empiricamente dall'utente, come richiesto nel turno precedente: `nile library list --json --installed`, `nile library --installed list --json` e la lista senza filtro restituiscono **tutte e tre lo stesso numero di voci** (55/55/55 in un test reale) — il flag `--installed` non filtra assolutamente nulla in questa versione di nile, indipendentemente dalla posizione. La mia ipotesi originale (ordine delle opzioni sbagliato) era quindi scorretta — la causa reale è che il flag stesso non funziona.
+
+**Fix**: rimossa `getInstalledFromNile()` per intero — nile non offre un modo affidabile per sapere quali giochi sono installati via CLI, quindi non ha senso fidarsi di un suo output. `AmazonPlugin.getLibrary()` ora imposta sempre `isInstalled: false` nella scansione fresca, affidandosi interamente a `gameManager.protectInstalledState()` (già esistente, usato per altri scenari) per preservare lo stato reale una volta che X-Launcher installa davvero un gioco — `db.updateGameStatus()` viene scritto direttamente nel DB al completamento del download (`runAmazon()`, v1.1.111-dev.1), indipendentemente da qualunque scansione successiva della libreria.
+
+Con questo, tutti e quattro i problemi segnalati sono risolti. Il plugin Amazon Games è ora pienamente funzionante.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.114-dev.1 — Amazon Games: widget Dipendenze Wine e Disabilita ntsync nell'overlay
+
+Segnalato dall'utente: nell'overlay di un gioco Amazon Games mancavano il widget "Dipendenze Wine" (verb winetricks) e lo switch "Disabilita sync NT veloce" — entrambi presenti per GOG/Epic. Causa: gli stessi due controlli hardcoded (`selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games'`) che limitavano il widget "Dimensione Prevista" prima di v1.1.112-dev.1 esistevano anche qui, semplicemente non ancora corretti.
+
+**Fix**: aggiunto `'Amazon Games'` a entrambe le condizioni. Entrambi i dati sono già effettivamente usati da `runAmazon()` in `downloadManager.ts` (`filterVerbsForEnv(task.winetricksVerbs)` e `disableWineSync` passato a `prepareWinePrefix()`, esattamente come GOG/Epic) — mancava solo il permesso di mostrarli/modificarli dall'overlay.
+
+**Deliberatamente NON esteso**: lo switch "Usa Known Fixes (Heroic)" resta visibile solo per GOG/Epic. `runAmazon()` ignora esplicitamente `task.useKnownFixes` (commento già presente dalla v1.1.111-dev.1) perché il percorso del repository Heroic Known Fixes non è verificato per una cartella Amazon equivalente — mostrare lo switch senza che il backend lo applichi davvero sarebbe fuorviante. Da aggiungere qui solo insieme a un'implementazione reale, non prima.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.

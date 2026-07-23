@@ -101,7 +101,7 @@
     "Steam": "Libreria Steam — legge i file .acf locali",
     "GOG_Galaxy": "Libreria GOG Galaxy — DRM-free, richiede lgogdownloader",
     "Battle_net": "Battle.net — non ancora supportato",
-    "Amazon_Games": "Amazon Games — non ancora supportato",
+    "Amazon_Games": "Libreria Amazon Games (Prime Gaming) — richiede nile",
     "Classic_Console": "ROM e console classiche — RetroArch, DOSBox, ScummVM",
     "Epic_Games": "Libreria Epic Games — richiede legendary"
   },

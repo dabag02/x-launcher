@@ -561,6 +561,48 @@ function makeLegendaryProgressParser(): (line: string) => { progress: number; sp
 }
 
 // ---------------------------------------------------------------------------
+// Parser progresso nile (Amazon Games)
+//
+// v1.1.111-dev.1 — formato VERIFICATO con log reale di un'installazione
+// completa fornita dall'utente (Art of Fighting 3, ~53MB). A differenza di
+// legendary/lgogdownloader (che aggiornano via \r sulla stessa riga), nile
+// stampa una riga INFO [PROGRESS] completa e separata da newline normale
+// per ogni aggiornamento — quindi split('\n') basta, nessuna gestione di
+// \r necessaria qui.
+//
+// ARTEFATTO SCOPERTO nel log reale, deliberatamente NON replicato: la
+// percentuale che nile stampa prima della frazione byte è "in ritardo" di
+// una riga rispetto alla vera frazione — es. una riga con
+// "Progress: 19.84 41670335/55301823" mostra 19.84%, ma 41670335/55301823
+// fa in realtà ~75.3%; il valore 19.84 corrisponde invece alla frazione
+// byte della riga PRECEDENTE (10970212/55301823 ≈ 19.84%). Per questo la
+// percentuale qui sotto è SEMPRE ricalcolata da noi dal rapporto
+// byte scaricati/totale, mai presa dal numero già stampato da nile.
+// ---------------------------------------------------------------------------
+function makeNileProgressParser(): (line: string) => { progress: number; speed: string } | null {
+  let lastSpeed = '';
+
+  return (line: string) => {
+    const speedMatch = line.match(/\+\s*Download\s*-\s*([\d.]+\s*(?:KiB|MiB|GiB)\/s)/i);
+    if (speedMatch) {
+      lastSpeed = speedMatch[1];
+      return null; // riga informativa, non un aggiornamento di percentuale
+    }
+
+    const bytesMatch = line.match(/Progress:\s*[\d.]+\s+(\d+)\/(\d+)/);
+    if (bytesMatch) {
+      const downloaded = parseInt(bytesMatch[1], 10);
+      const total = parseInt(bytesMatch[2], 10);
+      if (total > 0) {
+        return { progress: (downloaded / total) * 100, speed: lastSpeed };
+      }
+    }
+
+    return null;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Parser progresso innoextract
 //
 // v0.99.35 — formato verificato con test diretto (log completo
@@ -789,6 +831,7 @@ class DownloadManager {
     try {
       if (task.store === 'GOG Galaxy')  await this.runGOG(task);
       else if (task.store === 'Epic Games') await this.runEpic(task);
+      else if (task.store === 'Amazon Games') await this.runAmazon(task);
     } catch (err: any) {
       const msg = err?.stack ?? String(err);
       writeLog('error', `[DOWNLOAD ERROR] ${task.gameTitle}:\n${msg}`);
@@ -1242,6 +1285,123 @@ class DownloadManager {
       phaseLabel: PHASE_LABELS.completed,
       executablePath: exePath,
       launchArgs,
+      prefixPath: task.prefixPath,
+    });
+    this.procs.delete(task.gameId);
+    for (const cb of this.completeCallbacks) { try { cb(task.gameId, task.gameTitle); } catch {} }
+  }
+
+  /**
+   * v1.1.111-dev.1 — Step 19c, Amazon Games via nile. Stessa struttura di
+   * runEpic sopra (progresso, prefix Wine, winetricks, ricerca eseguibile),
+   * verificata voce per voce con output reale fornito dall'utente:
+   *   - `nile install <product.id> --base-path <path>` (verificato:
+   *     --install --help dice esplicitamente "It'll append save filename
+   *     to that path" — stesso comportamento di legendary --base-path)
+   *   - Formato di progresso VERIFICATO con log reale di un'installazione
+   *     completa (Art of Fighting 3, ~53MB): righe INFO [PROGRESS] separate
+   *     da newline normale (mai \r, a differenza di legendary/
+   *     lgogdownloader) — vedi makeNileProgressParser sotto per il
+   *     dettaglio di un artefatto di nile scoperto in quel log (la
+   *     percentuale stampata è "in ritardo" di una riga rispetto alla
+   *     vera frazione byte, quindi ignorata: calcolata sempre da noi).
+   *
+   * NON ancora implementato, esplicitamente non indovinato: known-fixes
+   * Heroic per Amazon (fetchKnownFixes usa un percorso di repository
+   * verificato solo per 'gog'/'epic' — non ho verificato se esiste una
+   * cartella equivalente per Amazon in quel repository, quindi
+   * task.useKnownFixes viene ignorato qui per ora, non applicato a
+   * caso). Ricerca eseguibile: nessun equivalente verificato di
+   * `legendary info --json` per nile (nessun sottocomando "info" a sé,
+   * solo il flag --info su install, che per un gioco NON installato
+   * mostra solo download_size — non verificato cosa mostri su un gioco
+   * già installato) — usa direttamente findMainExe() sul filesystem,
+   * stesso fallback già collaudato e affidabile usato da Epic quando
+   * legendary info non risolve.
+   */
+  private async runAmazon(task: DownloadTask) {
+    const productId = task.gameId.replace(/^amazon-/, '');
+
+    if (!binaryExists('nile')) {
+      throw new Error('nile non trovato. Installa con: yay -S nile-git');
+    }
+
+    // Step 1: Download via nile
+    ensureDir(task.installPath);
+    this.update(task, { status: 'downloading', progress: 0 });
+
+    await this.spawnWithProgress(task, 'nile', [
+      'install', productId,
+      '--base-path', task.installPath,
+    ], makeNileProgressParser());
+
+    // v0.99.35 — stesso sync esplicito già usato in runEpic/runGOG (vedi
+    // commento esteso lì) tra fine download e inizio creazione prefix.
+    this.log(task, 'system', `[AMAZON] Sync filesystem prima della creazione prefix...`);
+    await execFileAsync('sync').catch(() => {});
+
+    // Step 2: Crea prefix Wine isolato — stesso meccanismo di runEpic/runGOG.
+    this.update(task, { status: 'creating_prefix', progress: 0, speed: '' });
+    ensureDir(task.prefixPath);
+
+    const wineEnv = resolveRunnerWineEnv(task.runner, task.prefixPath);
+    if (task.runner && task.runner !== 'Wine-Lutris') {
+      this.log(task, 'system',
+        wineEnv.wineBin !== 'wine'
+          ? `[AMAZON] Runner selezionato: ${task.runner} — prefix inizializzata con ${wineEnv.wineBin} in ${wineEnv.winePrefixPath}`
+          : `[AMAZON] Runner "${task.runner}" non risolto sul disco — fallback su wine di sistema.`
+      );
+    }
+    ensureDir(wineEnv.winePrefixPath);
+
+    const prefixResult = await prepareWinePrefix(
+      task,
+      {
+        prefixPath: wineEnv.winePrefixPath,
+        disableWineSync: task.disableWineSync,
+        wineBootTimeoutMs: WINEBOOT_TIMEOUT_MS,
+        wineBin: wineEnv.wineBin,
+        wineserverBin: wineEnv.wineserverBin,
+      },
+      (t, bin, args, env, timeout) => this.spawnWithTimeout(t, bin, args, { ...env, ...wineEnv.extraEnv }, timeout),
+      (t, level, msg) => this.log(t, level, msg),
+    );
+    if (!prefixResult.success) {
+      throw new Error(prefixResult.error ?? '[AMAZON] Preparazione prefix fallita');
+    }
+
+    // Step 3: Dipendenze winetricks — nessun lookup Known Fixes Heroic
+    // per ora (vedi commento in cima alla funzione): usa direttamente i
+    // verb configurati/selezionati dall'utente.
+    const amazonVerbs = filterVerbsForEnv(task.winetricksVerbs);
+    if (amazonVerbs.length > 0 && binaryExists('winetricks')) {
+      this.update(task, { status: 'installing_deps', progress: 0 });
+      for (let i = 0; i < amazonVerbs.length; i++) {
+        const verb = amazonVerbs[i];
+        this.update(task, {
+          progress:   Math.round((i / amazonVerbs.length) * 100),
+          phaseLabel: `Installazione dipendenze: ${verb}...`,
+        });
+        await this.spawnWithTimeout(task, 'winetricks', ['--unattended', verb], {
+          WINEPREFIX:     wineEnv.winePrefixPath,
+          WINEDEBUG:      '-all',
+          WINETRICKS_GUI: 'none',
+          ...wineEnv.extraEnv,
+        }, winetrickTimeoutFor(verb));
+      }
+    }
+
+    // Risoluzione exe da filesystem — nessun equivalente verificato di
+    // `legendary info --json` per nile, vedi commento in cima alla
+    // funzione.
+    const exePath = findMainExe(task.installPath) ?? undefined;
+    this.log(task, 'system', `[AMAZON] Exe da filesystem: ${exePath ?? 'non trovato'}`);
+
+    this.update(task, {
+      status: 'completed',
+      progress: 100,
+      phaseLabel: PHASE_LABELS.completed,
+      executablePath: exePath,
       prefixPath: task.prefixPath,
     });
     this.procs.delete(task.gameId);
