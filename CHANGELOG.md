@@ -3766,3 +3766,17 @@ Segnalato dall'utente: nell'overlay di un gioco Amazon Games mancavano il widget
 ### Verifica
 
 `tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.115-dev.1 — Amazon Games: fix disinstallazione (file mai rimossi, nile mai avvisato)
+
+Segnalato dall'utente: disinstallare un gioco Amazon Games dalla Dashboard lo marcava correttamente come "non installato" nel DB, ma non rimuoveva alcun file/cartella reale da `~/Games/Amazon Games/`.
+
+**Causa confermata**: `gameManager.ts`, funzione `uninstallGame()` — il calcolo di quale cartella cancellare (`storeDir`) gestiva solo `'GOG Galaxy'`/`'Epic Games'`, con `'Amazon Games'` che cadeva sempre nel ramo `null` — l'intero blocco di rimozione file veniva saltato, finendo nel log come "store non gestito".
+
+**Fix**: aggiunta `'Amazon Games'` al calcolo di `storeDir` (`~/Games/Amazon Games/<gameId>/`, stessa cartella realmente usata in fase di installazione da `storeDir()` in `downloadManager.ts`). Aggiunta anche una chiamata reale a `nile uninstall <productId>` prima della pulizia file, sullo stesso modello già esistente per Epic (`legendary --yes uninstall`) — senza questa chiamata, il manifest interno di nile continuava a credere il gioco installato al vecchio path anche dopo una cancellazione manuale dei file, e questo è il sospetto principale per il terzo problema segnalato nello stesso turno (cartella `files` vuota dopo un'installazione apparentemente riuscita con GE-Proton11-1 + dotnet48): senza mai dire a nile di disinstallare, una successiva `nile install` sullo stesso ID potrebbe non riscaricare nulla, credendo che sia già a posto.
+
+Non ancora confermato dall'utente se questo risolve completamente anche il problema 3 — da riverificare con un ciclo completo disinstalla/reinstalla dopo questo fix.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.

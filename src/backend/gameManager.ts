@@ -1158,6 +1158,31 @@ class GameManager {
       }
     }
 
+    // v1.1.115-dev.1 — bug reale segnalato dall'utente: per Amazon Games
+    // questa chiamata non esisteva affatto (uninstallGame() del plugin era
+    // solo uno stub che restituiva un messaggio senza eseguire nulla) —
+    // stesso identico problema per cui era stata aggiunta la chiamata a
+    // legendary sopra per Epic (v0.99.35): senza dire a nile di
+    // disinstallare, il suo manifest interno continua a credere che il
+    // gioco sia installato al vecchio path, anche dopo aver cancellato i
+    // file a mano — molto probabilmente la causa reale del terzo problema
+    // segnalato (cartella "files" vuota dopo una reinstallazione:
+    // sospetto che nile, credendo il gioco già installato secondo il suo
+    // manifest, salti il download vero e proprio).
+    if (game.store === 'Amazon Games') {
+      const productId = game.id.replace(/^amazon-/, '');
+      try {
+        const { execSync } = require('child_process');
+        execSync(`nile uninstall ${productId}`, {
+          stdio:   'ignore',
+          timeout: 30_000,
+        });
+        this.addLog(`[UNINSTALL] ${game.title} — nile uninstall completato.`, 'system');
+      } catch (err) {
+        this.addLog(`[UNINSTALL] ${game.title} — nile uninstall non riuscito o non necessario: ${err}`, 'system');
+      }
+    }
+
     // Determina la cartella da rimuovere in base allo store
     const { homedir } = require('os');
     const { join }    = require('path');
@@ -1167,6 +1192,14 @@ class GameManager {
       ? join(homedir(), 'Games', 'GOG',  game.id.replace(/^gog-/, ''))
       : game.store === 'Epic Games'
       ? join(homedir(), 'Games', 'Epic', game.id.replace(/^epic-/, ''))
+      : game.store === 'Amazon Games'
+      // v1.1.115-dev.1 — mancava: era null, quindi l'intero blocco di
+      // rimozione file sotto veniva saltato per Amazon (finiva sempre nel
+      // ramo "store non gestito"). Stessa cartella usata da storeDir() in
+      // downloadManager.ts: GAMES_ROOT/Amazon Games/<gameId con prefisso
+      // amazon- incluso, vedi slugFromId() — non ripulito qui, coerenza
+      // col path realmente usato in fase di installazione).
+      ? join(homedir(), 'Games', 'Amazon Games', game.id)
       : null;
 
     // Caso davvero vuoto: già segnato non installato E nessuna cartella
