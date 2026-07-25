@@ -187,6 +187,23 @@ db.exec(`
     budget_warned_month  TEXT
   );
 
+  -- v1.1.120-dev.1 — Step: Cloud Backup. Stesso pattern di
+  -- ai_provider_credentials sopra: un solo provider attivo alla volta
+  -- (mutua esclusività applicata in upsertCloudBackupCredential, stesso
+  -- meccanismo di upsertAiProviderCredential). client_id/client_secret
+  -- sono le credenziali OAuth "Desktop app" che l'utente crea sulla
+  -- console del proprio provider (Google Cloud Console per Drive) — mai
+  -- condivise/hardcoded nel codice, ogni utente usa le proprie. Il
+  -- refresh token OAuth vive invece in tokens.json (permessi 600), non
+  -- qui — stesso principio di separazione già in uso per gog/epic/ecc.
+  CREATE TABLE IF NOT EXISTS cloud_backup_credentials (
+    provider_id     TEXT    PRIMARY KEY,
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    client_id       TEXT,
+    client_secret   TEXT,
+    last_backup_at  TEXT
+  );
+
   -- v0.99.90 — Step 15d: log di utilizzo token, una riga per chiamata a
   -- un provider AI (qualunque esito: suggestion/clarify/give_up, tutti
   -- consumano token allo stesso modo). Un log invece di un semplice
@@ -1103,6 +1120,104 @@ export function upsertAiProviderCredential(cred: AiProviderCredential): void {
  */
 export function markAiBudgetWarned(providerId: string, month: string): void {
   db.prepare('UPDATE ai_provider_credentials SET budget_warned_month = ? WHERE provider_id = ?').run(month, providerId);
+}
+
+// ---------------------------------------------------------------------------
+// Cloud Backup — v1.1.120-dev.1
+// ---------------------------------------------------------------------------
+
+export interface CloudBackupCredential {
+  providerId:    string;
+  enabled:       boolean;
+  clientId?:     string;
+  clientSecret?: string;
+  lastBackupAt?: string;
+}
+
+export function getCloudBackupCredential(providerId: string): CloudBackupCredential | undefined {
+  const row = db.prepare('SELECT * FROM cloud_backup_credentials WHERE provider_id = ?').get(providerId) as any;
+  if (!row) return undefined;
+  return {
+    providerId:    row.provider_id,
+    enabled:       row.enabled === 1,
+    clientId:      row.client_id     ?? undefined,
+    clientSecret:  row.client_secret ?? undefined,
+    lastBackupAt:  row.last_backup_at ?? undefined,
+  };
+}
+
+export function getAllCloudBackupCredentials(): CloudBackupCredential[] {
+  return (db.prepare('SELECT * FROM cloud_backup_credentials').all() as any[]).map(row => ({
+    providerId:    row.provider_id,
+    enabled:       row.enabled === 1,
+    clientId:      row.client_id     ?? undefined,
+    clientSecret:  row.client_secret ?? undefined,
+    lastBackupAt:  row.last_backup_at ?? undefined,
+  }));
+}
+
+/**
+ * v1.1.120-dev.1 — stessa mutua esclusività di upsertAiProviderCredential:
+ * un solo servizio di cloud backup attivo alla volta, richiesto
+ * dall'utente ("un servizio alla volta come per l'AI Advisor").
+ */
+export function upsertCloudBackupCredential(cred: CloudBackupCredential): void {
+  if (cred.enabled) {
+    db.prepare('UPDATE cloud_backup_credentials SET enabled = 0 WHERE provider_id != ?').run(cred.providerId);
+  }
+  db.prepare(`
+    INSERT INTO cloud_backup_credentials (provider_id, enabled, client_id, client_secret, last_backup_at)
+    VALUES (@providerId, @enabled, @clientId, @clientSecret, @lastBackupAt)
+    ON CONFLICT(provider_id) DO UPDATE SET
+      enabled         = excluded.enabled,
+      client_id       = excluded.client_id,
+      client_secret   = excluded.client_secret,
+      last_backup_at  = excluded.last_backup_at
+  `).run({
+    providerId:    cred.providerId,
+    enabled:       cred.enabled ? 1 : 0,
+    clientId:      cred.clientId     ?? null,
+    clientSecret:  cred.clientSecret ?? null,
+    lastBackupAt:  cred.lastBackupAt ?? null,
+  });
+}
+
+/**
+ * v1.1.121-dev.1 — Cloud Backup: righe grezze (colonne snake_case native,
+ * non convertite in camelCase) per l'esportazione nel bundle — non serve
+ * passare per il tipo CompatibilityProfile qui, verrebbero riscritte
+ * dinamicamente con le stesse colonne in importCompatProfilesRaw().
+ */
+export function exportCompatProfilesRaw(): any[] {
+  return db.prepare('SELECT * FROM compat_profiles').all();
+}
+
+/**
+ * Ripristina righe esportate da exportCompatProfilesRaw(). Una riga alla
+ * volta con try/catch: se il gioco referenziato (game_id, FOREIGN KEY su
+ * games) non esiste ancora — libreria non ancora scansionata sulla nuova
+ * installazione — quella riga viene saltata invece di far fallire
+ * l'intero ripristino. Le colonne sono lette dinamicamente dalla riga
+ * stessa (Object.keys), non hardcoded: stesso schema di chi ha fatto
+ * l'esportazione, per costruzione.
+ */
+export function importCompatProfilesRaw(rows: any[]): { imported: number; skipped: number } {
+  let imported = 0;
+  let skipped = 0;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const cols = Object.keys(row);
+    if (cols.length === 0) { skipped++; continue; }
+    const colList = cols.join(', ');
+    const placeholders = cols.map(c => `@${c}`).join(', ');
+    try {
+      db.prepare(`INSERT OR REPLACE INTO compat_profiles (${colList}) VALUES (${placeholders})`).run(row);
+      imported++;
+    } catch (e) {
+      writeLog('warning', `[CloudBackup] Riga compat_profiles saltata (${row.game_id ?? '?'}): ${e}`);
+      skipped++;
+    }
+  }
+  return { imported, skipped };
 }
 
 // v1.1.12 — mancava un modo per cancellare una API key salvata: prima

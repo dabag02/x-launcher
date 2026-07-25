@@ -5,6 +5,7 @@ import path from 'path';
 import { MOCK_LOGS } from '../mockData';
 import { StorePlugin } from './plugins/base';
 import { GOGPlugin, isJunkGogSlug } from './plugins/gogPlugin';
+import { ALL_KNOWN_WINE_VERBS } from '../wineVerbs';
 import { SteamPlugin } from './plugins/steamPlugin';
 import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
@@ -12,7 +13,7 @@ import { BattlenetPlugin } from './plugins/battlenetPlugin';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
 import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary } from './runners/implementations';
-import { downloadManager, resolveGogExe } from './downloadManager';
+import { downloadManager, resolveGogExe, resolveRunnerWineEnv } from './downloadManager';
 import { metadataManager } from './metadataManager';
 import { compatibilityManager } from './compatibilityManager';
 import * as db from './db';
@@ -955,21 +956,58 @@ class GameManager {
     db.recordGameLaunch(id);
 
     // Se il gioco ha una prefix e ci sono verbs nel profilo compat,
-    // installa quelli eventualmente aggiunti post-installazione prima di avviare
+    // installa quelli eventualmente aggiunti post-installazione prima di avviare.
+    // v1.1.117-dev.1 — bug reale corretto: prima usava sempre
+    // `WINEPREFIX: game.prefixPath` con wine di sistema, indipendentemente
+    // dal runner selezionato — per un runner Proton la prefix vera vive
+    // in `<prefixPath>/pfx` (non nella cartella "contenitore" stessa) e
+    // serve il binario wine INCLUSO in quella build di Proton, non quello
+    // di sistema (stesso identico calcolo già usato per l'installazione,
+    // resolveRunnerWineEnv — ora condiviso invece di duplicato/sbagliato
+    // qui). Prima di questo fix, il "ricontrollo dipendenze ad ogni
+    // lancio" veniva silenziosamente eseguito nel posto sbagliato per
+    // qualunque gioco lanciato con un runner Proton/Proton-GE.
     if (game.prefixPath && profile?.winetricksVerbs && profile.winetricksVerbs.length > 0) {
+      const wineEnv = resolveRunnerWineEnv(game.runner, game.prefixPath);
       try {
         const { execSync } = require('child_process');
         const { existsSync } = require('fs');
-        if (existsSync(game.prefixPath) && execSync('which winetricks', { encoding: 'utf-8' }).trim()) {
+        const prefixAlreadyExists = existsSync(wineEnv.winePrefixPath);
+        if (!prefixAlreadyExists) {
+          // v1.1.117-dev.1 — richiesta utente: quando si cambia runner
+          // per un gioco già installato/giocato, la prefix del nuovo
+          // runner è vuota — nessun salvataggio, nessuna impostazione
+          // pregressa. Deliberatamente NON copiamo alcuna cartella
+          // (rischio di corruzione fra generazioni Wine/Proton diverse,
+          // vedi discussione) — solo un avviso esplicito, l'utente
+          // ripristina a mano se lo desidera. Il ricontrollo dipendenze
+          // sotto viene comunque saltato qui (la prefix non è ancora
+          // stata inizializzata da wineboot — lo farà runner.launch()
+          // subito dopo): riapplicare i verb su un secondo lancio con lo
+          // stesso runner funzionerà normalmente una volta che la
+          // prefix esiste.
+          this.addLog(`[LAUNCH] Prefix nuova per il runner "${game.runner}" — salvataggi/impostazioni di un runner precedente non saranno presenti qui. Ripristinali a mano se necessario.`, 'system');
+          try {
+            const { notificationEngine } = require('./notificationEngine');
+            notificationEngine.emit({
+              type: 'system',
+              level: 'warning',
+              message: `${game.title}: stai usando il runner "${game.runner}" per la prima volta — è una prefix nuova, senza i salvataggi/impostazioni di un runner precedente eventualmente usato per questo gioco. Puoi ripristinarli a mano se li avevi.`,
+            });
+          } catch (e) {
+            this.addLog(`[LAUNCH] Notifica prefix nuova non inviata: ${e}`, 'system');
+          }
+        } else if (execSync('which winetricks', { encoding: 'utf-8' }).trim()) {
           for (const verb of profile.winetricksVerbs) {
             this.addLog(`[LAUNCH] Verifica dipendenza: ${verb}`, 'system');
             try {
               execSync(`winetricks --unattended ${verb}`, {
                 env: {
                   ...process.env,
-                  WINEPREFIX:     game.prefixPath,
+                  WINEPREFIX:     wineEnv.winePrefixPath,
                   WINEDEBUG:      '-all',
                   WINETRICKS_GUI: 'none',
+                  ...wineEnv.extraEnv,
                 },
                 timeout: 300_000,
               });
@@ -983,6 +1021,74 @@ class GameManager {
         // winetricks non disponibile — ignora silenziosamente
       }
     }
+
+    // v1.1.118-dev.1 — richiesta utente: i verb installati a mano da
+    // terminale (es. `winetricks d3d9 d3dcompiler_43` direttamente sulla
+    // prefix, non tramite la dashboard) non finivano mai nel profilo
+    // salvato — X-Launcher può tracciare solo ciò che passa dalla propria
+    // interfaccia. `winetricks list-installed` (comando ufficiale,
+    // documentato) elenca TUTTI i verb realmente applicati a una prefix,
+    // indipendentemente da come sono stati installati — usato qui per
+    // sincronizzare il profilo salvato con la realtà della prefix, ad
+    // ogni lancio: un'aggiunta manuale, una volta che il gioco è stato
+    // lanciato con successo, finisce nel DB da sola al lancio successivo
+    // (e da questo stesso, per i lanci successivi), senza dover toccare
+    // le checkbox a mano nell'overlay. Indipendente dal blocco sopra:
+    // gira anche se il profilo non aveva ancora nessun verb tracciato.
+    if (game.prefixPath) {
+      try {
+        const { execSync } = require('child_process');
+        const { existsSync } = require('fs');
+        const wineEnv = resolveRunnerWineEnv(game.runner, game.prefixPath);
+        if (existsSync(wineEnv.winePrefixPath) && execSync('which winetricks', { encoding: 'utf-8' }).trim()) {
+          const listOutput = execSync('winetricks list-installed', {
+            encoding: 'utf-8',
+            env: {
+              ...process.env,
+              WINEPREFIX: wineEnv.winePrefixPath,
+              WINEDEBUG: '-all',
+              ...wineEnv.extraEnv,
+            },
+            timeout: 30_000,
+          });
+          // v1.1.119-dev.1 — bug reale segnalato dall'utente con un
+          // output DB alla mano: `winetricks list-installed` non stampa
+          // solo nomi di verb — stampa anche il proprio banner di avvio
+          // ("Using winetricks <versione> - sha256sum: ...") e i singoli
+          // font installati come componenti separati di `corefonts`
+          // (andale, arial, comicsans, ecc.). Il filtro precedente
+          // (`!l.startsWith('#')`) era troppo permissivo. Invece di
+          // inseguire ogni riga indesiderata con altre esclusioni (fragile,
+          // non finirebbe mai), si accetta nel DB SOLO ciò che è nel
+          // nostro stesso elenco di verb riconosciuti (ALL_KNOWN_WINE_VERBS,
+          // condiviso con l'overlay via wineVerbs.ts) — qualunque altra
+          // cosa list-installed stampi viene scartata a prescindere.
+          const installedVerbs = listOutput
+            .split('\n')
+            .map((l: string) => l.trim())
+            .filter((l: string) => ALL_KNOWN_WINE_VERBS.includes(l));
+          // v1.1.119-dev.1 — ripulisce anche ciò che era già stato scritto
+          // in precedenza (robaccia da una sincronizzazione fatta prima
+          // di questo fix, come il caso reale segnalato dall'utente): non
+          // basta filtrare le nuove rilevazioni, altrimenti banner/font
+          // già salvati resterebbero lì per sempre (l'unione precedente
+          // si limitava ad aggiungere, mai a togliere).
+          const trackedVerbsClean: string[] = (profile?.winetricksVerbs ?? []).filter((v: string) => ALL_KNOWN_WINE_VERBS.includes(v));
+          const newlyFound = installedVerbs.filter((v: string) => !trackedVerbsClean.includes(v));
+          const droppedJunk = (profile?.winetricksVerbs ?? []).length - trackedVerbsClean.length;
+          if (newlyFound.length > 0 || droppedJunk > 0) {
+            const merged = [...trackedVerbsClean, ...newlyFound];
+            const currentProfile = profile ?? { fsr: false, gameMode: false, mangohud: 0 as const, eac: false, battleye: false };
+            db.upsertCompatProfile(id, { ...currentProfile, winetricksVerbs: merged });
+            if (newlyFound.length > 0) this.addLog(`[LAUNCH] Rilevati verb installati manualmente, aggiunti al profilo: ${newlyFound.join(', ')}`, 'system');
+            if (droppedJunk > 0) this.addLog(`[LAUNCH] Ripulite ${droppedJunk} voci non riconosciute dal profilo (banner/font di winetricks salvati per errore prima del fix).`, 'system');
+          }
+        }
+      } catch (e) {
+        this.addLog(`[LAUNCH] Rilevamento verb installati manualmente non riuscito (winetricks list-installed): ${e}`, 'system');
+      }
+    }
+
     try {
       // Log dettagliato pre-lancio: runner version + exe
       const runnerVersion = await runner.version().catch(() => 'n/a');

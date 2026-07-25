@@ -377,6 +377,24 @@ class KnowledgeBase {
     return this.store.getAll();
   }
 
+  /**
+   * v1.1.121-dev.1 — Cloud Backup: importa in blocco voci esportate da un
+   * backup precedente. Riusa lo stesso upsert() già collaudato dello
+   * store interno (INSERT ... ON CONFLICT DO UPDATE), una entry alla
+   * volta con try/catch — una riga malformata/incompatibile viene
+   * saltata invece di far fallire l'intero ripristino.
+   */
+  importEntries(entries: KnowledgeEntry[]): number {
+    let imported = 0;
+    for (const e of entries) {
+      try {
+        this.store.upsert(e);
+        imported++;
+      } catch { /* riga incompatibile — salta, non blocca il resto */ }
+    }
+    return imported;
+  }
+
   delete(id: string): void {
     this.store.delete(id);
   }

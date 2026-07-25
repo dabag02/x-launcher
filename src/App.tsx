@@ -47,12 +47,14 @@ import {
   HardDrive,
   CircuitBoard,
   MemoryStick,
-  Laptop
+  Laptop,
+  Cloud
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { MOCK_STORES, MOCK_GAMES, MOCK_LOGS } from './mockData';
 import { Game, StoreType, RunnerType, LogEntry, ViewState, Theme, AppNotification } from './types';
+import { DEFAULT_WINE_VERBS, OPTIONAL_WINE_VERBS } from './wineVerbs';
 import { FocusProvider, Focusable, useFocus } from './components/FocusProvider';
 import { NavDebugOverlay } from './components/NavDebugOverlay';
 import { AudioProvider, useAudio } from './components/AudioProvider';
@@ -579,6 +581,23 @@ function MainApp() {
     tokenBudget?: number;
     usageThisMonth?: number;
   }>>({});
+  // v1.1.122-dev.1 — Cloud Backup: stesso principio di cloudProviderState
+  // sopra (AI Advisor), ma per i provider di backup su cloud. Un solo
+  // provider oggi (Google Drive), altri in futuro — struttura già
+  // generica per non doverla riscrivere quando se ne aggiunge un secondo.
+  const [cloudBackupProviders, setCloudBackupProviders] = useState<Record<string, {
+    name: string;
+    description: string;
+    enabled: boolean;
+    hasCredentials: boolean;
+    authenticated: boolean;
+    lastBackupAt: string | null;
+    clientIdDraft: string;
+    clientSecretDraft: string;
+    connecting: boolean;
+    actionStatus: { success: boolean; message: string } | null;
+    actionRunning: 'backup' | 'restore' | null;
+  }>>({});
   const [runnerInstallProgress, setRunnerInstallProgress] = useState<Record<string, string[]>>({});
   const [runnerInstalling, setRunnerInstalling] = useState<string | null>(null);
   const [runnerUninstalling, setRunnerUninstalling] = useState<string | null>(null);
@@ -628,8 +647,9 @@ function MainApp() {
   // winetricksVerbs/useKnownFixes.
   const [customEnvPersistentFlags, setCustomEnvPersistentFlags] = useState<Record<string, boolean>>({});
   // Step 10 — dipendenze Winetricks selezionate nell'overlay
-  const DEFAULT_WINE_VERBS = ['vcrun2022', 'dxvk', 'vkd3d', 'corefonts'];
-  const OPTIONAL_WINE_VERBS = ['vcrun2019', 'vcrun2017', 'vcrun2015', 'xna40', 'd3dcompiler_47', 'physx', 'msxml6', 'mfc140', 'dotnet48', 'dotnet40', 'dotnet35'];
+  // v1.1.119-dev.1 — spostate in wineVerbs.ts, condiviso col backend
+  // (serve anche a gameManager.ts per filtrare l'output di
+  // `winetricks list-installed`, vedi commento lì).
   const [winetricksVerbs, setWinetricksVerbs] = useState<string[]>(DEFAULT_WINE_VERBS);
   // v1.1.109-dev.1 — richiesta utente: vista compatta di default (solo i
   // verb consigliati) per accorciare la navigazione nell'overlay; quella
@@ -2992,6 +3012,14 @@ Vuoi provare ad avviarlo comunque?`);
     const key = pluginId.replace(/[^a-zA-Z0-9]/g, '_');
     return t(`storePluginDescriptions.${key}`, fallback);
   }, [t]);
+  // v1.1.124-dev.1 — stesso identico pattern di translateStorePluginDescription
+  // sopra: la description dei provider Cloud Backup arriva dal backend
+  // sempre in italiano (campo readonly della classe del provider) — senza
+  // questa traduzione l'inglese mostrerebbe comunque il testo italiano.
+  const translateCloudBackupDescription = useCallback((providerId: string, fallback: string) => {
+    const key = providerId.replace(/[^a-zA-Z0-9]/g, '_');
+    return t(`cloudBackupDescriptions.${key}`, fallback);
+  }, [t]);
   const translateInputPluginDescription = useCallback((pluginId: string, fallback: string) => {
     return t(`inputPluginDescriptions.${pluginId}`, fallback);
   }, [t]);
@@ -3461,6 +3489,58 @@ Vuoi provare ad avviarlo comunque?`);
       .catch(() => {});
   }, []);
 
+  // v1.1.122-dev.1 — Cloud Backup: stesso ciclo di refresh (boot + ogni
+  // apertura di Impostazioni) già usato per gli altri stati di questa
+  // tab. Preserva i draft di Client ID/Secret già digitati in questa
+  // sessione, stesso principio di apiKeyDraft per l'AI Advisor.
+  const refreshCloudBackupProviders = React.useCallback(() => {
+    fetch('/api/cloud-backup/providers')
+      .then(r => r.ok ? r.json() : [])
+      .then((providers: any[]) => {
+        setCloudBackupProviders(prev => {
+          const next: typeof prev = {};
+          for (const p of providers) {
+            next[p.providerId] = {
+              name:              p.name,
+              description:       p.description,
+              enabled:           p.enabled,
+              hasCredentials:    p.hasCredentials,
+              authenticated:     p.authenticated,
+              lastBackupAt:      p.lastBackupAt,
+              clientIdDraft:     prev[p.providerId]?.clientIdDraft ?? '',
+              clientSecretDraft: prev[p.providerId]?.clientSecretDraft ?? '',
+              connecting:        prev[p.providerId]?.connecting ?? false,
+              actionStatus:      prev[p.providerId]?.actionStatus ?? null,
+              actionRunning:     prev[p.providerId]?.actionRunning ?? null,
+            };
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { refreshCloudBackupProviders(); }, [refreshCloudBackupProviders]);
+  useEffect(() => { if (showSettings) refreshCloudBackupProviders(); }, [showSettings, refreshCloudBackupProviders]);
+
+  // v1.1.122-dev.1 — polling durante il login OAuth: stesso principio di
+  // authPolling per gli store store, ma qui il completamento è rilevato
+  // controllando authenticated invece di un messaggio testuale, dato che
+  // login() ritorna appena il browser è aperto, non a login completato.
+  useEffect(() => {
+    const connectingId = Object.entries(cloudBackupProviders).find(([, p]) => p.connecting)?.[0];
+    if (!connectingId) return;
+    const interval = setInterval(async () => {
+      const res = await fetch('/api/cloud-backup/providers').then(r => r.ok ? r.json() : []).catch(() => []);
+      const found = res.find((p: any) => p.providerId === connectingId);
+      if (found?.authenticated) {
+        clearInterval(interval);
+        refreshCloudBackupProviders();
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [cloudBackupProviders, refreshCloudBackupProviders]);
+
   useEffect(() => { refreshOllamaModels(); }, [refreshOllamaModels]);
   useEffect(() => { if (showSettings) refreshOllamaModels(); }, [showSettings, refreshOllamaModels]);
 
@@ -3484,6 +3564,53 @@ Vuoi provare ad avviarlo comunque?`);
       }),
     }).then(() => refreshOllamaModels()).catch(() => {});
   }, [cloudProviderState, refreshOllamaModels]);
+
+  // v1.1.122-dev.1 — Cloud Backup: stesso principio di saveCloudProvider
+  // sopra (aggiornamento parziale, un campo omesso preserva quello già
+  // salvato — vedi la route server.ts corrispondente).
+  const saveCloudBackupProvider = React.useCallback((id: string, patch: { enabled?: boolean; clientId?: string; clientSecret?: string }) => {
+    const state = cloudBackupProviders[id];
+    fetch(`/api/cloud-backup/providers/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled:      patch.enabled ?? state?.enabled ?? false,
+        clientId:     patch.clientId,
+        clientSecret: patch.clientSecret,
+      }),
+    }).then(() => refreshCloudBackupProviders()).catch(() => {});
+  }, [cloudBackupProviders, refreshCloudBackupProviders]);
+
+  const connectCloudBackupProvider = React.useCallback((id: string) => {
+    setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], connecting: true } }));
+    fetch(`/api/cloud-backup/providers/${id}/login`, { method: 'POST' })
+      .then(r => r.json())
+      .then((res: { success: boolean; message: string }) => {
+        if (!res.success) {
+          setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], connecting: false, actionStatus: res } }));
+        }
+        // Se success, resta "connecting" — lo spegne il polling in
+        // useEffect sopra appena isAuthenticated diventa vero.
+      })
+      .catch(() => setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], connecting: false } })));
+  }, []);
+
+  const disconnectCloudBackupProvider = React.useCallback((id: string) => {
+    fetch(`/api/cloud-backup/providers/${id}/logout`, { method: 'POST' })
+      .then(() => refreshCloudBackupProviders())
+      .catch(() => {});
+  }, [refreshCloudBackupProviders]);
+
+  const runCloudBackupAction = React.useCallback((id: string, action: 'backup' | 'restore') => {
+    setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], actionRunning: action, actionStatus: null } }));
+    fetch(`/api/cloud-backup/${action}`, { method: 'POST' })
+      .then(r => r.json())
+      .then((res: { success: boolean; message: string }) => {
+        setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], actionRunning: null, actionStatus: res } }));
+        if (res.success) refreshCloudBackupProviders();
+      })
+      .catch((e) => setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], actionRunning: null, actionStatus: { success: false, message: String(e) } } })));
+  }, [refreshCloudBackupProviders]);
 
   const testCloudProvider = React.useCallback((id: string) => {
     setCloudProviderState(prev => ({ ...prev, [id]: { ...prev[id], testing: true, testResult: null } }));
@@ -5140,7 +5267,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <Focusable group="notifications" id={`notif-ok-${notif.id}`} onEnter={() => resolveNotification(notif.id, true)}>
                                   {(isFocused) => (
                                     <button className={cn(
-                                      "flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all",
+                                      "flex-1 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white text-center transition-all",
                                       isFocused ? "bg-green-500 scale-[1.03]" : "bg-green-600"
                                     )}>{t('notifications:itWorked')}</button>
                                   )}
@@ -5148,7 +5275,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <Focusable group="notifications" id={`notif-ko-${notif.id}`} onEnter={() => resolveNotification(notif.id, false)}>
                                   {(isFocused) => (
                                     <button className={cn(
-                                      "flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all",
+                                      "flex-1 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white text-center transition-all",
                                       isFocused ? "bg-red-600 scale-[1.03]" : "bg-red-700/60"
                                     )}>{t('notifications:itDidNotWork')}</button>
                                   )}
@@ -5174,7 +5301,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   >
                                     {(isFocused) => (
                                       <button className={cn(
-                                        "flex-1 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-white transition-all",
+                                        "flex-1 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-white text-center transition-all",
                                         isFocused ? "bg-blue-500 scale-[1.03]" : "bg-blue-600"
                                       )}>{notif.primaryAction.label}</button>
                                     )}
@@ -5183,7 +5310,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <Focusable group="notifications" id={`notif-secondary-${notif.id}`} onEnter={() => dismissNotification(notif.id)}>
                                   {(isFocused) => (
                                     <button className={cn(
-                                      "flex-1 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all",
+                                      "flex-1 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-center transition-all",
                                       isFocused ? "bg-white/25" : "bg-white/10"
                                     )}>{notif.secondaryAction?.label ?? t('notifications:close')}</button>
                                   )}
@@ -5463,11 +5590,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               <div ref={settingsBodyRef} className="flex-1 min-h-0 overflow-y-auto p-12 custom-scrollbar">
                 {activeSettingsTab === 'accounts' ? (
                   /* ── Store Accounts tab ── */
+                  /* v1.1.122-dev.1 — Fragment necessario: da qui in poi
+                     questo ramo contiene DUE elementi fratelli (griglia
+                     store + sezione Cloud Backup sotto), non più uno solo. */
+                  <>
                   <div className="grid grid-cols-2 gap-8">
                     {stores.filter(s => {
                       const ps = pluginStateMap.get(s.id);
                       return !ps || ps.enabled;
-                    }).map(store => {
+                    }).map((store, idx, arr) => {
                       const isWaiting = authPolling === store.id;
                       const msg       = authMessage[store.id];
                       const url       = authUrl[store.id];
@@ -5480,6 +5611,47 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       // fallirebbe sempre.
                       const noLogout  = store.id === 'Steam';
                       const isRowFocused = focusedId === `store-connect-${store.id}` || focusedId === `store-cancel-${store.id}` || focusedId === `store-unlink-${store.id}`;
+                      // v1.1.123-dev.1 — bug reale segnalato dall'utente:
+                      // la sezione Cloud Backup sotto la griglia store era
+                      // raggiungibile scendendo solo da alcune card, in
+                      // modo incoerente (dipendeva da cosa fosse già
+                      // visibile a schermo) — lo scoring geometrico da
+                      // solo non basta quando la card sottostante richiede
+                      // scroll, o quando (griglia a 2 colonne) una card non
+                      // ha nulla direttamente sotto di sé nella propria
+                      // colonna (es. l'ultima riga con un solo elemento).
+                      // Stesso principio già usato altrove in questo
+                      // progetto: qualunque card per cui non esiste un
+                      // elemento nella stessa colonna alla riga successiva
+                      // (idx+2 oltre la fine dell'elenco) collega
+                      // esplicitamente al primo elemento di Cloud Backup.
+                      //
+                      // v1.1.125-dev.1 — bug reale segnalato dall'utente,
+                      // causa verificata nell'ordine reale dei plugin
+                      // (gameManager.ts: GOG, Steam, Epic, Amazon,
+                      // Battle.net, Classic Console — 6 store, non 3 come
+                      // supposto scrivendo il fix precedente): Battle.net
+                      // e Classic Console sono "noLogin" e renderizzano un
+                      // div statico, MAI un Focusable — una card sopra di
+                      // loro nella stessa colonna (es. Epic sopra
+                      // Battle.net, Amazon sopra Classic Console) non ha
+                      // quindi nulla di realmente navigabile sotto,
+                      // nonostante idx+2 sia ancora dentro l'array. Il
+                      // controllo precedente considerava solo l'esistenza
+                      // dell'elemento nell'array, non la sua navigabilità
+                      // reale — per questo Epic (con Battle.net sotto)
+                      // veniva lasciato allo scoring, che senza un
+                      // candidato reale nella propria colonna finiva su
+                      // Client ID invece che sullo switch (più a sinistra
+                      // nella card, più vicino geometricamente a Epic che
+                      // sta più a sinistra della griglia store — mentre da
+                      // Amazon, più a destra, lo scoring trovava lo switch
+                      // per puro allineamento orizzontale, da cui il
+                      // percorso "funzionante" scoperto dall'utente).
+                      const NO_LOGIN_GRID_STORES = ['Battle.net', 'Classic Console'];
+                      const belowStore = arr[idx + 2];
+                      const noElementBelowInGrid = !belowStore || NO_LOGIN_GRID_STORES.includes(belowStore.id);
+                      const storeDownNeighbor = noElementBelowInGrid ? 'cloud-backup-toggle-google-drive' : undefined;
                       // Conteggi reali derivati da allGamesForAccountCounts
                       // (sempre non filtrato — vedi v1.1.20), distinti da
                       // gameCount (backend, logica composita store+plugin):
@@ -5569,6 +5741,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <Focusable
                                   group="settings"
                                   id={`store-unlink-${store.id}`}
+                                  neighbors={{ down: storeDownNeighbor }}
                                   onEnter={() => {
                                     if (pendingUnlink === store.id) {
                                       // Seconda pressione: esegue la disconnessione
@@ -5596,7 +5769,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 </Focusable>
                               )
                             ) : isWaiting ? (
-                              <Focusable group="settings" id={`store-cancel-${store.id}`} onEnter={() => { setAuthPolling(null); setAuthMessage(prev => ({ ...prev, [store.id]: '' })); }}>
+                              <Focusable group="settings" id={`store-cancel-${store.id}`} neighbors={{ down: storeDownNeighbor }} onEnter={() => { setAuthPolling(null); setAuthMessage(prev => ({ ...prev, [store.id]: '' })); }}>
                                 {(isFocused) => (
                                   <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
                                     isFocused ? "bg-red-600 text-white" : theme === 'dark' ? "bg-white/5" : "bg-gray-100 text-gray-800"
@@ -5604,7 +5777,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 )}
                               </Focusable>
                             ) : (
-                              <Focusable group="settings" id={`store-connect-${store.id}`} onEnter={() => handleLogin(store.id)}>
+                              <Focusable group="settings" id={`store-connect-${store.id}`} neighbors={{ down: storeDownNeighbor }} onEnter={() => handleLogin(store.id)}>
                                 {(isFocused) => (
                                   <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
                                     isFocused ? "bg-blue-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
@@ -5617,6 +5790,226 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       );
                     })}
                   </div>
+
+                  {/* v1.1.122-dev.1 — Cloud Backup, integrato nella tab
+                      Account su decisione esplicita dell'utente (invece
+                      di una tab dedicata — evita il problema di spazio
+                      nella barra tab in alto). Un solo provider attivo
+                      alla volta come per l'AI Advisor. */}
+                  <div className="mt-10">
+                    <h3 className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 mb-4">{t('accounts.cloudBackup')}</h3>
+                    <div className="grid grid-cols-2 gap-8">
+                      {Object.entries(cloudBackupProviders).map(([id, p]) => {
+                        const toggleId = `cloud-backup-toggle-${id}`;
+                        return (
+                          <div key={id} className={cn(
+                            "rounded-xl p-4 transition-all",
+                            p.enabled ? "ring-1 ring-purple-400/50" : "",
+                            theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                          )}>
+                            <div className="flex items-center gap-3 mb-1">
+                              <Cloud size={14} className="text-purple-400 shrink-0" />
+                              <span className="text-xs font-black uppercase tracking-tighter flex-1">{p.name}</span>
+                              <Focusable
+                                group="settings"
+                                id={toggleId}
+                                neighbors={{ down: p.enabled ? `cloud-backup-clientid-${id}` : undefined }}
+                                onEnter={() => {
+                                  const nextEnabled = !p.enabled;
+                                  setCloudBackupProviders(prev => ({ ...prev, [id]: { ...p, enabled: nextEnabled } }));
+                                  saveCloudBackupProvider(id, { enabled: nextEnabled });
+                                  play('select');
+                                }}
+                              >
+                                {(isFocused) => (
+                                  <button className={cn(
+                                    "px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border min-w-[70px] text-center transition-all shrink-0",
+                                    // v1.1.125-dev.1 — bug reale segnalato
+                                    // dall'utente: quando enabled=true non
+                                    // c'era MAI un indicatore di focus
+                                    // visibile (il ramo isFocused non
+                                    // veniva nemmeno controllato in quel
+                                    // caso) — ambiguo, sembrava che la
+                                    // selezione col controller "saltasse"
+                                    // il pulsante. Ora un anello distinto
+                                    // in entrambi gli stati.
+                                    p.enabled
+                                      ? isFocused
+                                        ? "bg-purple-600 border-purple-300 text-white ring-2 ring-purple-300 ring-offset-1 ring-offset-transparent"
+                                        : "bg-purple-600 border-purple-600 text-white"
+                                      : isFocused
+                                        ? "bg-purple-500/20 border-purple-400 text-purple-300"
+                                        : "bg-white/5 border-white/10 opacity-60"
+                                  )}>
+                                    {p.enabled ? t('aiAdvisor.active') : t('aiAdvisor.inactive')}
+                                  </button>
+                                )}
+                              </Focusable>
+                            </div>
+                            <p className={cn("text-[9px] font-mono leading-relaxed mb-3", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{translateCloudBackupDescription(id, p.description)}</p>
+
+                            {p.enabled && (
+                              <div className="space-y-2 mb-3">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0 w-20">Client ID</span>
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-backup-clientid-${id}`}
+                                    neighbors={{ up: toggleId, down: `cloud-backup-secret-${id}` }}
+                                    onEnter={() => openKeyboardForField(
+                                      `cloud-backup-clientid-${id}`,
+                                      `${p.name} — Client ID`,
+                                      p.clientIdDraft,
+                                      (val) => {
+                                        setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], clientIdDraft: val } }));
+                                        saveCloudBackupProvider(id, { clientId: val });
+                                      },
+                                      'settings'
+                                    )}
+                                  >
+                                    {(isFocused) => (
+                                      <input
+                                        type="text"
+                                        readOnly
+                                        value={p.clientIdDraft || (p.hasCredentials ? '••••••••' : '')}
+                                        placeholder={t('accounts.notConfigured')}
+                                        className={cn(
+                                          "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
+                                          theme === 'dark' ? "bg-black/40" : "bg-white",
+                                          isFocused ? "border-2 border-purple-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                        )}
+                                      />
+                                    )}
+                                  </Focusable>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0 w-20">Client Secret</span>
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-backup-secret-${id}`}
+                                    sequentialChain={`cloud-backup-row-${id}`}
+                                    chainAxis="horizontal"
+                                    // v1.1.125-dev.1 — completa la catena
+                                    // verticale esplicita del widget:
+                                    // senza questo, scendere da qui
+                                    // ricadeva sullo scoring geometrico,
+                                    // esattamente la stessa categoria di
+                                    // bug segnalata per l'ingresso dalla
+                                    // griglia store sopra. Il target
+                                    // dipende da quale blocco è
+                                    // effettivamente renderizzato sotto
+                                    // (Connetti se non ancora autenticato,
+                                    // Backup/Ripristina se già connesso).
+                                    neighbors={{ down: !p.hasCredentials ? undefined : (p.authenticated ? `cloud-backup-run-${id}` : `cloud-backup-connect-${id}`) }}
+                                    onEnter={() => openKeyboardForField(
+                                      `cloud-backup-secret-${id}`,
+                                      `${p.name} — Client Secret`,
+                                      '',
+                                      (val) => {
+                                        setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], clientSecretDraft: val } }));
+                                        saveCloudBackupProvider(id, { clientSecret: val });
+                                      },
+                                      'settings'
+                                    )}
+                                  >
+                                    {(isFocused) => (
+                                      <input
+                                        type="text"
+                                        readOnly
+                                        value={p.clientSecretDraft ? '••••••••' : (p.hasCredentials ? '••••••••' : '')}
+                                        placeholder={t('accounts.notConfigured')}
+                                        className={cn(
+                                          "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
+                                          theme === 'dark' ? "bg-black/40" : "bg-white",
+                                          isFocused ? "border-2 border-purple-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                        )}
+                                      />
+                                    )}
+                                  </Focusable>
+                                </div>
+                              </div>
+                            )}
+
+                            {p.enabled && p.hasCredentials && !p.authenticated && (
+                              <Focusable group="settings" id={`cloud-backup-connect-${id}`} neighbors={{ up: `cloud-backup-secret-${id}` }} onEnter={() => connectCloudBackupProvider(id)}>
+                                {(isFocused) => (
+                                  <button className={cn(
+                                    "w-full py-2.5 rounded-xl text-[10px] font-black uppercase italic tracking-[0.2em] transition-all",
+                                    isFocused ? "bg-purple-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                  )}>
+                                    {p.connecting ? t('accounts.waitingBrowser') : t('accounts.connectStore')}
+                                  </button>
+                                )}
+                              </Focusable>
+                            )}
+
+                            {p.authenticated && (
+                              <div className="space-y-2">
+                                <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                                  {p.lastBackupAt
+                                    ? t('accounts.lastBackup', { date: new Date(p.lastBackupAt).toLocaleString(i18n.language) })
+                                    : t('accounts.noBackupYet')}
+                                </p>
+                                <div className="flex gap-2">
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-backup-run-${id}`}
+                                    neighbors={{ up: `cloud-backup-secret-${id}`, down: `cloud-backup-disconnect-${id}` }}
+                                    sequentialChain={`cloud-backup-actions-${id}`}
+                                    chainAxis="horizontal"
+                                    onEnter={() => runCloudBackupAction(id, 'backup')}
+                                  >
+                                    {(isFocused) => (
+                                      <button className={cn(
+                                        "flex-1 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase italic tracking-[0.2em] text-center transition-all",
+                                        isFocused ? "bg-purple-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                      )}>
+                                        {p.actionRunning === 'backup' ? t('accounts.backupRunning') : t('accounts.backupNow')}
+                                      </button>
+                                    )}
+                                  </Focusable>
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-backup-restore-${id}`}
+                                    neighbors={{ up: `cloud-backup-secret-${id}`, down: `cloud-backup-disconnect-${id}` }}
+                                    sequentialChain={`cloud-backup-actions-${id}`}
+                                    chainAxis="horizontal"
+                                    onEnter={() => runCloudBackupAction(id, 'restore')}
+                                  >
+                                    {(isFocused) => (
+                                      <button className={cn(
+                                        "flex-1 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase italic tracking-[0.2em] text-center transition-all",
+                                        isFocused ? "bg-orange-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                      )}>
+                                        {p.actionRunning === 'restore' ? t('accounts.restoreRunning') : t('accounts.restoreNow')}
+                                      </button>
+                                    )}
+                                  </Focusable>
+                                </div>
+                                <Focusable group="settings" id={`cloud-backup-disconnect-${id}`} neighbors={{ up: `cloud-backup-run-${id}` }} onEnter={() => disconnectCloudBackupProvider(id)}>
+                                  {(isFocused) => (
+                                    <button className={cn(
+                                      "w-full py-2 rounded-xl text-[9px] font-black uppercase italic tracking-[0.2em] transition-all",
+                                      isFocused ? "bg-red-600/20 text-red-400" : "opacity-40"
+                                    )}>
+                                      {t('accounts.disconnect')}
+                                    </button>
+                                  )}
+                                </Focusable>
+                              </div>
+                            )}
+
+                            {p.actionStatus && (
+                              <p className={cn("text-[9px] font-mono mt-2", p.actionStatus.success ? "text-green-400" : "text-red-400")}>
+                                {p.actionStatus.success ? '✓ ' : '✗ '}{p.actionStatus.message}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  </>
                 ) : activeSettingsTab === 'engine' ? (
                   /* ── System tab ── */
                   (() => {

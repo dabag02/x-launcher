@@ -969,6 +969,104 @@ async function startServer() {
     }
   });
 
+  // v1.1.121-dev.1 — Cloud Backup. Stesso schema delle route AI Advisor
+  // sopra: GET restituisce lo stato di tutti i provider registrati in un
+  // solo colpo, POST salva le credenziali (client_id/client_secret creati
+  // dall'utente sulla console del proprio provider — mai in chiaro nella
+  // risposta GET, stesso principio già in uso per le API key AI Advisor).
+  app.get('/api/cloud-backup/providers', async (_req, res) => {
+    const { getAllCloudBackupProviders } = await import('./src/backend/cloudBackup/registry');
+    const providers = getAllCloudBackupProviders();
+    const result = await Promise.all(providers.map(async p => {
+      const cred = db.getCloudBackupCredential(p.id);
+      return {
+        providerId:    p.id,
+        name:          p.name,
+        description:   p.description,
+        enabled:       cred?.enabled ?? false,
+        hasCredentials: !!(cred?.clientId && cred?.clientSecret),
+        authenticated: await p.isAuthenticated(),
+        lastBackupAt:  cred?.lastBackupAt ?? null,
+      };
+    }));
+    res.json(result);
+  });
+
+  app.post('/api/cloud-backup/providers/:id', (req, res) => {
+    const { enabled, clientId, clientSecret } = req.body;
+    // v1.1.121-dev.1 — stesso aggiornamento parziale già collaudato per
+    // le API key AI Advisor: un campo omesso preserva il valore già
+    // salvato invece di azzerarlo (il client non ha mai il client_secret
+    // in chiaro dopo la prima configurazione).
+    const existing = db.getCloudBackupCredential(req.params.id);
+    db.upsertCloudBackupCredential({
+      providerId:    req.params.id,
+      enabled:       Boolean(enabled),
+      clientId:      clientId     || existing?.clientId,
+      clientSecret:  clientSecret || existing?.clientSecret,
+      lastBackupAt:  existing?.lastBackupAt,
+    });
+    res.json({ success: true });
+  });
+
+  app.post('/api/cloud-backup/providers/:id/login', async (req, res) => {
+    const { getCloudBackupProvider } = await import('./src/backend/cloudBackup/registry');
+    const provider = getCloudBackupProvider(req.params.id);
+    if (!provider) return res.status(404).json({ success: false, message: 'Provider sconosciuto.' });
+    const result = await provider.login();
+    res.json(result);
+  });
+
+  app.post('/api/cloud-backup/providers/:id/logout', async (req, res) => {
+    const { getCloudBackupProvider } = await import('./src/backend/cloudBackup/registry');
+    const provider = getCloudBackupProvider(req.params.id);
+    if (!provider) return res.status(404).json({ success: false, message: 'Provider sconosciuto.' });
+    const result = await provider.logout();
+    res.json(result);
+  });
+
+  // POST /api/cloud-backup/backup — costruisce il bundle (compat_profiles,
+  // Knowledge Base, app.conf, .env, avatars/) e lo carica tramite il
+  // provider attivo (mutua esclusività già garantita a monte, vedi
+  // db.upsertCloudBackupCredential — al massimo uno abilitato).
+  app.post('/api/cloud-backup/backup', async (_req, res) => {
+    const { getAllCloudBackupCredentials } = db;
+    const active = getAllCloudBackupCredentials().find(c => c.enabled);
+    if (!active) return res.json({ success: false, message: 'Nessun provider di Cloud Backup attivo.' });
+    const { getCloudBackupProvider } = await import('./src/backend/cloudBackup/registry');
+    const provider = getCloudBackupProvider(active.providerId);
+    if (!provider) return res.json({ success: false, message: 'Provider sconosciuto.' });
+    try {
+      const { buildBackupBundle, BACKUP_FILENAME } = await import('./src/backend/cloudBackup/bundle');
+      const bundle = buildBackupBundle();
+      const result = await provider.uploadBackup(bundle, BACKUP_FILENAME);
+      res.json(result);
+    } catch (e) {
+      writeLog('error', `[CloudBackup] Backup fallito: ${e}`);
+      res.json({ success: false, message: `Errore inatteso: ${e}` });
+    }
+  });
+
+  app.post('/api/cloud-backup/restore', async (_req, res) => {
+    const active = db.getAllCloudBackupCredentials().find(c => c.enabled);
+    if (!active) return res.json({ success: false, message: 'Nessun provider di Cloud Backup attivo.' });
+    const { getCloudBackupProvider } = await import('./src/backend/cloudBackup/registry');
+    const provider = getCloudBackupProvider(active.providerId);
+    if (!provider) return res.json({ success: false, message: 'Provider sconosciuto.' });
+    try {
+      const downloadResult = await provider.downloadLatestBackup();
+      if (!downloadResult.success || !downloadResult.data) {
+        return res.json({ success: false, message: downloadResult.message });
+      }
+      const { restoreFromBundle } = await import('./src/backend/cloudBackup/bundle');
+      const result = restoreFromBundle(downloadResult.data);
+      res.json(result);
+    } catch (e) {
+      writeLog('error', `[CloudBackup] Ripristino fallito: ${e}`);
+      res.json({ success: false, message: `Errore inatteso: ${e}` });
+    }
+  });
+
   // GET /api/ai/ollama/models — v0.99.90: elenca i modelli Ollama già
   // scaricati sulla macchina (via /api/tags, nativo di Ollama — nessun
   // parsing di `ollama list` da riga di comando), e serve anche come

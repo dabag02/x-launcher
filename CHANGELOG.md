@@ -3780,3 +3780,148 @@ Non ancora confermato dall'utente se questo risolve completamente anche il probl
 ### Verifica
 
 `tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.116-dev.1 — fix trasversale: winetricksVerbs non venivano mai salvati per un'installazione con soli verb di default
+
+Segnalato dall'utente per Amazon Games, ma il bug era in realtà **trasversale a GOG/Epic/Amazon**: l'overlay non mostrava spuntato nessun verb, nemmeno quelli di default effettivamente installati.
+
+**Causa reale**: `db.upsertCompatProfile()` veniva chiamata per salvare `winetricksVerbs` **solo** quando "Usa Known Fixes (Heroic)" trovava effettivamente un fix per quel gioco specifico (GOG/Epic). Se l'utente installava un gioco senza mai toccare le checkbox nell'overlay (accettando i default in silenzio) e senza Known Fixes attivo/trovato — il caso più comune — nessun salvataggio avveniva mai: il profilo compat nel DB restava senza `winetricks_verbs`, e riaprendo l'overlay in un secondo momento l'array tornava vuoto, mostrando tutte le checkbox scoperte anche per verb realmente installati.
+
+**Fix**: nuova `persistWinetricksVerbs()` condivisa, chiamata alla fine del blocco winetricks in tutte e tre le funzioni di installazione (`runGOG`, `runEpic`, `runAmazon`) — salva sempre l'elenco effettivo dei verb usati, qualunque sia la loro provenienza (default silenziosi, selezione manuale pre-installazione già salvata via `PATCH`, o override Known Fixes).
+
+**Nota separata, non un bug**: i verb installati manualmente da terminale con `winetricks` (fuori da X-Launcher) non possono comparire nell'overlay — X-Launcher può solo tracciare ciò che passa dalla propria interfaccia, non ha modo di sapere cosa viene fatto direttamente sulla prefix da un altro processo.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.117-dev.1 — cambio runner: fix reale sul ricontrollo dipendenze + notifica prefix nuova
+
+Discussione con l'utente su come gestire il cambio di runner (Wine ↔ Proton/Proton-GE) per un gioco già installato, senza duplicare manualmente le dipendenze né rischiare di corrompere le prefix mescolando cartelle fra generazioni Wine/Proton diverse (rischio concreto, vedi il bug "Prefix has an invalid version?!" di qualche turno fa).
+
+**Domanda posta dall'utente**: se `protontricks` non è installato, quale strumento usa X-Launcher per i verb winetricks su un'installazione fatta con Proton? Risposta verificata nel codice: **nessuno usa `protontricks`, né oggi né con questo fix** — `resolveRunnerWineEnv()` risolve direttamente i binari `wine64`/`wine`/`wineserver` **inclusi nella build di Proton scelta** (`<cartella-Proton>/files/bin/`) e li passa come variabili d'ambiente (`WINE`/`WINE64`/`WINESERVER`) al **`winetricks` di sistema** — lo stesso strumento usato per Wine puro, solo puntato al binario giusto. `winetricks` rispetta queste variabili indipendentemente da chi ha creato la prefix.
+
+**Bug reale trovato verificando questo**: esisteva già un meccanismo che ri-applica i verb salvati ad ogni lancio (non solo in fase di installazione) — ma usava sempre `WINEPREFIX: game.prefixPath` con wine di sistema, **indipendentemente dal runner selezionato**. Per un runner Proton, la prefix vera vive in `<prefixPath>/pfx` (non nella cartella "contenitore"), e serve il binario wine incluso in quella build di Proton — non quello di sistema. Il ricontrollo veniva quindi eseguito silenziosamente nel posto sbagliato per qualunque gioco lanciato con un runner Proton/Proton-GE, da quando questo meccanismo esiste. Corretto: `resolveRunnerWineEnv()` (già usata in fase di installazione) esportata da `downloadManager.ts` e riusata qui.
+
+**Decisione presa insieme sui salvataggi**: niente copia automatica della cartella utente fra prefix diverse (rischio di corruzione giudicato non accettabile dall'utente) — solo una **notifica esplicita** quando si lancia un gioco con un runner la cui prefix non esiste ancora, che avvisa che salvataggi/impostazioni di un runner precedente non saranno presenti, ripristinabili a mano se lo si desidera.
+
+**Limite onesto, dichiarato non nascosto**: al primo lancio con un runner nuovo, la prefix non esiste ancora nel momento in cui gira questo controllo (viene creata da `runner.launch()` subito dopo, con il proprio wineboot) — quindi i verb non vengono ancora riapplicati in quello stesso lancio, solo dal secondo lancio in poi con lo stesso runner. Non abbiamo integrato qui la creazione/wineboot esplicito della prefix prima del ricontrollo (richiederebbe adattare `prepareWinePrefix`, pensata per il flusso di installazione con la propria struttura `DownloadTask`) — la notifica comunque avvisa subito l'utente al primo lancio, indipendentemente da quando i verb vengono effettivamente riapplicati.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.118-dev.1 — rilevamento verb winetricks installati manualmente
+
+Segnalato dall'utente (dopo aver verificato con una query SQL diretta sul DB che il salvataggio dei verb tracciati dalla dashboard funziona correttamente): i verb installati a mano da terminale (`winetricks d3d9 d3dcompiler_43` direttamente sulla prefix, non tramite la dashboard — il caso reale che aveva permesso a LEGO Indiana Jones di avviarsi) non finivano mai nel profilo compat salvato. Causa strutturale, non un bug da correggere: X-Launcher può tracciare solo ciò che passa dalla propria interfaccia — non ha modo di sapere cosa viene fatto direttamente sulla prefix da un altro processo.
+
+**Soluzione**: `winetricks list-installed` — comando ufficiale e documentato di winetricks stesso — elenca tutti i verb realmente applicati a una prefix, indipendentemente da come sono stati installati. Aggiunto un controllo ad ogni lancio (`gameManager.ts`, `launchGame()`): confronta l'elenco reale (`list-installed`) con quello tracciato nel profilo compat, e se trova verb aggiunti manualmente non ancora presenti nel DB, li unisce e salva — indipendente dal blocco di ricontrollo/riapplicazione già esistente (gira anche se il profilo non aveva ancora nessun verb tracciato). Risultato: un'aggiunta manuale, una volta che il gioco è stato lanciato con successo, finisce da sola nel profilo salvato al lancio successivo, senza dover toccare le checkbox a mano nell'overlay.
+
+Aggiunti anche `d3d9` e `d3dcompiler_43` all'elenco dei verb opzionali visibili in vista estesa (`OPTIONAL_WINE_VERBS`) — proprio i due verb del caso reale che ha fatto emergere il problema, ora selezionabili proattivamente prima di un'installazione, non solo rilevabili a posteriori.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi (2 errori di tipo impliciti emersi durante lo sviluppo — dovuti a `require('child_process')` che perde la tipizzazione di `execSync` — corretti con annotazioni esplicite prima della verifica finale).
+
+## v1.1.119-dev.1 — fix reale: il rilevamento verb manuali salvava anche robaccia nel DB
+
+Segnalato dall'utente con un output DB alla mano, subito dopo aver testato il fix v1.1.118: `winetricksVerbs` conteneva, oltre ai verb reali, il banner di avvio di winetricks ("Using winetricks 20260125 - sha256sum: ... con wine-10.0 e WINEARCH=win64") e singoli nomi di font installati come componenti separati di `corefonts` (andale, arial, comicsans, courier, georgia, impact, times, trebuchet...).
+
+**Causa**: il filtro sull'output di `winetricks list-installed` (`!l.startsWith('#')`) era troppo permissivo — winetricks non stampa solo nomi di verb su quel comando.
+
+**Fix**: nuovo modulo condiviso `src/wineVerbs.ts` (stesso principio di `types.ts`, importabile sia dal frontend sia dal backend) con `DEFAULT_WINE_VERBS`/`OPTIONAL_WINE_VERBS`/`ALL_KNOWN_WINE_VERBS` — spostati lì dalle costanti locali che prima vivevano solo dentro `App.tsx`. Il filtro ora accetta nel DB **solo** ciò che è in questo elenco riconosciuto, invece di rincorrere ogni riga indesiderata una alla volta (fragile, non avrebbe mai coperto tutti i casi). Ripulita anche la robaccia **già scritta in precedenza** nel DB da chi aveva già provato il fix v1.1.118 — non bastava filtrare solo le nuove rilevazioni, altrimenti banner/font già salvati sarebbero rimasti lì per sempre (l'unione precedente si limitava ad aggiungere, mai a togliere).
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.120-dev.1 — Cloud Backup: fondamenta + flusso OAuth Google Drive (prima parte)
+
+Prima implementazione concreta della funzione discussa con l'utente (backup su cloud di compat_profiles, Knowledge Base AI Advisor, app.conf, cartella avatars/, .env — mai libreria/prefix/config legendary-lgogdownloader-nile/token/preferenze). Decisioni di disegno concordate: integrato nella tab Account esistente (non una nuova tab), backup/ripristino espliciti (mai sync automatica), un solo servizio cloud attivo alla volta come per l'AI Advisor.
+
+**Verificato prima di scrivere codice** (stesso principio già seguito per Amazon/nile): la Device Flow OAuth (pensata per TV, sembrava la scelta naturale) non supporta gli scope di Drive — confermato con una segnalazione reale di errore "invalid_scope". Il flusso out-of-band (copia-incolla del codice, come GOG/Epic/Amazon) è dismesso da Google dal 2022 per client nuovi. Il redirect loopback (`http://127.0.0.1:<porta>/...`) è invece deprecato **solo** per client Android/iOS/Chrome-app — resta il meccanismo ufficialmente raccomandato per client "Desktop app" (questo caso), senza nemmeno dover registrare la porta esatta in anticipo (RFC 8252).
+
+**Implementato in questo giro**:
+- Schema DB `cloud_backup_credentials` (stesso pattern di `ai_provider_credentials`: mutua esclusività, un provider attivo alla volta) + funzioni CRUD in `db.ts`.
+- Interfaccia condivisa `CloudBackupProvider` (`src/backend/cloudBackup/base.ts`), sul modello di `StorePlugin`/i provider AI Advisor.
+- `GoogleDriveProvider` (`src/backend/cloudBackup/googleDrive.ts`): flusso OAuth loopback completo — server HTTP locale su porta libera, apertura del Firefox già integrato nella dashboard (fallback `xdg-open`), scambio codice→token, refresh token salvato in `tokens.json` (permessi 600, mai nel DB). Scope `drive.appdata` (cartella nascosta dedicata all'app).
+
+**Ancora da fare, esplicitamente non scritto a caso**: `uploadBackup()`/`downloadLatestBackup()` — le chiamate reali all'API Drive v3 (upload multipart su `spaces=appDataFolder`, list/get per il download) restano stub con TODO. Il flusso OAuth era la parte con più incognite, verificata e scritta per prima; il resto segue in un prossimo giro, insieme alla logica di raccolta dei file da includere nel bundle (`compat_profiles` + Knowledge Base + `app.conf` + `avatars/` + `.env`) e alla UI nella tab Account.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.121-dev.1 — Cloud Backup: bundle, API Drive reali, route server (seconda parte)
+
+Prosecuzione di v1.1.120-dev.1 (flusso OAuth Google Drive) — completa il backend, resta solo l'interfaccia utente.
+
+**Nuovo `cloudBackup/bundle.ts`** — raccoglie/ripristina esattamente i dati decisi con l'utente: `compat_profiles`, Knowledge Base AI Advisor, `app.conf`, `.env`, cartella `avatars/` (immagini vere, non solo la scelta corrente). Formato: un unico JSON compresso con gzip (zlib nativo di Node, nessuna nuova dipendenza) — le immagini avatar viaggiano come base64 dentro lo stesso JSON invece di un vero archivio zip, stessa scelta "niente dipendenze in più" già seguita nel resto del progetto.
+
+**Gestito un problema di ordinamento individuato in fase di design**: `compat_profiles.game_id` ha un vincolo `FOREIGN KEY` verso `games(id)`, applicato (`PRAGMA foreign_keys = ON`, verificato nel codice). Ripristinare un profilo per un gioco non ancora presente nella libreria (es. su un'installazione nuova, prima della prima scansione) violerebbe il vincolo. Gestito riga per riga con try/catch in `db.importCompatProfilesRaw()`: le righe compatibili si ripristinano, quelle che referenziano un gioco non ancora scansionato vengono saltate e segnalate esplicitamente all'utente ("scansiona la libreria e ripristina di nuovo"), invece di far fallire l'intero ripristino o mentire silenziosamente su cosa è stato recuperato.
+
+**Nuovo `knowledgeBase.importEntries()`** — mancava un metodo di importazione in blocco (esisteva solo `getAll()` per l'esportazione); riusa l'`upsert()` già collaudato dello store interno.
+
+**Chiamate reali Drive API v3** in `googleDrive.ts`: `uploadBackup()`/`downloadLatestBackup()` sostituiscono gli stub — upload multipart (crea o aggiorna sul posto, un solo file di backup mantenuto invece di accumularne uno nuovo ad ogni backup), download con `alt=media`. Nessun SDK Google, chiamate `fetch` dirette come nel resto del progetto.
+
+**Route in `server.ts`**, stesso schema delle route AI Advisor: `GET /api/cloud-backup/providers` (stato di tutti i provider in un colpo solo), `POST /api/cloud-backup/providers/:id` (salva client ID/secret, aggiornamento parziale — un campo omesso preserva quello già salvato), `POST /api/cloud-backup/providers/:id/login`/`logout`, `POST /api/cloud-backup/backup`/`restore`.
+
+**Ancora da fare**: l'interfaccia nella tab Account (campo Client ID/Secret, pulsanti Login/Backup/Ripristina, stato ultimo backup).
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.122-dev.1 — Cloud Backup: interfaccia nella tab Account (terza e ultima parte)
+
+Completa la funzione avviata in v1.1.120-dev.1/v1.1.121-dev.1 (backend: OAuth Google Drive, bundle, chiamate Drive API reali) con l'interfaccia utente — integrata nella tab Account esistente, come deciso con l'utente (invece di una tab dedicata, evitando il problema di spazio nella barra tab discusso a parte).
+
+**Aggiunto**:
+- Sezione "Cloud Backup" nella tab Account, sotto la griglia degli store — card per ogni provider registrato (solo Google Drive per ora), con campi Client ID/Secret (tastiera on-screen, stesso pattern delle API key dell'AI Advisor), toggle attiva/disattiva (mutua esclusività già garantita lato backend), pulsante "Connetti" con polling automatico sul completamento del login OAuth (il flusso loopback apre il browser e ritorna subito — la card si aggiorna da sola quando l'utente completa l'accesso), pulsanti "Esegui Backup"/"Ripristina" una volta autenticato, stato dell'ultimo backup.
+- Traduzioni aggiunte in italiano e inglese fin da subito (namespace `accounts` in `settings.json`), come da regola di progetto.
+
+**Bug reale trovato e corretto durante lo sviluppo**: la nuova sezione era stata inserita come secondo elemento fratello subito dopo la griglia store, ma quel ramo del ternario dell'interfaccia (`activeSettingsTab === 'accounts' ? (...)`) può contenere un solo elemento JSX — mancava un Fragment (`<>...</>`) ad avvolgere entrambi, causando una cascata di errori di parsing apparentemente scollegati più avanti nel file. Individuato isolando la sezione inserita e verificandone il bilanciamento di parentesi/graffe (risultato bilanciato al suo interno — la causa reale era strutturale, non un carattere mancante), corretto avvolgendo griglia store + sezione Cloud Backup in un `<>...</>` comune.
+
+Con questo, la funzione Cloud Backup è completa end-to-end: configurazione, login OAuth, backup e ripristino selettivo dei dati verificati con l'utente (compat_profiles, Knowledge Base AI Advisor, app.conf, avatars/, .env).
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.123-dev.1 — fix navigazione: sezione Cloud Backup raggiungibile in modo incoerente
+
+Segnalato dall'utente: la sezione Cloud Backup (sotto la griglia store nella tab Account) era raggiungibile scendendo con il controller solo partendo da alcune card, in modo incoerente — funzionava scendendo da GOG Galaxy, ma da Epic o Amazon solo se l'etichetta "Cloud Backup" era già parzialmente visibile a schermo.
+
+**Causa**: nessuno dei tre pulsanti possibili di una card store (Connetti/Annulla/Disconnetti, a seconda dello stato di autenticazione) aveva un vicino esplicito verso il basso — tutto affidato allo scoring geometrico, che si comporta in modo inaffidabile quando l'elemento sottostante richiede scroll per essere visibile, o quando (griglia a 2 colonne) una card non ha nulla direttamente sotto di sé nella propria colonna. Con 3 store visibili (GOG, Epic, Amazon) in una griglia a 2 colonne, sia Epic (prima riga, seconda colonna) sia Amazon (seconda riga, prima colonna, ultimo elemento) non hanno nulla direttamente sotto — solo GOG ce l'ha (Amazon, nella stessa colonna).
+
+**Fix**: calcolato dinamicamente, per ogni card della griglia, se esiste un elemento nella stessa colonna alla riga successiva (`idx + 2` oltre la fine dell'elenco) — se non esiste, la card collega esplicitamente al primo elemento della sezione Cloud Backup (`cloud-backup-toggle-google-drive`), qualunque sia il pulsante attivo in quel momento (Connetti/Annulla/Disconnetti). Generico rispetto al numero di store effettivamente visibili — non fissato a 3 — continua a funzionare correttamente se in futuro se ne aggiungono o rimuovono.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.124-dev.1 — traduzione mancante Cloud Backup + padding pulsanti (notifiche comprese)
+
+Due difetti segnalati dall'utente.
+
+**1. Traduzione inglese mancante** per la descrizione della card Google Drive ("Backup su Google Drive..."). Causa: la `description` di `GoogleDriveProvider` è un campo readonly della classe backend, sempre in italiano — stesso identico problema già risolto per le descrizioni dei plugin store (`Amazon Games — non ancora supportato` restava in italiano anche in UI inglese). Fix: nuova `translateCloudBackupDescription()`, stesso pattern già collaudato di `translateStorePluginDescription()` — chiave i18next con fallback al testo del backend, invece di mostrare sempre la stringa grezza.
+
+**2. Margine orizzontale insufficiente** nei pulsanti "Esegui Backup"/"Ripristina" — il testo era troppo ravvicinato ai bordi. Causa: i pulsanti usano `flex-1` (si allargano a riempire il contenitore) ma non avevano alcun `px-*` — il testo restava incollato ai bordi invece di avere respiro. Correggendo, l'utente ha segnalato che lo stesso difetto è presente anche nei pulsanti di interazione delle notifiche — verificato e confermato: `notif-ok`/`notif-ko`/`notif-primary`/`notif-secondary` avevano esattamente lo stesso problema (`flex-1 py-2` senza `px-*`). Aggiunto `px-3`/`px-4` + `text-center` a tutti e sei i pulsanti coinvolti.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.1.125-dev.1 — fix navigazione: catena interna Cloud Backup + causa reale dell'ingresso incoerente
+
+Segnalati 4 problemi dall'utente sulla navigazione col controller nella sezione Cloud Backup.
+
+**1. Causa reale trovata per l'ingresso incoerente (Epic vs Amazon)**: il fix precedente (v1.1.123-dev.1) calcolava "questa card ha qualcosa direttamente sotto in griglia?" contando solo se un elemento esisteva nell'array a quella posizione — ma l'elenco store reale (verificato nell'ordine di registrazione in `gameManager.ts`) è **GOG, Steam, Epic, Amazon, Battle.net, Classic Console** — 6 voci, non 3 come assunto scrivendo il fix precedente. Battle.net e Classic Console sono "noLogin" e renderizzano un **div statico, mai un Focusable** — quindi Epic (con Battle.net sotto) e Amazon (con Classic Console sotto) non avevano davvero nulla di navigabile nella propria colonna, nonostante l'array contenesse un elemento a quella posizione. Il vecchio controllo non lo sapeva, lasciava Epic e Amazon allo scoring geometrico puro — che per pura vicinanza orizzontale trovava lo switch da Amazon (più a destra, allineato) ma il campo Client ID da Epic (più a sinistra, spiegando esattamente il percorso "funzionante" scoperto dall'utente). Corretto: il calcolo ora verifica anche se lo store nella posizione sottostante è uno dei due "noLogin", trattandolo come "niente di navigabile" allo stesso modo di una posizione oltre la fine dell'elenco.
+
+**2. Catena verticale interna completata**: mancavano i vicini espliciti tra Client Secret → Connetti/Backup (calcolato dinamicamente in base a quale blocco è realmente renderizzato), Connetti → Client Secret (risalendo), Backup/Ripristina → Client Secret (risalendo) e → Disconnetti (scendendo), Disconnetti → Backup (risalendo). Aggiunta anche una catena orizzontale esplicita fra Backup e Ripristina (stessa riga), per determinismo completo indipendentemente dallo scoring geometrico, come richiesto.
+
+**3. Nessun indicatore di selezione quando lo switch è "Attivo"**: verificato — il ramo `isFocused` non veniva controllato affatto quando `enabled=true`, mostrando sempre lo stesso riempimento viola pieno indipendentemente dal fuoco. Aggiunto un anello (`ring-2 ring-purple-300`) distinto quando attivo+focalizzato, analogo a quello già usato per lo stato non-attivo.
+
+### Verifica
+
+`tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.

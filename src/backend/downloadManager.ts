@@ -169,7 +169,7 @@ function fetchGogNumericId(slug: string): Promise<string | null> {
  * verrebbero comunque installati con wine di sistema invece che con
  * quello di Proton.
  */
-function resolveRunnerWineEnv(runnerId: string | undefined, containerPrefixPath: string): {
+export function resolveRunnerWineEnv(runnerId: string | undefined, containerPrefixPath: string): {
   wineBin:        string;
   wineserverBin:  string;
   winePrefixPath: string;
@@ -326,6 +326,27 @@ function buildSafeEnv(extra: Record<string, string> = {}): Record<string, string
 
 function ensureDir(dirPath: string): void {
   if (!existsSync(dirPath)) mkdirSync(dirPath, { recursive: true });
+}
+
+/**
+ * v1.1.116-dev.1 — bug reale segnalato dall'utente: l'overlay non mostrava
+ * spuntato NEMMENO un verb di default realmente installato. Causa: prima
+ * db.upsertCompatProfile() veniva chiamata SOLO quando Known Fixes
+ * (Heroic) trovava effettivamente un fix (GOG/Epic) — un'installazione
+ * con soli verb di default mai toccati a mano nell'overlay prima di
+ * installare non veniva mai scritta nel DB. Persiste sempre, qualunque
+ * sia la provenienza dei verb (default silenziosi, selezione manuale
+ * pre-install già salvata via PATCH, o override Known Fixes).
+ */
+function persistWinetricksVerbs(gameId: string, verbs: string[]): void {
+  try {
+    const currentProfile = db.getCompatProfile(gameId) ?? {
+      fsr: false, gameMode: false, mangohud: 0, eac: false, battleye: false,
+    };
+    db.upsertCompatProfile(gameId, { ...currentProfile, winetricksVerbs: verbs });
+  } catch (e) {
+    writeLog('warning', `[COMPAT] Impossibile salvare winetricksVerbs per ${gameId}: ${e}`);
+  }
 }
 
 function storeDir(store: string): string {
@@ -1013,6 +1034,7 @@ class DownloadManager {
     } else if (task.winetricksVerbs.length > 0) {
       this.log(task, 'error', `[GOG] winetricks non trovato — dipendenze saltate`);
     }
+    persistWinetricksVerbs(task.gameId, task.winetricksVerbs);
 
     // Step 4: Cerca installer .exe — lgogdownloader crea una sottocartella col nome del gioco
     // Struttura attesa: installer/<slug>/setup_<slug>_<ver>.exe
@@ -1262,6 +1284,7 @@ class DownloadManager {
         }, winetrickTimeoutFor(verb));
       }
     }
+    persistWinetricksVerbs(task.gameId, verbsForInstall);
 
     // Risoluzione exe da sorgente autorevole (legendary info)
     const epicResolved = await resolveEpicExe(appName);
@@ -1390,6 +1413,7 @@ class DownloadManager {
         }, winetrickTimeoutFor(verb));
       }
     }
+    persistWinetricksVerbs(task.gameId, task.winetricksVerbs);
 
     // Risoluzione exe da filesystem — nessun equivalente verificato di
     // `legendary info --json` per nile, vedi commento in cima alla

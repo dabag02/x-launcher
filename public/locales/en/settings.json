@@ -26,7 +26,16 @@
     "linkedAccount": "✓ Linked Account",
     "confirmDisconnect": "Confirm disconnect? Press A",
     "cancel": "Cancel",
-    "connectStore": "Connect Store"
+    "connectStore": "Connect Store",
+    "cloudBackup": "Cloud Backup",
+    "notConfigured": "not configured",
+    "lastBackup": "Last backup: {{date}}",
+    "noBackupYet": "No backup yet",
+    "backupNow": "Run Backup",
+    "backupRunning": "Backup running...",
+    "restoreNow": "Restore",
+    "restoreRunning": "Restoring...",
+    "disconnect": "Disconnect"
   },
   "language": {
     "label": "Language",
@@ -104,6 +113,9 @@
     "Amazon_Games": "Amazon Games library (Prime Gaming) — requires nile",
     "Classic_Console": "Classic consoles and ROMs — RetroArch, DOSBox, ScummVM",
     "Epic_Games": "Epic Games library — requires legendary"
+  },
+  "cloudBackupDescriptions": {
+    "google_drive": "Backup to Google Drive (app-specific data folder, not visible in your Drive)"
   },
   "inputPluginDescriptions": {
     "ds4": "PlayStation 4 controller (via USB or Bluetooth)",
