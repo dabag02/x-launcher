@@ -49,12 +49,6 @@ Tre richieste dell'utente, tutte confermate funzionanti su hardware reale dopo a
 2. **Chromium come default post-build**: dopo la compilazione, il launcher
    usa `./kiosk-launch.sh chromium` come comando di avvio predefinito.
 
-3. **i18n fin da subito**: ogni nuova funzione con testo visibile in
-   interfaccia va proposta con il supporto a entrambe le lingue già
-   supportate dalla dashboard (EN + IT, `public/locales/{en,it}/*.json`)
-   incluso fin dalla prima implementazione — non aggiunto dopo su
-   segnalazione. Vedi CHANGELOG.md v1.1.104-dev.2.
-
 -----
 
 ## Stato attuale (punto di partenza)
@@ -1272,7 +1266,15 @@ Richieste dall'utente durante una pausa prima di proseguire con 19c: v1.1.75 —
 
 ### 19c — Plugin store: Amazon Games e itch.io
 
-Amazon Games è già presente nell'elenco plugin (visto più volte nei log di questa sessione come "disabilitato — skip") — probabilmente un plugin già abbozzato ma mai completato o mai attivato di default. itch.io da valutare da zero: non ha un client ufficiale Linux con CLI paragonabile a `legendary`/`lgogdownloader`, andrebbe verificato se esiste un tool di terze parti equivalente o se serve un approccio diverso (es. API itch.io dirette + gestione manuale dei file scaricati).
+**Amazon Games — COMPLETO (v1.5.0-Venus)**. Lo stub esistente ("disabilitato — skip" nei log) è stato sostituito con un'implementazione reale via `nile` (github.com/imLinguin/nile), ogni comando verificato con output reale prima di scrivere codice: libreria (`nile library list --json`, `product.id` come identificativo — verificato per esclusione anche `product.sku`, non corretto), autenticazione completa (`nile auth --login/--status/--logout`), dimensione prevista d'installazione, orchestrazione reale di download/installazione (`runAmazon()`, stesse funzioni condivise di `runEpic`/`runGog`), lancio via runner Wine/Proton standard. Limite noto: `nile library --installed` verificato rotto (ignora il flag) — `isInstalled` per Amazon si affida a `gameManager.protectInstalledState()` invece che al dato di nile. Dettaglio completo in CHANGELOG.md.
+
+**itch.io — non ancora iniziato.** Da valutare da zero: non ha un client ufficiale Linux con CLI paragonabile a `legendary`/`lgogdownloader`/`nile`, andrebbe verificato se esiste un tool di terze parti equivalente o se serve un approccio diverso (es. API itch.io dirette + gestione manuale dei file scaricati).
+
+### Cloud Backup — COMPLETO (v1.5.0-Venus, non originariamente in questo piano)
+
+Funzione nuova, non prevista nel piano originale Step 18-20, aggiunta su richiesta dell'utente e disegnata insieme prima di scrivere codice. Backup/ripristino espliciti (mai sync automatica) di soli dati verificati utili su una nuova installazione (`compat_profiles`, Knowledge Base AI Advisor, `app.conf`, cartella `avatars/`, `.env`) — mai libreria/prefix/installazioni/config legendary-lgogdownloader-nile/token/preferenze. Integrata nella tab Account esistente. Un solo provider cloud attivo alla volta come per l'AI Advisor, Google Drive come primo provider (interfaccia `CloudBackupProvider` già generica, altri provider aggiungibili in futuro/community). OAuth verificato passo per passo prima di scrivere codice (Device Flow scartata, out-of-band scartato, redirect loopback confermato per client "Desktop app"). Dettaglio completo in CHANGELOG.md.
+
+**Idea annotata per il futuro, non ancora iniziata**: sincronizzazione dei salvataggi di gioco personali (non solo configurazione) — problema più duro del backup di configurazione, per via del nome utente diverso fra prefix Wine e Proton (`daniele` vs `steamuser`) e dell'assenza di un percorso di salvataggio prevedibile per ogni titolo. Approccio proposto quando si riprenderà: tracciare per singolo gioco dove vive il salvataggio, invece di sincronizzare l'intera prefix.
 
 ### 19d — Supporto launcher di terze parti condivisi (Ubisoft Connect, EA App, Rockstar Games Launcher, Battle.net)
 
@@ -1289,7 +1291,7 @@ Definito tenendo conto di due criteri insieme, non solo la complessità crescent
 1. **Step 18 — Consolidamento fetch libreria**. Vittoria rapida, a basso rischio, nessuna nuova stringa/UI. Riduce il rischio che i nuovi plugin (punto 4) aggiungano un ulteriore punto di fetch scoordinato invece di usare quello consolidato.
 2. **19b — Fondamenta multilingua**. **Priorità strutturale, non di complessità**: è l'unico dei sei fronti che tocca *come viene scritta ogni stringa in tutta l'interfaccia*, non una funzionalità isolata. Rimandarlo significherebbe ritoccare due volte ogni stringa aggiunta nel frattempo dai punti 3-5. Probabilmente il più esteso in termini di lavoro assoluto fra i quattro di "secondo livello", ma va anticipato lo stesso.
 3. **19a — Protocollo `xlaunch://`**. Contenuto e autosufficiente (URI scheme → risoluzione id → `launchGame()` esistente). Fatto qui, i nuovi plugin del punto successivo possono nascere già conformi alla stessa convenzione di id invece di doverla adattare dopo.
-4. **19c — Plugin Amazon Games + itch.io**. Segue un pattern di plugin già consolidato (gogPlugin/epicPlugin/steamPlugin). Amazon Games sembra già uno stub esistente da completare; itch.io richiede prima una ricerca di fattibilità (nessun tool CLI equivalente a legendary noto).
+4. **19c — Plugin Amazon Games + itch.io**. Segue un pattern di plugin già consolidato (gogPlugin/epicPlugin/steamPlugin). **Amazon Games completato in v1.5.0-Venus** via nile, verificato passo per passo; itch.io richiede prima una ricerca di fattibilità (nessun tool CLI equivalente a legendary/nile noto), non ancora iniziato.
 5. **19d — Launcher di terze parti condivisi**. Il più complesso dei quattro "di secondo livello": tocca il cuore della pipeline di lancio (`gameManager.ts`), non solo l'aggiunta di un plugin. Beneficia di un roster store già stabile (punto 4) e di `xlaunch://` già pronto (punto 3).
 6. **Step 20 — Sessione Wayland/gamescope**. Il più complesso e strutturalmente indipendente in assoluto — non sblocca né dipende da nessuno degli altri cinque, resta ultimo sia per complessità sia perché nulla lo richiede prima.
 

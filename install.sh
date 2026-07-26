@@ -89,6 +89,12 @@ fi
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR"/*.sh
+# v1.5.0-Venus — scripts/with-env.sh (nuovo, caricamento .env condizionale
+# per npm run dev/start) non è coperto dal glob sopra, che guarda solo la
+# radice del progetto. Non è strettamente necessario per il funzionamento
+# (viene invocato via "bash scripts/with-env.sh ...", bash lo esegue anche
+# senza bit +x) ma resta coerente con gli altri script del progetto.
+[ -f "$INSTALL_DIR/scripts/with-env.sh" ] && chmod +x "$INSTALL_DIR/scripts/with-env.sh"
 
 echo "[INSTALL] Creo il symlink ${BIN_LINK} → ${INSTALL_DIR}/kiosk-launch.sh..."
 ln -sf "$INSTALL_DIR/kiosk-launch.sh" "$BIN_LINK"

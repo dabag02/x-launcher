@@ -6,7 +6,7 @@
         "AI-powered game suggestions",
         "Multi-store sync"
     ],
-    "currentStep": 18,
+    "currentStep": 19,
     "patches": [
         {
             "id": "step4-001",
@@ -264,10 +264,91 @@
                 "package.json",
                 "metadata.json"
             ]
+        },
+        {
+            "id": "post-gaia-infra-hardening",
+            "description": "Consolidamento infrastrutturale post-Gaia: fix cwd ProtonRunner (cache DXVK finiva nella cartella progetto invece che accanto all'eseguibile, resolveLaunchCwd condivisa con WineRunner); .env spostato da $PROJECT_DIR a ~/.local/share/x-launcher/.env (xdash.service non lo caricava mai, npm run dev nemmeno) — nuovo paths.ts come unica fonte di verità per DATA_DIR/ENV_PATH, consolidava 7 duplicazioni sparse nel backend, nuovo scripts/with-env.sh; fix estrazione manuale Classic Console (findMatchingCueInDir cercava solo in .extracted/, non in un'estrazione fatta a mano nella cartella di sistema); MangoHud da booleano a 3 stati (spento/compatta/completa con MANGOHUD_CONFIG=preset=4), gap ProtonRunner colmato (non lo supportava affatto); supporto .7z per Classic Console (nuovo archiveExtractors.ts, registry utility-agnostic zip/7z/rar, rilevamento tool in tab System); fix libreria GOG (voci 'Goodies Collection' mostrate come gioco, card fantasma da URL di re-auth scambiato per titolo, pulizia mirata delle voci già in DB); allineamento e colore uniforme dei due pulsanti Aggiorna in tab System.",
+            "appliedAt": "2026-07-23T00:00:00.000Z",
+            "files": [
+                "src/backend/paths.ts",
+                "src/backend/archiveExtractors.ts",
+                "scripts/with-env.sh",
+                "src/backend/runners/implementations.ts",
+                "src/backend/db.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/logger.ts",
+                "src/backend/knowledgeBase.ts",
+                "src/backend/notificationEngine.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/compatibilityManager.ts",
+                "src/types.ts",
+                "src/App.tsx",
+                "server.ts",
+                "kiosk-launch.sh",
+                "xdash.service",
+                "install.sh",
+                "package.json"
+            ]
+        },
+        {
+            "id": "ai-advisor-single-provider-budget",
+            "description": "AI Advisor ridisegnato su richiesta utente: UN SOLO provider attivo alla volta (mutua esclusività in db.upsertAiProviderCredential), budget PER-PROVIDER con blocco reale all'esaurimento (prima solo mostrato, mai applicato — orchestrator.ts ora fa give_up immediato senza chiamare il provider se il budget è esaurito), notifica automatica all'80% una volta al mese, Ollama/provider locali sempre ∞ mai bloccati, default 5.000.000 token alla prima configurazione. Bug reale corretto nella stessa milestone: la mutua esclusività Ollama→cloud non si rifletteva in UI per un refresh mancante lato client.",
+            "appliedAt": "2026-07-23T12:00:00.000Z",
+            "files": [
+                "src/backend/db.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/aiProviders/orchestrator.ts",
+                "server.ts",
+                "src/App.tsx"
+            ]
+        },
+        {
+            "id": "wine-deps-widget-compact-navigation",
+            "description": "Vista compatta/estesa per il widget 'Dipendenze Wine' nell'overlay (switch pill, default solo i 4 verb consigliati, estesa aggiunge gli 11 opzionali) per accorciare la navigazione fino in fondo all'overlay. Fix di navigazione: lo switch era raggiungibile solo con la leva destra, mai scorrendo su/giù — collegamento esplicito in tre punti (campo precedente → switch → prima checkbox) risolve la causa reale (scoring geometrico che lo scavalcava del tutto).",
+            "appliedAt": "2026-07-23T18:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "public/locales/it/gameOptions.json",
+                "public/locales/en/gameOptions.json"
+            ]
+        },
+        {
+            "id": "amazon-games-plugin-nile-complete",
+            "description": "Step 19c completo: plugin Amazon Games via nile (github.com/imLinguin/nile), sostituendo uno stub esistente mai completato. Ogni comando verificato con output reale fornito dall'utente prima di scrivere codice (mai un formato indovinato, stesso rigore già applicato a GOG): libreria via 'nile library list --json' (product.id come identificativo reale, non product.sku), autenticazione completa (login/logout/isAuthenticated via nile auth --login/--status/--logout), dimensione prevista d'installazione (nile install --info --json → download_size), orchestrazione reale di download/installazione (runAmazon() in downloadManager.ts, stesse funzioni condivise di runEpic/runGog — parser di progresso dedicato per il formato di nile, diverso da legendary/lgogdownloader, con un artefatto di visualizzazione di nile scoperto e deliberatamente non replicato). Saga di bug corretti dopo l'attivazione reale del plugin, tutti residui dello stub mai aggiornato o limiti reali di nile scoperti sul campo: stato account/descrizione plugin/dimensione prevista/widget Dipendenze Wine tutti richiedevano estendere controlli hardcoded pensati solo per GOG/Epic; disinstallazione non rimuoveva file reali né avvisava nile (storeDir null per Amazon, mai chiamato 'nile uninstall'); 'nile library --installed' verificato ROTTO (ignora il flag, restituisce sempre l'intera libreria) — isInstalled per Amazon affidato interamente a gameManager.protectInstalledState() invece che al dato di nile; winetricksVerbs risultato non salvato per installazioni con soli verb di default (bug trasversale a GOG/Epic/Amazon, non solo Amazon — corretto con persistWinetricksVerbs() condivisa); rilevamento dei verb installati manualmente da terminale via 'winetricks list-installed' (comando che stampa anche banner/font non richiesti, filtrato contro un nuovo elenco condiviso wineVerbs.ts, riusato sia da App.tsx sia dal backend); resolveRunnerWineEnv corretto anche nel ricontrollo dipendenze ad ogni lancio (puntava sempre a wine di sistema invece del binario della build Proton effettivamente in uso). Discussione approfondita su condivisione dipendenze fra runner diversi (Wine↔Proton): scartata l'idea di link simbolici/copia della cartella utente (rischio di corruzione fra generazioni Wine/Proton, dimostrato da un log reale con 'Prefix has an invalid version?!'), adottata la riapplicazione automatica dei verb tracciati + notifica esplicita quando si cambia runner (niente copia salvataggi automatica).",
+            "appliedAt": "2026-07-24T00:00:00.000Z",
+            "files": [
+                "src/backend/plugins/amazonPlugin.ts",
+                "src/backend/downloadManager.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/db.ts",
+                "src/wineVerbs.ts",
+                "src/App.tsx",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json"
+            ]
+        },
+        {
+            "id": "cloud-backup-google-drive-complete",
+            "description": "Nuova funzione Cloud Backup, disegnata insieme all'utente prima di scrivere codice: backup/ripristino espliciti (mai sync automatica) di soli dati verificati utili su una nuova installazione — compat_profiles, Knowledge Base AI Advisor, app.conf, cartella avatars/ (immagini vere), .env (chiavi scraping + percorso Roms) — mai libreria/prefix/installazioni/config legendary-lgogdownloader-nile/token/preferenze. Integrata nella tab Account esistente (non una nuova tab, su decisione esplicita). Un solo provider cloud attivo alla volta come per l'AI Advisor, Google Drive come primo (altri in futuro/community). Flusso OAuth verificato passo per passo prima di scrivere codice: Device Flow scartata (non supporta gli scope Drive, invalid_scope confermato da segnalazione reale), flusso out-of-band scartato (dismesso da Google dal 2022), redirect loopback su client tipo 'Desktop app' confermato come meccanismo raccomandato (deprecato solo per Android/iOS/Chrome-app) — server HTTP locale su porta libera, apre il Firefox già integrato nella dashboard, scambia codice→token, refresh token in tokens.json (mai nel DB). Scope drive.appdata (cartella nascosta dedicata all'app, gratuita, confermato dalla documentazione ufficiale Google). Bundle come JSON gzippato (zlib nativo, nessuna nuova dipendenza npm, avatar in base64). Gestito un problema di ordinamento reale: compat_profiles.game_id ha FOREIGN KEY verso games(id) con foreign_keys=ON — ripristinare un profilo per un gioco non ancora scansionato violerebbe il vincolo, gestito riga per riga con try/catch, righe compatibili ripristinate, altre saltate e segnalate esplicitamente. Due bug di navigazione corretti dopo test reali col controller: un Fragment mancante (la sezione era un secondo elemento fratello in un ramo ternario che può contenere un solo elemento JSX) e una causa più sottile — l'elenco store reale è di 6 voci (GOG, Steam, Epic, Amazon, Battle.net, Classic Console) non 3 come assunto in un primo tentativo di fix, e i due store 'noLogin' non renderizzano mai un elemento navigabile, lasciando le card sopra di loro senza nulla di reale sotto in griglia nonostante l'array avesse un elemento a quella posizione. Completata la catena di navigazione interna del widget e corretto un indicatore di focus mancante sullo switch attivo. Due difetti minori corretti: traduzione inglese mancante per la descrizione del provider (stesso meccanismo già in uso per le descrizioni dei plugin store) e margine orizzontale insufficiente nei pulsanti (esteso, dopo segnalazione dell'utente, anche ai pulsanti di interazione delle notifiche che condividevano lo stesso difetto).",
+            "appliedAt": "2026-07-25T00:00:00.000Z",
+            "files": [
+                "src/backend/cloudBackup/base.ts",
+                "src/backend/cloudBackup/googleDrive.ts",
+                "src/backend/cloudBackup/bundle.ts",
+                "src/backend/cloudBackup/registry.ts",
+                "src/backend/db.ts",
+                "src/backend/knowledgeBase.ts",
+                "server.ts",
+                "src/App.tsx",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json"
+            ]
         }
     ],
-    "version": "1.1.100-dev.1",
-    "milestone": "v1.1.79-Gaia — MILESTONE STABILE. Prima release con la nuova convenzione di nomi: da qui in poi ogni milestone stabile prende il nome di un pianeta o satellite del sistema solare. Tutte le funzioni core giudicate sufficientemente mature: libreria unificata GOG/Epic/Steam/Classic Console, i18n completo IT/EN (Step 19b chiuso), protocollo xlaunch:// funzionante end-to-end (Step 19a chiuso, testato su hardware reale — avvio a freddo nascosto, ripristino corretto, campo id contestuale per il testing), Knowledge Base e risposte AI Advisor bilingui, tray con cronologia giochi recenti, migliorie RetroArch (launch argument contestuali, titolo di scraping manuale per ROM con nome poco significativo, preset shader CRT), tastiera virtuale con navigazione ciclica e fix di focus/apostrofo. Precede questa milestone v1.1.65-rc.3 (interfaccia bilingue + log in inglese).",
-    "date": "2026-07-21",
-    "notes": "Snapshot di sviluppo, NON una nuova milestone stabile (quella di riferimento resta v1.1.79-Gaia). Pensato per riprendere il lavoro in una nuova sessione di chat (questa ha raggiunto la saturazione). Include tutto il lavoro dopo lo snapshot precedente (v1.1.93-dev1): fix persistenza avatar/versione menu; tre nuove funzioni sidebar/Gestisci Account confermate funzionanti su hardware reale (dimensione prevista di installazione GOG/Epic con cache persistente, tempo di gioco reale per tutti gli store con protezione contro le sync, tab Info Hardware sempre in ultima posizione); saga di bug RetroArch risolti con diagnosi progressiva (cattura mai avvenuta di stdout/stderr, poi un bug PSX reale diagnosticato dall'utente stesso — zip CD multi-file che richiede estrazione automatica, core di default non pacchettizzato per x86_64); funzione \"Auto-Remaster\" per PSX verificata passo-passo da terminale insieme all'utente (override per-contenuto nativo di RetroArch, non --appendconfig=, risoluzione/AA/PGXP), poi generalizzata in un registro estendibile per futuri sistemi (N64/Saturn/Dreamcast/PS2, discussi e rimandati); due fix estetici (colore/focus del pulsante auto-remaster). Cartella patches/ rimossa, INSTALL.md riscritto, regole di sviluppo consolidate in X-Launcher-Roadmap.md."
+    "version": "1.5.0-Venus",
+    "milestone": "v1.5.0-Venus — MILESTONE STABILE. Precede questa milestone v1.1.79-Gaia. Aggiunge due funzioni maggiori rispetto a Gaia: Step 19c completo (plugin Amazon Games via nile, libreria/autenticazione/download/installazione/lancio tutti verificati con output reale) e Cloud Backup (backup/ripristino selettivo dei dati verificati su Google Drive, un provider cloud attivo alla volta, flusso OAuth loopback per client Desktop app). Include anche il consolidamento infrastrutturale post-Gaia (paths.ts come fonte unica di DATA_DIR/ENV_PATH, .env riposizionato, MangoHud a 3 stati, supporto .7z, fix libreria GOG), il ridisegno dell'AI Advisor (un provider attivo alla volta, budget per-provider con blocco reale) e la vista compatta/estesa del widget Dipendenze Wine. Numerosi bug di navigazione controller corretti lungo il percorso, sempre con causa reale verificata prima della correzione, mai per tentativi.",
+    "date": "2026-07-25",
+    "notes": "Congelamento di milestone stabile su richiesta esplicita dell'utente. Sostituisce lo snapshot di sviluppo precedente (post-v93-avatar-sidebar-retroarch-remaster, 2026-07-21) come riferimento corrente. Comprende tutto il lavoro svolto da v1.1.79-Gaia in poi: consolidamento infrastrutturale (paths.ts, .env, MangoHud, .7z, fix GOG), ridisegno AI Advisor, widget Dipendenze Wine compatto, Step 19c Amazon Games via nile (completo, verificato passo per passo con output reale), Cloud Backup su Google Drive (completo, OAuth verificato passo per passo). Vedi CHANGELOG.md per il dettaglio versione-per-versione di ogni singolo fix (v1.1.100 → v1.1.125-dev.1)."
 }

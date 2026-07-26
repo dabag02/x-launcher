@@ -9,7 +9,7 @@
 
 X-Launcher è un demone Node.js + una finestra browser + un'icona tray Python, che si appoggia a diversi strumenti di sistema. Alcuni sono necessari solo per **compilare**, altri servono a **runtime** per specifiche funzionalità (uno store, un tipo di gioco, un desktop environment).
 
-> **Nota sulla distribuzione**: i comandi qui sotto usano `pacman` (Arch Linux), l'unica distro su cui il progetto è stato sviluppato e testato finora. Il supporto ai desktop environment (XFCE/MATE/GNOME/Plasma) è multipiattaforma per costruzione, ma `install.sh` non fa ancora rilevamento automatico del gestore pacchetti di altre distro (`apt`/`dnf`/`zypper`) — su Debian/Ubuntu/Fedora/openSUSE dovrai tradurre i nomi pacchetto manualmente (generalmente molto simili).
+> **Nota sulla distribuzione**: da `v1.5.0-Venus`, `setup-linux.sh` rileva automaticamente Arch/derivate (`pacman`), Debian/Ubuntu/derivate (`apt`) e Fedora/RHEL/derivate (`dnf`), installando le dipendenze fondamentali con il nome pacchetto giusto per ciascuna famiglia. **Stato di verifica onestamente dichiarato**: Arch è verificato su hardware reale in tutta la sessione di sviluppo di questo progetto; i nomi pacchetto per Debian/Fedora sono verificati sulla documentazione ufficiale di ciascuna distro (non indovinati) ma non ancora testati su una macchina reale — se qualcosa non funziona lì, segnalalo con l'errore esatto. I comandi manuali qui sotto restano in sintassi `pacman` per Arch; per le altre due famiglie usa `setup-linux.sh` oppure consulta la mappatura pacchetto all'inizio dello script stesso.
 
 ### Per compilare (obbligatorie)
 
@@ -56,22 +56,62 @@ sudo pacman -S firefox
 
 Entrambi supportati e testati in modo equivalente (finestra a schermo intero senza decorazione, nessuna barra indirizzi). Scelta a runtime: `./kiosk-launch.sh firefox` o `./build.sh start firefox` per forzare Firefox, altrimenti Chromium ha la priorità di default se entrambi sono installati.
 
-### Store e librerie di gioco (installa solo quelli che usi)
+### Store e librerie di gioco — FONDAMENTALI per chi usa quello store
 
 | Store | Pacchetto/strumento | Note |
 |---|---|---|
 | Steam | `steam` | Lettura libreria via file manifest locali + Steam Web API (opzionale, per il tempo di gioco ufficiale) |
-| GOG | [`lgogdownloader`](https://github.com/Sude-/lgogdownloader) (AUR) | Scraping libreria, download, dimensione prevista di installazione |
-| Epic Games | [`legendary`](https://github.com/derrod/legendary) (AUR: `legendary`) | Stesso ruolo di lgogdownloader, per Epic |
-| Classic Console (ROM) | [`RetroArch`](https://www.retroarch.com/) + core libretro necessari | Nessun account richiesto — legge direttamente `~/Roms/` (percorso configurabile, vedi `.env`). Per ROM PSX (immagini CD `.cue`/`.bin`), richiede anche `unzip` — estrazione automatica del pacchetto compresso al primo avvio del gioco (`sudo pacman -S unzip`, quasi certamente già presente) |
+| GOG | [`lgogdownloader`](https://github.com/Sude-/lgogdownloader) | Arch: AUR. Debian/Ubuntu: pacchetto ufficiale. **Fedora: pacchetto ufficiale diretto** (`sudo dnf install lgogdownloader`, verificato — nessun COPR necessario). Scraping libreria, download, dimensione prevista di installazione |
+| Epic Games | [`legendary`](https://github.com/derrod/legendary) | `pip install --user legendary-gl` funziona su qualunque distro (via `setup-linux.sh` o a mano) — più affidabile del pacchetto di sistema, che non tutte le distro hanno |
+| Amazon Games — **RACCOMANDATO** | [`nile`](https://github.com/imLinguin/nile) | Nessun pacchetto pulito su nessuna distro, nemmeno PyPI (il nome "nile" su PyPI è un progetto Python estraneo, non installarlo). Via cross-distro: `pip install --user git+https://github.com/imLinguin/nile.git`. Su Arch, l'AUR `nile-git` è l'alternativa nativa |
+| Classic Console (ROM) | [`RetroArch`](https://www.retroarch.com/) + core libretro necessari, [`ScummVM`](https://www.scummvm.org/) (giochi punta-e-clicca), [`DOSBox Staging`](https://dosbox-staging.github.io/) (giochi DOS) | Nessun account richiesto — legge direttamente `~/Roms/` (percorso configurabile, vedi `.env`). Per ROM con immagine CD (`.cue`/`.bin`) o `.7z`, richiede anche `unzip` e `p7zip` — estrazione automatica al primo avvio del gioco |
 
-### Compatibilità Windows (Wine/Proton, opzionale)
+### Compatibilità Windows (Wine/Proton) — FONDAMENTALE
 
 ```bash
 sudo pacman -S wine winetricks
 ```
 
-Proton viene invece rilevato automaticamente se già installato tramite Steam (o Proton-GE via ProtonUp), nessuna azione manuale necessaria.
+**`winetricks` non è opzionale**: senza, il widget "Dipendenze Wine" dell'overlay non può installare nessuna delle dipendenze redistribuibili (vcrun, dxvk, corefonts, d3dcompiler, dotnet...) — Wine da solo non basta a far partire molti giochi. Proton viene invece rilevato automaticamente se già installato tramite Steam, oppure via GE-Proton — vedi sotto.
+
+### Gestione build Proton-GE — RACCOMANDATO
+
+```bash
+pip install --user protonup-ng
+# oppure ProtonUp-Qt da Flathub (interfaccia grafica)
+```
+
+Alternativa se non disponibili: Steam stesso installato serve anche come fonte per i runner Proton "ufficiali" (non GE), oltre al proprio ruolo di store.
+
+### EasyAntiCheat / BattlEye — RACCOMANDATO (solo se giochi con questi anti-cheat)
+
+```bash
+sudo pacman -S lutris   # Debian/Ubuntu/Fedora: vedi lutris.net per repository dedicato
+```
+
+### Overlay prestazioni — RACCOMANDATI
+
+```bash
+sudo pacman -S mangohud gamemode
+```
+
+**FSR non richiede alcuna installazione separata**: è una capacità della versione di Wine installata (>= 7.x, verificato nel codice), non un pacchetto a sé.
+
+### AI Advisor — RACCOMANDATO
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Le schede AI cloud (Gemini/ChatGPT/DeepSeek/Claude) non richiedono nulla da installare, solo una chiave API inserita dall'interfaccia.
+
+### Rilevamento hardware (tab Info Hardware) — FONDAMENTALE
+
+```bash
+sudo pacman -S pciutils
+```
+
+Serve per `lspci`, usato per identificare la GPU. Se la GPU è NVIDIA, serve anche il driver proprietario NVIDIA (per `nvidia-smi`, controllato per primo se presente).
 
 ### Solo per la sessione dedicata (Gamescope) — attualmente incompleta
 

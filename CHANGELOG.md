@@ -3925,3 +3925,15 @@ Segnalati 4 problemi dall'utente sulla navigazione col controller nella sezione 
 ### Verifica
 
 `tsc --noEmit`: confrontato riga per riga contro lo zip originale intatto, stessi 23 errori pre-esistenti, identici, zero nuovi.
+
+## v1.5.0-Venus — MILESTONE STABILE
+
+Congelata su richiesta esplicita dell'utente, seguendo la stessa convenzione inaugurata con Gaia (nome di pianeta/satellite per ogni milestone stabile). Precede questa milestone `v1.1.79-Gaia`.
+
+Rispetto a Gaia, aggiunge due funzioni maggiori — Step 19c completo (plugin Amazon Games via `nile`: libreria, autenticazione, download/installazione, lancio, tutti verificati passo per passo con output reale, mai un formato indovinato) e Cloud Backup (backup/ripristino selettivo dei dati verificati su Google Drive, un provider cloud attivo alla volta, flusso OAuth loopback per client "Desktop app" verificato prima di scrivere codice) — oltre al consolidamento infrastrutturale post-Gaia (`paths.ts` come fonte unica di `DATA_DIR`/`ENV_PATH`, `.env` riposizionato in `~/.local/share/x-launcher/`, MangoHud a 3 stati, supporto `.7z`, fix libreria GOG), al ridisegno dell'AI Advisor (un provider attivo alla volta, budget per-provider con blocco reale) e alla vista compatta/estesa del widget Dipendenze Wine. Dettaglio versione-per-versione completo (v1.1.100 → v1.1.125-dev.1) nelle voci precedenti di questo stesso file.
+
+Nessun cambiamento di codice in questa voce — solo il congelamento: versione aggiornata in `App.tsx`/`package.json` (`v1.5.0-Venus`), `metadata.json` aggiornato (`version`/`milestone`/`date`/`notes` + cinque nuove voci riassuntive in `patches[]`, una per ciascun blocco di lavoro dall'ultima milestone), `install.sh` esteso per coprire anche `scripts/with-env.sh` (nuovo da questa milestone, non coperto dal glob `*.sh` di radice — non strettamente necessario per il funzionamento ma coerente con gli altri script), pacchetto ricreato per intero come `X-Launcher_v1_5_0-Venus.zip`, stesse esclusioni di `.gitignore` già usate per Gaia (`node_modules`, `dist`, stato locale, log, ecc.) più `LICENSE` (resta solo nel repo GitHub, mai nello zip).
+
+### Verifica
+
+`tsc --noEmit`: stessi 23 errori pre-esistenti, nessun errore nuovo. `metadata.json` validato. Zip verificato: `node_modules` assente, tutti i file chiave presenti.
