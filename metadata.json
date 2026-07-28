@@ -1,0 +1,410 @@
+{
+    "name": "X-Launcher HTPC",
+    "description": "A high-performance HTPC dashboard for Linux gamers, inspired by Steam Big Picture and GOG Galaxy. Features multi-store integration, runner management (Wine/Proton), and controller-first navigation.",
+    "requestFramePermissions": [],
+    "majorCapabilities": [
+        "AI-powered game suggestions",
+        "Multi-store sync"
+    ],
+    "currentStep": 19,
+    "patches": [
+        {
+            "id": "step4-001",
+            "description": "UI configurazione per-game completa: compat reattivi + Game Config + Custom Env",
+            "appliedAt": "2026-05-22T20:06:30.003Z",
+            "files": [
+                "src/App.tsx"
+            ]
+        },
+        {
+            "id": "step6-001",
+            "description": "Plugin Epic Games via legendary CLI: libreria completa con cover art reali, filtro DLC, rilevamento installati",
+            "appliedAt": "2026-05-24T16:44:31.606Z",
+            "files": [
+                "src/backend/plugins/epicPlugin.ts",
+                "X-Launcher-Roadmap.md"
+            ]
+        },
+        {
+            "id": "step16-001",
+            "description": "Navigazione gamepad completa: store bar/footer su dorsali, menu X-Launcher, Settings a tab, Avatar Library, Store Accounts (login/logout Epic+GOG), Runner tab (install/uninstall con conferma e progress), Tool di sistema/Spazio disco come aree informative navigabili",
+            "appliedAt": "2026-06-24T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/components/FocusProvider.tsx",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/GamepadTester.tsx",
+                "src/hooks/useGamepad.ts",
+                "src/backend/plugins/base.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/compatibilityManager.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/notificationEngine.ts",
+                "src/index.css",
+                "server.ts"
+            ]
+        },
+        {
+            "id": "step16-002",
+            "description": "Fix scroll/focus nella tab System (contenitori scrollabili rispettati, header/tab sempre fissi, scroll manuale fino ai bordi reali, primo focus deterministico su ogni tab anche premendo A direttamente). Menu X-Launcher: toggle Fullscreen reso realmente funzionale e persistito (kiosk-launch.sh legge la preferenza all'avvio), nuova voce Exit con conferma a 2 tap che chiude il daemon e la Dashboard",
+            "appliedAt": "2026-06-24T12:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/components/FocusProvider.tsx",
+                "src/backend/appConfig.ts",
+                "server.ts",
+                "kiosk-launch.sh"
+            ]
+        },
+        {
+            "id": "step16-003",
+            "description": "Centro notifiche: scorciatoie L2/R2, stato 'seen' distinto da 'status' (una notifica resta non letta finché l'utente non apre fisicamente il pannello, indipendentemente da timeout automatici), testo più leggibile, pulsante 'Pulisci storico' reso navigabile. Fix autenticazione GOG: isAuthenticated() passato da un'euristica fragile su --list a --check-login-status (comando dedicato, exit code binario documentato). Serie di fix su scroll/focus della libreria: isVisible() separata in due funzioni distinte (scoring direzionale vs fallback generico, la conflazione escludeva permanentemente le righe sotto la piega in finestra più piccola), strategia di scroll a centraggio invece di scroll-al-bordo-minimo (elimina il confine critico che causava 'salita laterale a scatti' tra card adiacenti), parametro axis per evitare ricalcoli verticali su movimento orizzontale, animazione di scroll manuale e cancellabile per restare fluida senza reintrodurre race condition su pressioni rapide ripetute",
+            "appliedAt": "2026-06-24T22:30:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/types.ts",
+                "src/components/FocusProvider.tsx",
+                "src/backend/plugins/gogPlugin.ts"
+            ]
+        },
+        {
+            "id": "step17-001-ai-advisor",
+            "description": "AI Advisor completo (Step 15d): interfaccia comune AIProviderPlugin, KB ampliata a 34 pattern, cinque adapter (Ollama/Gemini/DeepSeek/ChatGPT/Claude), persistenza tentativi (limite 3, storico, firma errore deduplicata)/credenziali/budget token, collegamento a notificationEngine.ts con fallback silenzioso e triplo esito suggestion/clarify/give_up, UI di gestione in Manage Accounts (tab visibile solo se Ollama raggiungibile, toggle a rettangolo-di-focus, test connessione). Corrette due regressioni reali: generi GOG/Epic/Steam bloccati su '[]' nel COALESCE, race condition nel rilevamento chiusura gioco. Cursore mouse spostato a XFixes via tray.py (indipendente dal focus Chromium). Cattura log di lancio per diagnosticare fallimenti silenziosi (wine parte ma l'exe non esiste/crasha). Tastiera virtuale riscritta con layout IT/EN-US completi e vicini di navigazione espliciti.",
+            "appliedAt": "2026-07-06T00:00:00.000Z",
+            "files": [
+                "src/backend/aiProviders/base.ts",
+                "src/backend/aiProviders/attemptTracker.ts",
+                "src/backend/aiProviders/registry.ts",
+                "src/backend/aiProviders/orchestrator.ts",
+                "src/backend/aiProviders/ollama.ts",
+                "src/backend/aiProviders/gemini.ts",
+                "src/backend/aiProviders/openaiCompatible.ts",
+                "src/backend/aiProviders/claude.ts",
+                "src/backend/notificationEngine.ts",
+                "src/backend/db.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/runners/base.ts",
+                "src/backend/runners/implementations.ts",
+                "src/components/VirtualKeyboard.tsx",
+                "src/App.tsx",
+                "src/index.css",
+                "server.ts",
+                "tray.py",
+                "kb-seed.json"
+            ]
+        },
+        {
+            "id": "step18-001-overlay-cleanup",
+            "description": "Pulizia overlay Game Options (Runner Bridge nascosta per Classic Console, core RetroArch filtrati per sistema con fix della persistenza DB del campo 'system', layout Compatibility Layer uniforme senza stiramento dell'ultima voce dispari, scrollbar coerente con custom-scrollbar, navigazione asimmetrica tra sezioni corretta con vicini espliciti calcolati dinamicamente). Box descrizione del pannello info reso flessibile con max-height dinamico, bug di arrotondamento sub-pixel di scrollTop scoperto e corretto con un accumulatore JS proprio dopo una sessione di diagnostica approfondita. Legenda L2/R2 aggiunta in fondo alla dashboard. Un errore introdotto durante il fix di navigazione (selectedGame usato prima della dichiarazione, causa di schermo nero ad ogni caricamento) è stato trovato e corretto nella stessa sessione; il metodo di verifica sintattica è stato esteso per includere le categorie di errore che lo avevano lasciato passare.",
+            "appliedAt": "2026-07-09T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/backend/db.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "src/types.ts",
+                "server.ts"
+            ]
+        },
+        {
+            "id": "step18-002-navigation-model",
+            "description": "Modello di navigazione controller unificato, sviluppato a partire da un documento SNI (Semantic Navigation Interface) fornito dall'utente: NavigationStrategy ('geometric'/'sequential') dichiarabile per group; sequentialChain+chainAxis ('vertical'/'horizontal'/'flow') per liste dinamiche annidate in group misti, incluso il caso di liste flex-wrap con elementi di larghezza variabile il cui punto di a-capo non è prevedibile. Migrati tab Settings, righe Custom Env Variables (con switch di persistenza per-riga per variabili valide solo in fase di installazione), Runner Bridge, core RetroArch, riga API Key/Test/Rimuovi dei provider cloud AI Advisor, chip di suggerimento della tastiera virtuale. Bug di navigazione chiusi in overlay Game Options, Settings/System/AI Advisor, area di test controller (nuova modalità di cattura input con uscita a pressione prolungata di B, LED di stato, timer indipendente dal meccanismo di ottimizzazione re-render). Causa radice dei tagli di impaginazione: unità vh incompatibili col canvas virtuale scalato di ScalingContainer, sostituite con percentuali — regola di progetto permanente aggiunta alla roadmap. Tastiera virtuale ristrutturata: un solo campo di testo (bug reale corretto, prima sempre agganciato alla ricerca invece che al campo in modifica), lingua/incolla come tasti fisici, suggerimenti contestuali per Launch Arguments e Custom Env (Wine/Proton) con tip esplicativo. Regola di progetto inaugurata: ogni nuova feature di navigazione prevede uno strumento di debug spegnibile (navDebugBus/NavDebugOverlay, Ctrl+Alt+N).",
+            "appliedAt": "2026-07-11T00:00:00.000Z",
+            "files": [
+                "src/components/FocusProvider.tsx",
+                "src/components/NavDebugOverlay.tsx",
+                "src/lib/navDebugBus.ts",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/GamepadTester.tsx",
+                "src/hooks/useGamepad.ts",
+                "src/App.tsx",
+                "src/backend/db.ts",
+                "server.ts",
+                "X-Launcher-Roadmap.md"
+            ]
+        },
+        {
+            "id": "step18-003-library-reliability-epic-power",
+            "description": "Affidabilità libreria/installazione: card che 'dimenticava' lo stato installato/disinstallato al cambio store, diagnosticata con log mirati attraverso una catena di cause reali distinte (notifica di libreria mai propagata dopo install/uninstall; sync GOG periodico reso asimmetrico, non revertire su segnale ambiguo di resolveGogExe; guard di sequenza contro fetch fuori ordine; connessione SSE persistente invece di chiusa/riaperta ad ogni cambio store, che perdeva eventi nella finestra di disconnessione; causa reale finale, cache di metadataManager che restituiva l'intero oggetto gioco stantio incluso isInstalled/executablePath). Conteggi Store Accounts corretti (erano filtrati dalla navigazione corrente della dashboard, non riflettevano mai i totali reali). Notifiche: auto-dismiss rimosso per gli esiti significativi (installazione completata), notifiche ripetute per lo stesso gioco sostituiscono invece di impilarsi, messaggio corretto sul cambio modalità schermo (richiede un riavvio, non immediato). Lancio Epic Games migrato a 'legendary launch' (risolve titoli con verifica di proprietà EOS severa, es. SIFU, mantenendo il runner Wine/Proton già configurato per ogni gioco) con rilevamento 'in esecuzione' per nome processo e periodo di grazia per l'avvio lento (autenticazione EOS online). Inibizione screensaver/sospensione durante il gioco per tutti gli store (xset + systemd-inhibit), con diagnosi in due tempi di un problema di pacchetto mancante sul sistema di test. Custom Env 'solo installazione': switch per-riga, non scritto nel profilo persistente, applicato una sola volta al processo di installazione.",
+            "appliedAt": "2026-07-12T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/types.ts",
+                "server.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/downloadManager.ts",
+                "src/backend/metadataManager.ts",
+                "src/backend/runners/implementations.ts"
+            ]
+        },
+        {
+            "id": "step18-004-epic-download-speed",
+            "description": "Ultimo bug del primo ciclo: velocità di download mai mostrata per i giochi Epic (widget Downloads e barra Net Bridge, entrambi a zero) mentre GOG funzionava correttamente. Causa confermata con issue GitHub dirette legendary/Heroic: legendary scrive percentuale e velocità su due righe separate ('= Progress: X%' e '+ Download - X MiB/s' su righe distinte), mai insieme come il vecchio parser assumeva. parseLegendaryProgress trasformata in una factory con stato (stesso pattern già usato per GOG), che ricorda l'ultima velocità vista e la abbina alla percentuale successiva.",
+            "appliedAt": "2026-07-12T00:00:00.000Z",
+            "files": [
+                "src/backend/downloadManager.ts"
+            ]
+        },
+        {
+            "id": "step19b-i18n-complete",
+            "description": "Step 18 (consolidamento fetch libreria in refreshGamesList(), con scoperta che login/logout/polling OAuth erano fetch ridondanti oltre che da unificare) seguito da Step 19b completo: i18next/react-i18next con backend HTTP per pacchetti di lingua caricabili in public/locales/, otto namespace di traduzione (settings, quickMenu, dashboard, gameOptions, downloads, notifications, avatarLibrary + il modulo a parte unsupportedLanguageNotices per lingue non ancora supportate), selettore di lingua manuale persistito in app.conf, autorilevamento della lingua di sistema al primo avvio (navigator.languages, fallback inglese con avviso multilingua ES/DE/FR/ZH). Knowledge Base dell'AI Advisor bilingue (colonna solution_en, 34 voci tradotte) e prompt di sistema AI (buildSystemPrompt) parametrizzato sulla lingua invece di 'in italiano' fisso. Audit completo del contenuto delle notifiche generate in giro per il codice. Fix di layout responsivo ricorrenti (flex-1 min-w-0/shrink-0, titoli su parola singola che non può andare a capo) e una race condition sul selettore di lingua al primo boot a freddo. Log di debug (writeLog/console.*) uniformati in sola lingua inglese in tutto il backend, per convenzione permanente da questa milestone in poi.",
+            "appliedAt": "2026-07-16T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "server.ts",
+                "src/i18n/i18n.ts",
+                "src/i18n/unsupportedLanguageNotices.ts",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/GamepadTester.tsx",
+                "src/backend/appConfig.ts",
+                "src/backend/knowledgeBase.ts",
+                "src/backend/notificationEngine.ts",
+                "src/backend/aiProviders/base.ts",
+                "src/backend/aiProviders/orchestrator.ts",
+                "src/backend/aiProviders/ollama.ts",
+                "src/backend/aiProviders/claude.ts",
+                "src/backend/aiProviders/gemini.ts",
+                "src/backend/aiProviders/openaiCompatible.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/metadataManager.ts",
+                "src/backend/downloadManager.ts",
+                "src/backend/runners/implementations.ts",
+                "src/backend/plugins/steamPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "kb-seed.json",
+                "package.json",
+                "metadata.json",
+                "X-Launcher-Roadmap.md"
+            ]
+        },
+        {
+            "id": "gaia-xlaunch-retroarch-keyboard",
+            "description": "Step 19a (xlaunch://) completo: protocollo URI progettato insieme all'utente prima di scrivere codice, xlaunch-handler.sh (delega a POST /api/launch, nessuna logica di lancio duplicata), registrazione xdg-mime via install.sh esteso, avvio a freddo con Dashboard nascosta (X_LAUNCHER_START_HIDDEN in kiosk-launch.sh), campo id contestuale nel Game Config per testare senza aprire DB/log. Due bugfix Proton (library folder Steam multiple, poi appmanifest .acf). Migliorie RetroArch: Launch Arguments contestuali, campo di override del titolo di scraping metadati (con rifetch immediato e correzione anche del titolo mostrato una volta confermato un abbinamento IGDB reale), preset shader CRT via --set-shader (--appendconfig= risulta ignorato da RetroArch). Cronologia \"giochi recenti\" nel menu contestuale della tray, con una saga di regressioni risolte fino alla causa reale (output soppresso su /dev/null, poi un vero crash pystray). Quattro fix alla tastiera virtuale: focus iniziale, navigazione ciclica orizzontale/verticale, un bug di FocusProvider che intrappolava la navigazione dai suggerimenti, apostrofo mancante.",
+            "appliedAt": "2026-07-18T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/components/VirtualKeyboard.tsx",
+                "src/components/FocusProvider.tsx",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/metadataManager.ts",
+                "src/backend/compatibilityManager.ts",
+                "src/backend/plugins/steamPlugin.ts",
+                "server.ts",
+                "kiosk-launch.sh",
+                "xlaunch-handler.sh",
+                "xlaunch-protocol.desktop",
+                "install.sh",
+                "tray.py",
+                "assets/retroarch-presets/crt-easymode.cfg",
+                "package.json",
+                "metadata.json",
+                "X-Launcher-Roadmap.md"
+            ]
+        },
+        {
+            "id": "post-gaia-crossde-sidebar-hardware",
+            "description": "Cross-DE per il kiosk mode (XFCE/MATE/GNOME/Plasma): rilevamento DE via XDG_CURRENT_DESKTOP, rimozione decorazioni con _MOTIF_WM_HINTS + dispatch per-DE (xfwm4 titleless_maximize su XFCE, confermato funzionante su hardware reale per Chromium e Firefox), fix Firefox (profilo dedicato con -no-remote, userChrome.css per nascondere barra indirizzi/tab, media.autoplay.default per l'audio), fix Gamepad API X/Y invertiti in Firefox (bug noto Mozilla su Linux). Tre nuove funzioni: dimensione prevista di installazione GOG/Epic con cache persistente (predicted_size_bytes), tempo di gioco reale accumulato per tutti gli store con protezione contro le sync di libreria (CASE WHEN su play_time_hours), tab Info Hardware in Gestisci Account (systemInfo.ts, sempre in ultima posizione). Rimossa cartella patches/ obsoleta, INSTALL.md riscritto, regole di sviluppo consolidate in X-Launcher-Roadmap.md.",
+            "appliedAt": "2026-07-20T00:00:00.000Z",
+            "files": [
+                "kiosk-launch.sh",
+                "build.sh",
+                "src/App.tsx",
+                "src/components/VirtualKeyboard.tsx",
+                "src/input/InputManager.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/systemInfo.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/types.ts",
+                "server.ts",
+                "public/locales/it/dashboard.json",
+                "public/locales/en/dashboard.json",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json",
+                "INSTALL.md",
+                "CHANGELOG.md",
+                "X-Launcher-Roadmap.md",
+                "package.json",
+                "metadata.json"
+            ]
+        },
+        {
+            "id": "post-v93-avatar-sidebar-retroarch-remaster",
+            "description": "Fix persistenza avatar (spostata da localStorage a server) e versione stantia nel menu (secondo useEffect che sovrascriveva silenziosamente appVersion, rimosso). Tre funzioni sidebar/Gestisci Account confermate su hardware reale: dimensione prevista installazione GOG/Epic (cache persistente, sintassi lgogdownloader e formato dimensione corretti dopo test reali), tempo di gioco reale tutti gli store (fix persistenza CASE WHEN contro le sync di libreria), tab Info Hardware (systemInfo.ts, tutto leggibile senza permessi elevati, sempre ultima tab). Saga RetroArch: cattura stdout/stderr mai avvenuta (logPath mancante in spawnDetached), poi bug PSX reale (zip CD multi-file richiede estrazione automatica, core di default pcsx_rearmed non pacchettizzato per x86_64 sostituito con mednafen_psx). Funzione 'Auto-Remaster' PSX verificata da terminale (override per-contenuto nativo RetroArch, non --appendconfig=), poi generalizzata in un registro REMASTER_PRESETS estendibile per futuri sistemi. Rimossa patches/, INSTALL.md riscritto, regole di sviluppo consolidate.",
+            "appliedAt": "2026-07-21T00:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "src/types.ts",
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/systemInfo.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "src/backend/runners/implementations.ts",
+                "server.ts",
+                "public/locales/it/dashboard.json",
+                "public/locales/en/dashboard.json",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json",
+                "public/locales/it/gameOptions.json",
+                "public/locales/en/gameOptions.json",
+                "INSTALL.md",
+                "CHANGELOG.md",
+                "X-Launcher-Roadmap.md",
+                "package.json",
+                "metadata.json"
+            ]
+        },
+        {
+            "id": "post-gaia-infra-hardening",
+            "description": "Consolidamento infrastrutturale post-Gaia: fix cwd ProtonRunner (cache DXVK finiva nella cartella progetto invece che accanto all'eseguibile, resolveLaunchCwd condivisa con WineRunner); .env spostato da $PROJECT_DIR a ~/.local/share/x-launcher/.env (xdash.service non lo caricava mai, npm run dev nemmeno) — nuovo paths.ts come unica fonte di verità per DATA_DIR/ENV_PATH, consolidava 7 duplicazioni sparse nel backend, nuovo scripts/with-env.sh; fix estrazione manuale Classic Console (findMatchingCueInDir cercava solo in .extracted/, non in un'estrazione fatta a mano nella cartella di sistema); MangoHud da booleano a 3 stati (spento/compatta/completa con MANGOHUD_CONFIG=preset=4), gap ProtonRunner colmato (non lo supportava affatto); supporto .7z per Classic Console (nuovo archiveExtractors.ts, registry utility-agnostic zip/7z/rar, rilevamento tool in tab System); fix libreria GOG (voci 'Goodies Collection' mostrate come gioco, card fantasma da URL di re-auth scambiato per titolo, pulizia mirata delle voci già in DB); allineamento e colore uniforme dei due pulsanti Aggiorna in tab System.",
+            "appliedAt": "2026-07-23T00:00:00.000Z",
+            "files": [
+                "src/backend/paths.ts",
+                "src/backend/archiveExtractors.ts",
+                "scripts/with-env.sh",
+                "src/backend/runners/implementations.ts",
+                "src/backend/db.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/logger.ts",
+                "src/backend/knowledgeBase.ts",
+                "src/backend/notificationEngine.ts",
+                "src/backend/plugins/classicPlugin.ts",
+                "src/backend/plugins/gogPlugin.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/compatibilityManager.ts",
+                "src/types.ts",
+                "src/App.tsx",
+                "server.ts",
+                "kiosk-launch.sh",
+                "xdash.service",
+                "install.sh",
+                "package.json"
+            ]
+        },
+        {
+            "id": "ai-advisor-single-provider-budget",
+            "description": "AI Advisor ridisegnato su richiesta utente: UN SOLO provider attivo alla volta (mutua esclusività in db.upsertAiProviderCredential), budget PER-PROVIDER con blocco reale all'esaurimento (prima solo mostrato, mai applicato — orchestrator.ts ora fa give_up immediato senza chiamare il provider se il budget è esaurito), notifica automatica all'80% una volta al mese, Ollama/provider locali sempre ∞ mai bloccati, default 5.000.000 token alla prima configurazione. Bug reale corretto nella stessa milestone: la mutua esclusività Ollama→cloud non si rifletteva in UI per un refresh mancante lato client.",
+            "appliedAt": "2026-07-23T12:00:00.000Z",
+            "files": [
+                "src/backend/db.ts",
+                "src/backend/appConfig.ts",
+                "src/backend/aiProviders/orchestrator.ts",
+                "server.ts",
+                "src/App.tsx"
+            ]
+        },
+        {
+            "id": "wine-deps-widget-compact-navigation",
+            "description": "Vista compatta/estesa per il widget 'Dipendenze Wine' nell'overlay (switch pill, default solo i 4 verb consigliati, estesa aggiunge gli 11 opzionali) per accorciare la navigazione fino in fondo all'overlay. Fix di navigazione: lo switch era raggiungibile solo con la leva destra, mai scorrendo su/giù — collegamento esplicito in tre punti (campo precedente → switch → prima checkbox) risolve la causa reale (scoring geometrico che lo scavalcava del tutto).",
+            "appliedAt": "2026-07-23T18:00:00.000Z",
+            "files": [
+                "src/App.tsx",
+                "public/locales/it/gameOptions.json",
+                "public/locales/en/gameOptions.json"
+            ]
+        },
+        {
+            "id": "amazon-games-plugin-nile-complete",
+            "description": "Step 19c completo: plugin Amazon Games via nile (github.com/imLinguin/nile), sostituendo uno stub esistente mai completato. Ogni comando verificato con output reale fornito dall'utente prima di scrivere codice (mai un formato indovinato, stesso rigore già applicato a GOG): libreria via 'nile library list --json' (product.id come identificativo reale, non product.sku), autenticazione completa (login/logout/isAuthenticated via nile auth --login/--status/--logout), dimensione prevista d'installazione (nile install --info --json → download_size), orchestrazione reale di download/installazione (runAmazon() in downloadManager.ts, stesse funzioni condivise di runEpic/runGog — parser di progresso dedicato per il formato di nile, diverso da legendary/lgogdownloader, con un artefatto di visualizzazione di nile scoperto e deliberatamente non replicato). Saga di bug corretti dopo l'attivazione reale del plugin, tutti residui dello stub mai aggiornato o limiti reali di nile scoperti sul campo: stato account/descrizione plugin/dimensione prevista/widget Dipendenze Wine tutti richiedevano estendere controlli hardcoded pensati solo per GOG/Epic; disinstallazione non rimuoveva file reali né avvisava nile (storeDir null per Amazon, mai chiamato 'nile uninstall'); 'nile library --installed' verificato ROTTO (ignora il flag, restituisce sempre l'intera libreria) — isInstalled per Amazon affidato interamente a gameManager.protectInstalledState() invece che al dato di nile; winetricksVerbs risultato non salvato per installazioni con soli verb di default (bug trasversale a GOG/Epic/Amazon, non solo Amazon — corretto con persistWinetricksVerbs() condivisa); rilevamento dei verb installati manualmente da terminale via 'winetricks list-installed' (comando che stampa anche banner/font non richiesti, filtrato contro un nuovo elenco condiviso wineVerbs.ts, riusato sia da App.tsx sia dal backend); resolveRunnerWineEnv corretto anche nel ricontrollo dipendenze ad ogni lancio (puntava sempre a wine di sistema invece del binario della build Proton effettivamente in uso). Discussione approfondita su condivisione dipendenze fra runner diversi (Wine↔Proton): scartata l'idea di link simbolici/copia della cartella utente (rischio di corruzione fra generazioni Wine/Proton, dimostrato da un log reale con 'Prefix has an invalid version?!'), adottata la riapplicazione automatica dei verb tracciati + notifica esplicita quando si cambia runner (niente copia salvataggi automatica).",
+            "appliedAt": "2026-07-24T00:00:00.000Z",
+            "files": [
+                "src/backend/plugins/amazonPlugin.ts",
+                "src/backend/downloadManager.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/db.ts",
+                "src/wineVerbs.ts",
+                "src/App.tsx",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json"
+            ]
+        },
+        {
+            "id": "cloud-backup-google-drive-complete",
+            "description": "Nuova funzione Cloud Backup, disegnata insieme all'utente prima di scrivere codice: backup/ripristino espliciti (mai sync automatica) di soli dati verificati utili su una nuova installazione — compat_profiles, Knowledge Base AI Advisor, app.conf, cartella avatars/ (immagini vere), .env (chiavi scraping + percorso Roms) — mai libreria/prefix/installazioni/config legendary-lgogdownloader-nile/token/preferenze. Integrata nella tab Account esistente (non una nuova tab, su decisione esplicita). Un solo provider cloud attivo alla volta come per l'AI Advisor, Google Drive come primo (altri in futuro/community). Flusso OAuth verificato passo per passo prima di scrivere codice: Device Flow scartata (non supporta gli scope Drive, invalid_scope confermato da segnalazione reale), flusso out-of-band scartato (dismesso da Google dal 2022), redirect loopback su client tipo 'Desktop app' confermato come meccanismo raccomandato (deprecato solo per Android/iOS/Chrome-app) — server HTTP locale su porta libera, apre il Firefox già integrato nella dashboard, scambia codice→token, refresh token in tokens.json (mai nel DB). Scope drive.appdata (cartella nascosta dedicata all'app, gratuita, confermato dalla documentazione ufficiale Google). Bundle come JSON gzippato (zlib nativo, nessuna nuova dipendenza npm, avatar in base64). Gestito un problema di ordinamento reale: compat_profiles.game_id ha FOREIGN KEY verso games(id) con foreign_keys=ON — ripristinare un profilo per un gioco non ancora scansionato violerebbe il vincolo, gestito riga per riga con try/catch, righe compatibili ripristinate, altre saltate e segnalate esplicitamente. Due bug di navigazione corretti dopo test reali col controller: un Fragment mancante (la sezione era un secondo elemento fratello in un ramo ternario che può contenere un solo elemento JSX) e una causa più sottile — l'elenco store reale è di 6 voci (GOG, Steam, Epic, Amazon, Battle.net, Classic Console) non 3 come assunto in un primo tentativo di fix, e i due store 'noLogin' non renderizzano mai un elemento navigabile, lasciando le card sopra di loro senza nulla di reale sotto in griglia nonostante l'array avesse un elemento a quella posizione. Completata la catena di navigazione interna del widget e corretto un indicatore di focus mancante sullo switch attivo. Due difetti minori corretti: traduzione inglese mancante per la descrizione del provider (stesso meccanismo già in uso per le descrizioni dei plugin store) e margine orizzontale insufficiente nei pulsanti (esteso, dopo segnalazione dell'utente, anche ai pulsanti di interazione delle notifiche che condividevano lo stesso difetto).",
+            "appliedAt": "2026-07-25T00:00:00.000Z",
+            "files": [
+                "src/backend/cloudBackup/base.ts",
+                "src/backend/cloudBackup/googleDrive.ts",
+                "src/backend/cloudBackup/bundle.ts",
+                "src/backend/cloudBackup/registry.ts",
+                "src/backend/db.ts",
+                "src/backend/knowledgeBase.ts",
+                "server.ts",
+                "src/App.tsx",
+                "public/locales/it/settings.json",
+                "public/locales/en/settings.json"
+            ]
+        },
+        {
+            "id": "compat-profile-merge-fix",
+            "description": "Bug reale confermato (Death Stranding, Epic Games): gameManager.updateCompatProfile() passava il body della richiesta PATCH direttamente a db.upsertCompatProfile(), che scrive winetricksVerbs ?? [] — qualunque PATCH che non includesse esplicitamente winetricksVerbs (es. il toggle 'Usa Known Fixes', che rilegge il profilo dal server invece di includere lo stato locale delle checkbox) azzerava silenziosamente il campo, per qualunque toggle dell'overlay condividesse lo stesso schema fetch-poi-patch. Fix: updateCompatProfile ora fonde sempre con la riga già esistente nel DB prima di scrivere.",
+            "appliedAt": "2026-07-26T00:00:00.000Z",
+            "files": [
+                "src/backend/gameManager.ts"
+            ]
+        },
+        {
+            "id": "mangohud-fsr-gamemode-anticheat-proton-parity",
+            "description": "MangoHud funzionava con Wine ma non con Proton per i giochi Epic Games: i giochi Epic passano sempre per launchEpicViaLegendary() (sia Wine sia Proton), mai per le classi WineRunner/ProtonRunner direttamente — la traduzione di config.mangohud in variabili d'ambiente reali esisteva solo dentro quelle due classi. Verificando anche FSR/GameMode/EasyAntiCheat/BattlEye: FSR e GameMode risultati mancanti anche in ProtonRunner stesso (non solo nel percorso Epic) — aggiunti ovunque mancassero. EAC/BattlEye: le variabili PROTON_EAC_RUNTIME/PROTON_BATTLEYE_RUNTIME sono lette solo dallo script di avvio di Proton (verificato con una segnalazione diretta di uno sviluppatore su GitHub) — il blocco che le impostava dentro WineRunner non ha mai avuto effetto reale, spostato in ProtonRunner. Nell'interfaccia, i tile EasyAntiCheat/BattlEye sono ora oscurati e non selezionabili quando il runner attivo per un gioco è quello di default (Wine-Lutris) invece di un runner Proton, invece di lasciarli sembrare attivi senza esserlo.",
+            "appliedAt": "2026-07-26T12:00:00.000Z",
+            "files": [
+                "src/backend/runners/implementations.ts",
+                "src/App.tsx"
+            ]
+        },
+        {
+            "id": "dynamic-version-display-reimplemented",
+            "description": "Reimplementato l'aggiornamento automatico della versione mostrata nel menu, questa volta senza ripetere il bug storico v1.1.87 (un effect precedente leggeva /api/version, che a sua volta leggeva metadata.json — toccato solo ai congelamenti di milestone, mai ai fix quotidiani, restando fermo alla primissima build). Corretto: /api/version ora legge package.json, aggiornato ad ogni singola modifica di sviluppo — fonte affidabile senza bisogno di alcun intervento manuale specifico per il menu.",
+            "appliedAt": "2026-07-26T13:00:00.000Z",
+            "files": [
+                "server.ts",
+                "src/App.tsx"
+            ]
+        },
+        {
+            "id": "code-quality-audit-a-bugs-and-security",
+            "description": "Audit qualità del codice richiesto esplicitamente dall'utente (riepilogo delle criticità presentato prima di ogni correzione). Punto A: bug funzionali reali e rischi di sicurezza. A1: rowToDownload()/getPendingDownloads() in db.ts dichiaravano di restituire un DownloadTask completo, ma la tabella downloads persiste solo 7 dei campi richiesti — il ripristino dei download interrotti dopo un riavvio del demone riceveva store/installPath/prefixPath/winetricksVerbs a undefined. Corretto senza migrazione schema: arricchimento in gameManager.init() recuperando i dati da games/compat_profiles già esistenti. A2: epicPlugin.ts chiamava writeLog con 3 argomenti (ne accetta 2), scartando silenziosamente il dettaglio reale di un errore di parsing. A3: server.ts costruiva il comando di autenticazione Epic interpolando il codice incollato dall'utente in una stringa shell tra doppi apici — vulnerabile a $(...) in bash. Sostituito con execFileSync ad argomenti separati, injection eliminata strutturalmente. A4: i verb winetricks di un fix Heroic (dati esterni da un repository GitHub) finivano non validati in un comando shell — nuova sanitizeKnownFixVerbs() che accetta solo voci nell'elenco riconosciuto condiviso.",
+            "appliedAt": "2026-07-27T10:00:00.000Z",
+            "files": [
+                "src/backend/db.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/downloadManager.ts",
+                "src/backend/plugins/epicPlugin.ts",
+                "server.ts"
+            ]
+        },
+        {
+            "id": "code-quality-audit-b-d-types-and-dead-code",
+            "description": "Punti B e D dell'audit qualità codice. B1: AppNotification.source in types.ts non dichiarava 'validation', un valore realmente scritto da notificationEngine.ts per il test protocollo post-chiusura gioco — funzionava a runtime ma il compilatore lo segnalava come impossibile. B2: gameManager.ts usava un import dinamico con percorso relativo sbagliato (./types invece di ../types) solo per un'annotazione di tipo — innocuo a runtime, semplificato riusando il tipo già importato in cima al file. D: compatibilityManager.getDefaultProfile() restituiva dxvk/vkd3d, campi morti che non esistono nel tipo CompatibilityProfile (gestiti tramite verb winetricks in questo design) e mancava eac/battleye, entrambi richiesti — corretti entrambi, pur notando che l'intera funzione non risulta mai chiamata da nessun punto del progetto.",
+            "appliedAt": "2026-07-27T11:00:00.000Z",
+            "files": [
+                "src/types.ts",
+                "src/backend/gameManager.ts",
+                "src/backend/compatibilityManager.ts"
+            ]
+        },
+        {
+            "id": "code-quality-audit-e-deduplication",
+            "description": "Punto E dell'audit qualità codice: la stessa traduzione configurazione→variabili d'ambiente (FSR, MangoHud, EasyAntiCheat/BattlEye, GameMode) era scritta tre volte quasi identica in WineRunner, ProtonRunner e launchEpicViaLegendary — già dimenticata due volte nella stessa sessione in un quarto punto di lancio (MangoHud/FSR/GameMode mancanti in ProtonRunner e nel percorso Epic, corretti in build precedenti). Estratte quattro funzioni condivise (applyFsrEnv, applyMangoHudEnv, applyProtonAnticheatEnv, resolveGameModeWrapping), nessun cambiamento di comportamento — elimina strutturalmente il rischio che un quarto punto di lancio futuro dimentichi la stessa traduzione. App.tsx (~9.000 righe) lasciato deliberatamente invariato su decisione dell'utente: i collegamenti di navigazione controller sparsi nel file sono ID stringa mai verificati dal compilatore, uno split strutturale rischierebbe di romperli silenziosamente — da riprendere in futuro con un intervento mirato (useMemo/useCallback sui punti più costosi) invece di uno split.",
+            "appliedAt": "2026-07-27T12:00:00.000Z",
+            "files": [
+                "src/backend/runners/implementations.ts"
+            ]
+        }
+    ],
+    "version": "1.5.7-Venus",
+    "milestone": "v1.5.7-Venus — MILESTONE STABILE. Terza della serie Venus, precede v1.5.3-Venus. Contiene un audit di qualità del codice completo, richiesto esplicitamente dall'utente: riepilogo di tutte le criticità presentato prima di ogni correzione, poi risolto a step confermati uno alla volta (punti A-E). Tre bug funzionali reali corretti (ripristino download interrotti, log silenzioso, verb Known Fixes non validati), un rischio di sicurezza reale eliminato (injection nel comando di autenticazione Epic) e uno mitigato (verb esterni non sanificati), due tipi TypeScript scorretti risolti, codice morto ripulito, tre punti di duplicazione (FSR/MangoHud/EAC/BattlEye/GameMode fra i tre punti di lancio) consolidati in funzioni condivise. Errori TypeScript pre-esistenti ridotti da 23 a 18, zero nuovi introdotti in ciascuno degli step, verificato con tsc --noEmit ad ogni singola correzione.",
+    "date": "2026-07-27",
+    "notes": "Terza milestone stabile della serie Venus, congelata su richiesta esplicita dell'utente dopo un giro completo di audit qualità del codice. Metodologia seguita: riepilogo di tutte le criticità presentato PRIMA di applicare qualunque correzione, poi risolto punto per punto con conferma esplicita dell'utente prima di ogni gruppo di fix, sempre verificato con tsc --noEmit contro lo zip originale intatto. Vedi CHANGELOG.md per il dettaglio v1.5.4-dev.1 → v1.5.7-dev.1."
+}

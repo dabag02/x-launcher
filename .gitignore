@@ -1,0 +1,36 @@
+# Dipendenze — si rigenerano con npm install
+node_modules/
+
+# Build
+dist/
+dist-server/
+*.tsbuildinfo
+
+# Cache Python (tray.py)
+__pycache__/
+*.pyc
+
+# Database e stato locale — vivono in ~/.local/share/x-launcher/, mai
+# dentro il repo, ma per sicurezza se mai finissero qui per errore
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# File di ambiente/segreti — se mai ne aggiungerete
+.env
+.env.local
+*.local
+
+# File di backup (.bak, .bak0, .bak1, .bak2, ...)
+*.bak*
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Log locali
+*.log
+npm-debug.log*

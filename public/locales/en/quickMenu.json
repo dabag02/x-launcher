@@ -1,0 +1,16 @@
+{
+  "title": "Settings",
+  "manageAccounts": "Manage Accounts",
+  "avatar": "Avatar",
+  "gamescopeMode": "Gamescope Mode",
+  "on": "On",
+  "off": "Off",
+  "toggleTheme": "Toggle Theme",
+  "consoleMode": "Console Mode",
+  "backToDesktop": "Back to Desktop",
+  "displayMode": "Display Mode",
+  "windowed": "Windowed",
+  "fullScreen": "Full Screen",
+  "exit": "Exit",
+  "confirmA": "Confirm A"
+}

@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-primary: #0b0c0f;
+  --color-bg-secondary: #161920;
+  --color-bg-sidebar: #12141a;
+  --color-bg-card: #1c212a;
+  --color-bg-footer: #090a0d;
+  --color-accent: #2563eb; /* blue-600 */
+}
+
+@layer base {
+  body {
+    @apply bg-bg-primary text-gray-100 font-sans overflow-hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Gamepad activation hint */
+@keyframes fadeInOut {
+  0%   { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  15%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Barre di progresso indeterminate per install/uninstall runner: nessuna
+   percentuale reale disponibile dai comandi sottostanti (protonup, curl,
+   rm), quindi queste animano solo per comunicare "lavoro in corso" senza
+   fingere un avanzamento numerico che non possiamo misurare onestamente. */
+@keyframes runnerProgressLtr {
+  0%   { left: 0; right: auto; width: 30%; }
+  50%  { left: 70%; right: auto; width: 30%; }
+  100% { left: 0; right: auto; width: 30%; }
+}
+@keyframes runnerProgressRtl {
+  0%   { right: 0; left: auto; width: 30%; }
+  50%  { right: 70%; left: auto; width: 30%; }
+  100% { right: 0; left: auto; width: 30%; }
+}
+
+/* v0.99.29 — FIX: cursor-none (Tailwind) applicato solo al div radice non
+   bastava a nascondere il cursore quando il puntatore si trova fisicamente
+   sopra un elemento figlio con un proprio cursor esplicito (cursor-pointer
+   su card/bottoni, presente ovunque nell'app) — CSS più specifico sul
+   figlio vince sempre su quello del genitore più esterno, indipendentemente
+   da dove sia applicata la classe nell'albero React. !important sul
+   selettore universale dentro .cursor-hidden-global forza cursor:none su
+   QUALSIASI discendente, qualunque cursore quell'elemento dichiari
+   altrimenti, senza dover rimuovere cursor-pointer da decine di elementi
+   sparsi nel codice. */
+.cursor-hidden-global, .cursor-hidden-global * {
+  cursor: none !important;
+}
+
+/* v0.99.90 — titoli notifica troppo lunghi per lo spazio disponibile
+   (ScrollOnceTitle in App.tsx): rivela il testo per intero una sola
+   volta scorrendo a sinistra, si ferma un istante alla fine, poi torna
+   all'inizio — dove resta finché la notifica non viene rimossa. Applicata
+   via style inline solo quando il testo eccede davvero lo spazio (vedi
+   il componente), --scroll-distance impostata dinamicamente in base alla
+   larghezza reale del testo. */
+@keyframes scroll-once-reveal {
+  0%   { transform: translateX(0); }
+  40%  { transform: translateX(var(--scroll-distance)); }
+  60%  { transform: translateX(var(--scroll-distance)); }
+  100% { transform: translateX(0); }
+}
