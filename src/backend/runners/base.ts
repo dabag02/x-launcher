@@ -10,6 +10,10 @@ export interface RunnerConfig {
   mangohud?: 0 | 1 | 2;
   eac?:      boolean;
   battleye?: boolean;
+  // v1.5.20-dev.1 — vedi CompatibilityProfile.umuRun in types.ts. Letto
+  // solo da ProtonRunner (nessun significato per WineRunner — umu-run
+  // richiede sempre una build Proton come PROTONPATH).
+  umuRun?:   boolean;
 }
 
 export abstract class BaseRunner {

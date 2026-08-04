@@ -21,9 +21,10 @@
 #  partono) vengono installate automaticamente, previa conferma.
 #  Dipendenze RACCOMANDATE (funzioni opzionali: Amazon Games,
 #  Steam/ProtonUp per i runner, EAC/BattlEye via Lutris, AI
-#  Advisor via Ollama, overlay MangoHud/GameMode) vengono SOLO
-#  segnalate — l'installazione resta a discrezione dell'utente,
-#  subito o in un secondo momento a mano.
+#  Advisor via Ollama, overlay MangoHud/GameMode, selezione file
+#  via Zenity/Kdialog per Sfoglia sui launcher terzi condivisi)
+#  vengono SOLO segnalate — l'installazione resta a discrezione
+#  dell'utente, subito o in un secondo momento a mano.
 # =============================================================
 set -e
 
@@ -223,6 +224,9 @@ case "$DISTRO_FAMILY" in
     check_recommended "ollama"      "curl -fsSL https://ollama.com/install.sh | sh" "Ollama (AI Advisor)"
     check_recommended "mangohud"    "sudo pacman -S mangohud" "MangoHud"
     check_recommended "gamemoderun" "sudo pacman -S gamemode" "GameMode"
+    check_recommended "zenity"      "sudo pacman -S zenity" "Zenity (selezione file — Sfoglia per installer launcher terzi)"
+    check_recommended "kdialog"     "sudo pacman -S kdialog  (di norma già presente su Plasma/KDE)" "Kdialog (alternativa a Zenity su desktop KDE)"
+    check_recommended "umu-run"     "sudo pacman -S umu-launcher  (repository multilib)" "Umu-launcher (switch Compatibility Layer — container Steam Linux Runtime)"
     ;;
   debian)
     check_recommended "nile"        "pip install --user git+https://github.com/imLinguin/nile.git  (nessun pacchetto .deb noto)" "Amazon Games (nile)"
@@ -232,6 +236,9 @@ case "$DISTRO_FAMILY" in
     check_recommended "ollama"      "curl -fsSL https://ollama.com/install.sh | sh" "Ollama (AI Advisor)"
     check_recommended "mangohud"    "sudo apt install mangohud" "MangoHud"
     check_recommended "gamemoderun" "sudo apt install gamemode" "GameMode"
+    check_recommended "zenity"      "sudo apt install zenity" "Zenity (selezione file — Sfoglia per installer launcher terzi)"
+    check_recommended "kdialog"     "sudo apt install kdialog  (di norma già presente su Kubuntu/Plasma)" "Kdialog (alternativa a Zenity su desktop KDE)"
+    check_recommended "umu-run"     "nessun pacchetto ufficiale nei repo — scarica il .deb per la tua versione (debian-12/13/ubuntu-noble) da https://github.com/Open-Wine-Components/umu-launcher/releases e installa con: sudo dpkg -i python3-umu-launcher_*.deb" "Umu-launcher (switch Compatibility Layer — container Steam Linux Runtime)"
     ;;
   fedora)
     check_recommended "nile"        "pip install --user git+https://github.com/imLinguin/nile.git  (nessun pacchetto RPM noto)" "Amazon Games (nile)"
@@ -241,6 +248,9 @@ case "$DISTRO_FAMILY" in
     check_recommended "ollama"      "curl -fsSL https://ollama.com/install.sh | sh" "Ollama (AI Advisor)"
     check_recommended "mangohud"    "sudo dnf install mangohud" "MangoHud"
     check_recommended "gamemoderun" "sudo dnf install gamemode" "GameMode"
+    check_recommended "zenity"      "sudo dnf install zenity" "Zenity (selezione file — Sfoglia per installer launcher terzi)"
+    check_recommended "kdialog"     "sudo dnf install kdialog  (di norma già presente su Fedora KDE Spin)" "Kdialog (alternativa a Zenity su desktop KDE)"
+    check_recommended "umu-run"     "nessun pacchetto ufficiale nei repo — scarica l'rpm per la tua versione (fcNN) da https://github.com/Open-Wine-Components/umu-launcher/releases e installa con: sudo dnf install ./umu-launcher-*.rpm" "Umu-launcher (switch Compatibility Layer — container Steam Linux Runtime)"
     ;;
 esac
 

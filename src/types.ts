@@ -16,6 +16,19 @@ export interface CompatibilityProfile {
   mangohud:   0 | 1 | 2;  // MangoHud overlay — vedi runners/implementations.ts
   eac:        boolean;   // EasyAntiCheat compatibilità (PROTON_EAC_RUNTIME)
   battleye:   boolean;   // BattlEye compatibilità (PROTON_BATTLEYE_RUNTIME)
+  // v1.5.20-dev.1 — lancio via `umu-run` invece di `<proton> run` diretto:
+  // replica il container Steam Linux Runtime (pressure-vessel) che Steam
+  // usa sempre per i lanci Proton, anche per app non-Steam — il nostro
+  // `proton run` diretto lo bypassa del tutto. Nato per Ubisoft Connect
+  // (finestra nera dal secondo avvio, causa: proprio questo container
+  // mancante — vedi CHANGELOG.md), ma generalizzato: switch disponibile
+  // per QUALUNQUE gioco/runner Proton, non solo i launcher condivisi.
+  // Riusa la stessa prefix già creata da resolveRunnerWineEnv/
+  // prepareWinePrefix (WINEPREFIX=<containerPrefixPath>/pfx, verificato
+  // compatibile — nessuna migrazione). Se `umu-run` non è installato,
+  // ProtonRunner ripiega sul `proton run` diretto attuale con un log
+  // di avviso, non blocca mai il lancio.
+  umuRun?:    boolean;
   // v0.99.35 — disabilita il driver kernel ntsync (WINE_DISABLE_FAST_SYNC=1)
   // durante L'INSTALLAZIONE (wineboot/winetricks), non solo al lancio.
   // Causa diagnosticata su Soulstice/Epic: wineboot --init blocca a
@@ -154,6 +167,31 @@ export interface Game {
    *            config locale stabile.
    */
   verificationMethod?: 'auto' | 'manual';
+
+  /**
+   * Step 19d — id di un launcher terzo condiviso (vedi
+   * thirdPartyLaunchers.ts) da cui questo gioco dipende, es.
+   * 'ubisoft-connect'. Impostato manualmente dall'utente nell'overlay —
+   * mai auto-rilevato, nessun modo affidabile di sapere in anticipo se un
+   * titolo lo richiede prima di provarlo. undefined = nessuna dipendenza,
+   * prefix isolato per-gioco come sempre. Se impostato, prefixPath di
+   * questo gioco viene risolto sul prefix condiviso di quel launcher
+   * (resolveSharedPrefixExecutionPath in sharedLauncherManager.ts) invece
+   * che su uno isolato — e il Runner Bridge per questo gioco resta
+   * vincolato a sole build Proton/GE-Proton, mai Wine.
+   */
+  requiresLauncher?: string;
+
+  /**
+   * Step 19d, Fase 1 — marca la card virtuale "installer/launcher" di un
+   * launcher terzo condiviso (es. 'ubisoft-connect'), iniettata SOLO lato
+   * frontend (mai persistita, mai restituita da gameManager.getGames()) —
+   * stesso principio di isBigPictureLauncher sopra, generalizzato con un
+   * solo campo invece di un booleano per ciascuno dei 4 launcher futuri.
+   * Qualunque handler che riceve un Game deve controllare questo campo
+   * prima di trattarlo come un titolo reale.
+   */
+  thirdPartyLauncherCard?: string;
 }
 
 export interface Store {
@@ -199,6 +237,11 @@ export type DownloadPhase =
   | 'creating_prefix'    // WINEPREFIX in creazione
   | 'installing_deps'    // winetricks dipendenze
   | 'installing_game'    // setup.exe / legendary in corso
+  // Step 19d — installer di un launcher terzo condiviso non trovato in
+  // ~/Downloads: il task resta qui, in attesa che l'utente prema Continua
+  // (dopo aver scaricato) o Sfoglia (per indicare dove si trova) dalla
+  // notifica — non un errore, solo un'azione dell'utente in sospeso.
+  | 'awaiting_installer'
   | 'completed'          // tutto completato
   | 'error';             // errore fatale
 
@@ -216,6 +259,11 @@ export interface DownloadTask {
   installPath:      string;        // ~/Games/GOG/<slug>/files/
   prefixPath:       string;        // ~/Games/GOG/<slug>/prefix/
   installerPath?:   string;        // ~/Games/GOG/<slug>/installer/setup.exe
+  // Step 19d — pagina ufficiale di download del launcher condiviso,
+  // valorizzata solo in fase awaiting_installer — consolidato nel
+  // pannello Download invece che in una notifica a parte (feedback
+  // utente: l'interazione per le installazioni vive sempre qui).
+  downloadUrl?:     string;
   winetricksVerbs:  string[];      // dipendenze da installare
   disableWineSync?: boolean;       // v0.99.35 — WINE_DISABLE_FAST_SYNC=1 per wineboot/winetricks
   useKnownFixes?:   boolean;       // v0.99.35 — interroga Heroic known-fixes prima di winetricks
@@ -328,6 +376,19 @@ export interface AppNotification {
   gameTitle?:     string;
   primaryAction?:   NotificationAction;
   secondaryAction?: NotificationAction;
+  // Step 19d — terzo slot, introdotto per Continua/Annulla/Sfoglia
+  // insieme nel flusso di installazione manuale di Ubisoft Connect —
+  // generico, riusabile da qualunque notifica futura ne avesse bisogno.
+  tertiaryAction?:  NotificationAction;
+  /**
+   * Link cliccabile/selezionabile da controller, distinto dai pulsanti
+   * azione sopra — es. la pagina ufficiale di download di un launcher
+   * terzo. Renderizzato come elemento a sé nella card (mai dentro
+   * `body`, per evitare di dover fare parsing di link in testo libero).
+   * Il click/selezione chiama sempre l'apertura nel browser esterno.
+   */
+  linkUrl?:  string;
+  linkLabel?: string;
   rawLog?:        string;      // stderr/log grezzo, espandibile
   timestamp:      string;
   source:         'system' | 'pattern' | 'kb' | 'ai' | 'validation';

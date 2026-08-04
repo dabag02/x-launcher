@@ -41,6 +41,9 @@ import { writeLog } from './logger';
 import { prepareWinePrefix } from './winePrefixManager';
 import { ALL_KNOWN_WINE_VERBS } from '../wineVerbs';
 import { resolveProtonBin } from './runners/implementations';
+import { getSharedPrefixBasePath, resolveSharedPrefixExecutionPath } from './sharedLauncherManager';
+import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
+import { browseForFile } from './filePicker';
 
 // v0.99.35 — versione asincrona di execFile, usata per "sync" tra
 // download e creazione prefix (vedi runEpic/runGOG). Non sostituisce
@@ -309,6 +312,7 @@ const PHASE_LABELS: Record<DownloadPhase, string> = {
   creating_prefix:  'Creazione ambiente Wine...',
   installing_deps:  'Installazione dipendenze...',
   installing_game:  'Installazione gioco...',
+  awaiting_installer: 'In attesa dell\'installer...',
   completed:        'Installazione completata!',
   error:            'Errore durante l\'installazione',
 };
@@ -485,7 +489,7 @@ export function resolveGogExe(installPath: string): {
  * Usato solo se le sorgenti autorevoli non sono disponibili.
  * Restituisce il path assoluto o null.
  */
-function findMainExe(basePath: string): string | null {
+export function findMainExe(basePath: string): string | null {
   if (!existsSync(basePath)) return null;
   try {
     const result = execSync(
@@ -495,6 +499,68 @@ function findMainExe(basePath: string): string | null {
       `! -iname "dxsetup*" ! -iname "vc_redist*" ` +
       `| head -1`,
       { encoding: 'utf-8', timeout: 8000 }
+    ).trim();
+    return result || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Step 19d — bug reale trovato: findMainExe() sopra è pensata per la
+ * cartella isolata di un singolo gioco (GOG/Epic/Amazon), MAI per un
+ * drive_c intero di un prefix Wine/Proton condiviso — quest'ultimo
+ * contiene anche `windows/` pieno di utility di sistema (explorer,
+ * notepad, redist helper...) che possono matchare `*.exe` prima del
+ * vero eseguibile installato. Verificato su hardware reale: puntare
+ * findMainExe(drive_c) ha restituito l'utility Explorer di Wine invece
+ * di UbisoftConnect.exe.
+ *
+ * Questa funzione, usata SOLO per i launcher terzi condivisi, restringe
+ * la ricerca a `Program Files*` (dove finiscono le app installate),
+ * MAI dentro `windows/`, e prova prima l'hint dichiarato nel registro
+ * (thirdPartyLaunchers.ts) come percorso esatto.
+ */
+export function findInstalledLauncherExe(driveCPath: string, hintRelPath?: string): string | null {
+  if (hintRelPath) {
+    const hinted = path.join(driveCPath, hintRelPath);
+    if (existsSync(hinted)) return hinted;
+  }
+  for (const sub of ['Program Files (x86)', 'Program Files']) {
+    const base = path.join(driveCPath, sub);
+    if (!existsSync(base)) continue;
+    try {
+      const result = execSync(
+        `find "${base}" -maxdepth 5 -iname "*.exe" ` +
+        `! -iname "unins*" ! -iname "*crashhandler*" ! -iname "*crashreporter*" ` +
+        `! -iname "vcredist*" ! -iname "vc_redist*" ! -iname "dxsetup*" ` +
+        `! -iname "*explorer*" ! -iname "*helper*" ! -iname "*updater*" ` +
+        `| head -1`,
+        { encoding: 'utf-8', timeout: 8000 }
+      ).trim();
+      if (result) return result;
+    } catch {
+      // continua col prossimo sub-percorso
+    }
+  }
+  return null;
+}
+
+// Step 19d — cerca un installer Ubisoft Connect già scaricato in
+// ~/Downloads. Pattern euristico (nome file contiene "ubisoft" o "uplay",
+// case-insensitive) — NON verificato contro un download reale del vero
+// installer, da confermare/correggere al primo test su hardware reale.
+// Ordina per data di modifica decrescente: se l'utente ha scaricato più
+// volte, prendiamo il file più recente.
+function findInstallerInDownloads(): string | null {
+  const downloadsDir = path.join(homedir(), 'Downloads');
+  if (!existsSync(downloadsDir)) return null;
+  try {
+    const result = execSync(
+      `find "${downloadsDir}" -maxdepth 1 -iname "*.exe" ` +
+      `\\( -iname "*ubisoft*" -o -iname "*uplay*" \\) ` +
+      `-printf "%T@ %p\\n" | sort -rn | head -1 | cut -d' ' -f2-`,
+      { encoding: 'utf-8', timeout: 5000 }
     ).trim();
     return result || null;
   } catch {
@@ -774,18 +840,35 @@ class DownloadManager {
     const slug          = slugFromId(gameId);
     const base          = path.join(storeDir(store), slug);
     const installPath   = path.join(base, 'files');
-    const prefixPath    = path.join(base, 'prefix');
-    const installerPath = path.join(base, 'installer');
-
     // v0.99.38 — cattura il runner selezionato nell'overlay PRIMA di
     // installare, cosi la prefix viene inizializzata con quel runner
     // invece che sempre con wine di sistema (vedi resolveRunnerWineEnv).
+    // Step 19d — letto QUI (non più separatamente più sotto) anche per
+    // requiresLauncher: BUG REALE trovato dall'utente installando un
+    // gioco Ubisoft da Epic — lo switch "Launcher condiviso" in Game
+    // Options scrive game.requiresLauncher, ma questa funzione guardava
+    // SOLO store==='Ubisoft' (cioè solo Ubisoft Connect stesso), mai
+    // questo campo sui giochi NORMALI che lo dichiarano — legendary
+    // scaricava e creava sempre una prefix isolata di default, ignorando
+    // del tutto la scatola condivisa. Ora qualunque gioco con
+    // requiresLauncher impostato (indipendentemente dallo store) usa la
+    // stessa scatola condivisa di quel launcher, esattamente come
+    // Ubisoft Connect stesso.
+    const gameRow = db.getGameById(gameId);
+    const requiresLauncher = gameRow?.requiresLauncher;
+    const prefixPath    = store === 'Ubisoft'
+      ? getSharedPrefixBasePath('ubisoft-connect')
+      : requiresLauncher
+        ? getSharedPrefixBasePath(requiresLauncher)
+        : path.join(base, 'prefix');
+    const installerPath = path.join(base, 'installer');
+
     // db.getGameById può restituire undefined se il gioco non è ancora
     // mai stato persistito (caso limite, non dovrebbe succedere dato che
     // arriviamo qui sempre da un gioco già nella libreria sincronizzata)
     // — in quel caso resolveRunnerWineEnv ripiega comunque su wine di
     // sistema, comportamento invariato.
-    const runner = db.getGameById(gameId)?.runner;
+    const runner = gameRow?.runner;
 
     const task: DownloadTask = {
       gameId, gameTitle: title, store,
@@ -875,6 +958,7 @@ class DownloadManager {
       if (task.store === 'GOG Galaxy')  await this.runGOG(task);
       else if (task.store === 'Epic Games') await this.runEpic(task);
       else if (task.store === 'Amazon Games') await this.runAmazon(task);
+      else if (task.store === 'Ubisoft') await this.runUbisoftConnect(task);
     } catch (err: any) {
       const msg = err?.stack ?? String(err);
       writeLog('error', `[DOWNLOAD ERROR] ${task.gameTitle}:\n${msg}`);
@@ -1457,7 +1541,164 @@ class DownloadManager {
   }
 
   // -------------------------------------------------------------------------
-  // Helper: spawn con parsing progresso (download lgogdownloader / legendary)
+  // Step 19d — Ubisoft Connect: nessun tool CLI scriptabile come
+  // legendary/lgogdownloader/nile, l'utente scarica l'installer a mano dal
+  // sito ufficiale. "Download" per questo task finisce non appena
+  // sappiamo dove si trova quel file — non lo eseguiamo qui dentro:
+  // l'installer diventa l'executablePath di questo "gioco", il primo
+  // lancio (pipeline Play già esistente) lo esegue, e alla chiusura
+  // scatta la verifica post-lancio già costruita (v0.99.35/36) — dove
+  // gameManager.ts ri-risolve l'eseguibile reale e registra il bootstrap
+  // del prefix condiviso. Nessuna fase installing_deps/creating_prefix
+  // qui: quelle risorse le prepara il flusso di lancio dei giochi Proton
+  // esistente, non serve duplicarle in questo task.
+  // -------------------------------------------------------------------------
+
+  private async runUbisoftConnect(task: DownloadTask) {
+    const def = getThirdPartyLauncherDefinition('ubisoft-connect');
+
+    // Step 1 — prefix condivisa: stesso identico schema di runGOG/runEpic
+    // (prepareWinePrefix condiviso), ma sul prefix CONDIVISO tra tutti i
+    // giochi che dichiarano questa dipendenza (task.prefixPath è già
+    // risolto a getSharedPrefixBasePath('ubisoft-connect') in addTask),
+    // non uno isolato per-gioco. BUG TROVATO E CORRETTO: la prima
+    // versione di questa funzione saltava del tutto prefix+verb,
+    // andando dritta alla ricerca dell'installer — i verb scelti
+    // nell'overlay non venivano mai applicati davvero.
+    this.log(task, 'system', `[UBISOFT] Step 1 — Creazione/verifica prefix condivisa in: ${task.prefixPath}`);
+    this.update(task, { status: 'creating_prefix', progress: 0, speed: '' });
+    ensureDir(task.prefixPath);
+    const wineEnv = resolveRunnerWineEnv(task.runner, task.prefixPath);
+    // Step 19d — un launcher condiviso DEVE sempre girare su Proton (mai
+    // Wine, decisione esplicita dell'utente per il supporto anticheat) —
+    // se resolveRunnerWineEnv è ripiegata sul wine di sistema (runner non
+    // trovato/non reale, es. un valore segnaposto mai sostituito con una
+    // build Proton davvero installata), NON procediamo silenziosamente
+    // creando un prefix Wine per una "scatola" che deve restare Proton.
+    // Bug reale trovato: il default 'Proton 8.0-4' della riga seedata è
+    // un segnaposto, non corrisponde a nessuna build davvero installata
+    // finché l'utente non ne sceglie una vera in Game Options.
+    if (wineEnv.wineBin === 'wine') {
+      throw new Error(
+        `[UBISOFT] Nessuna build Proton/GE-Proton risolta per il runner "${task.runner}" — ` +
+        `seleziona una build Proton realmente installata in Game Options > Runner Bridge prima di installare.`
+      );
+    }
+    ensureDir(wineEnv.winePrefixPath);
+    const prefixResult = await prepareWinePrefix(
+      task,
+      {
+        prefixPath: wineEnv.winePrefixPath,
+        disableWineSync: task.disableWineSync,
+        wineBootTimeoutMs: WINEBOOT_TIMEOUT_MS,
+        wineBin: wineEnv.wineBin,
+        wineserverBin: wineEnv.wineserverBin,
+      },
+      (t, bin, args, env, timeout) => this.spawnWithTimeout(t, bin, args, { ...env, ...wineEnv.extraEnv }, timeout),
+      (t, level, msg) => this.log(t, level, msg),
+    );
+    if (!prefixResult.success) {
+      throw new Error(prefixResult.error ?? '[UBISOFT] Preparazione prefix fallita');
+    }
+    this.log(task, 'system', `[UBISOFT] Step 1 OK — prefix pronta.`);
+
+    // Step 2 — dipendenze winetricks: indispensabili per un'installazione
+    // corretta di Ubisoft Connect (segnalato dall'utente), stesso
+    // meccanismo di runGOG/runEpic.
+    const verbs = filterVerbsForEnv(task.winetricksVerbs);
+    if (verbs.length > 0 && binaryExists('winetricks')) {
+      this.log(task, 'system', `[UBISOFT] Step 2 — Verbs: ${verbs.join(', ')}`);
+      this.update(task, { status: 'installing_deps', progress: 0 });
+      for (let i = 0; i < verbs.length; i++) {
+        const verb = verbs[i];
+        this.log(task, 'system', `[UBISOFT] Step 2 — ${verb} (${i + 1}/${verbs.length})`);
+        this.update(task, {
+          progress:   Math.round((i / verbs.length) * 100),
+          phaseLabel: `Dipendenze: ${verb}...`,
+        });
+        await this.spawnWithTimeout(task, 'winetricks', ['--unattended', verb], {
+          WINEPREFIX:     wineEnv.winePrefixPath,
+          WINEDEBUG:      '-all',
+          WINETRICKS_GUI: 'none',
+          ...wineEnv.extraEnv,
+        }, winetrickTimeoutFor(verb));
+        this.log(task, 'system', `[UBISOFT] Step 2 — ${verb}: OK`);
+      }
+    } else if (task.winetricksVerbs.length > 0) {
+      this.log(task, 'error', `[UBISOFT] winetricks non trovato — dipendenze saltate`);
+    }
+    persistWinetricksVerbs(task.gameId, task.winetricksVerbs);
+
+    // Step 3 — individua l'installer scaricato: nessun tool CLI
+    // scriptabile come legendary/lgogdownloader/nile, l'utente lo scarica
+    // a mano dal sito ufficiale (vedi installerUrl in thirdPartyLaunchers.ts).
+    const found = findInstallerInDownloads();
+    if (!found) {
+      this.log(task, 'system', `[UBISOFT] Step 3 — Installer non trovato in ~/Downloads.`);
+      this.update(task, {
+        status: 'awaiting_installer',
+        progress: 0,
+        phaseLabel: PHASE_LABELS.awaiting_installer,
+        downloadUrl: def?.installerUrl,
+      });
+      return; // nessun errore — il task resta in attesa, vedi continueInstaller/browseInstaller
+    }
+
+    this.completeWithInstaller(task, found);
+  }
+
+  /** Segna il task completato con l'installer trovato come executablePath
+   *  temporaneo — vedi commento esteso sopra su perché non lo eseguiamo qui. */
+  private completeWithInstaller(task: DownloadTask, installerPath: string) {
+    this.log(task, 'system', `[UBISOFT] Installer: ${installerPath}`);
+    this.update(task, {
+      status: 'completed',
+      progress: 100,
+      phaseLabel: PHASE_LABELS.completed,
+      installerPath,
+      executablePath: installerPath,
+      prefixPath: task.prefixPath,
+    });
+    this.procs.delete(task.gameId);
+    for (const cb of this.completeCallbacks) { try { cb(task.gameId, task.gameTitle); } catch {} }
+  }
+
+  /** Chiamato dall'endpoint installer-continue: l'utente dice di aver
+   *  scaricato l'installer, ricontrolla ~/Downloads. */
+  continueInstaller(gameId: string): { success: boolean; message: string } {
+    const task = this.tasks.get(gameId);
+    if (!task || task.status !== 'awaiting_installer') {
+      return { success: false, message: 'Nessuna installazione in attesa per questo gioco.' };
+    }
+    const found = findInstallerInDownloads();
+    if (!found) {
+      return { success: false, message: 'Installer ancora non trovato in ~/Downloads.' };
+    }
+    this.completeWithInstaller(task, found);
+    return { success: true, message: 'Installer trovato, installazione avviata.' };
+  }
+
+  /** Chiamato dall'endpoint installer-browse: apre il file picker nativo
+   *  (zenity/kdialog) — vedi filePicker.ts, unico punto da sostituire in
+   *  futuro con un file browser interno. */
+  async browseInstaller(gameId: string): Promise<{ success: boolean; message: string }> {
+    const task = this.tasks.get(gameId);
+    if (!task || task.status !== 'awaiting_installer') {
+      return { success: false, message: 'Nessuna installazione in attesa per questo gioco.' };
+    }
+    const result = await browseForFile({
+      title: 'Seleziona l\'installer di Ubisoft Connect',
+      startDir: path.join(homedir(), 'Downloads'),
+      filter: { name: 'Installer Windows', extensions: ['exe'] },
+    });
+    if (result.outcome !== 'selected' || !result.path) {
+      return { success: false, message: 'Nessun file selezionato.' };
+    }
+    this.completeWithInstaller(task, result.path);
+    return { success: true, message: 'Installer selezionato, installazione avviata.' };
+  }
+
+
   //
   // IMPORTANTE: lgogdownloader e legendary aggiornano la riga di progresso
   // usando \r (carriage return), non \n. Il buffer va splittato su entrambi.

@@ -112,7 +112,8 @@
     "Battle_net": "Battle.net — not yet supported",
     "Amazon_Games": "Amazon Games library (Prime Gaming) — requires nile",
     "Classic_Console": "Classic consoles and ROMs — RetroArch, DOSBox, ScummVM",
-    "Epic_Games": "Epic Games library — requires legendary"
+    "Epic_Games": "Epic Games library — requires legendary",
+    "Ubisoft": "Ubisoft Connect — shared launcher required by some Ubisoft games bought on other stores"
   },
   "cloudBackupDescriptions": {
     "google_drive": "Backup to Google Drive (app-specific data folder, not visible in your Drive)"

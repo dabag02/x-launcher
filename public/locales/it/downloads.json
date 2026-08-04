@@ -17,6 +17,8 @@
   "back": "Indietro",
   "resume": "Riprendi",
   "pause": "Pausa",
+  "browse": "Sfoglia",
+  "continue": "Continua",
   "peerHashCache": "Peer Hash Cache",
   "checksumVerification": "Verifica Checksum SHA-256 Attiva",
   "gamepadHint": "🎮 Premi un tasto sul controller per attivare l'input"

@@ -47,7 +47,8 @@
     "Playing": "In Esecuzione"
   },
   "storePluginNames": {
-    "Classic_Console": "Console Classiche"
+    "Classic_Console": "Console Classiche",
+    "Ubisoft": "Ubisoft Connect"
   },
   "footer": {
     "select": "Seleziona",

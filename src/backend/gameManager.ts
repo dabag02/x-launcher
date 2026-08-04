@@ -5,11 +5,15 @@ import path from 'path';
 import { MOCK_LOGS } from '../mockData';
 import { StorePlugin } from './plugins/base';
 import { GOGPlugin, isJunkGogSlug } from './plugins/gogPlugin';
-import { ALL_KNOWN_WINE_VERBS } from '../wineVerbs';
+import { ALL_KNOWN_WINE_VERBS, OS_VERSION_VERBS } from '../wineVerbs';
 import { SteamPlugin } from './plugins/steamPlugin';
 import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
+import { UbisoftConnectPlugin, UBISOFT_CONNECT_GAME_ID } from './plugins/ubisoftConnectPlugin';
+import { resolveSharedPrefixExecutionPath, markLauncherBootstrapped, isLauncherBootstrapped } from './sharedLauncherManager';
+import { findInstalledLauncherExe } from './downloadManager';
+import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
 import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary } from './runners/implementations';
@@ -59,6 +63,7 @@ class GameManager {
     new EpicPlugin(),
     new AmazonPlugin(),
     new BattlenetPlugin(),
+    new UbisoftConnectPlugin(),
     new ClassicPlugin(),
   ];
 
@@ -311,7 +316,37 @@ class GameManager {
 
         const elapsedMs = Date.now() - before.launchedAt;
 
-        if (elapsedMs < GameManager.QUICK_EXIT_THRESHOLD_MS) {
+        // Step 19d — bug reale trovato su hardware utente: Ubisoft
+        // Connect (UbisoftConnect.exe) lancia un processo figlio reale
+        // (upc.exe + servizi Uplay) e poi ESCE DA SOLO entro pochi
+        // secondi per design — un pattern "stub che rilancia e si
+        // chiude" non raro in launcher moderni. La soglia sotto trattava
+        // SEMPRE questo come fallimento (elapsedMs ~4s < 8s), saltando
+        // per intero il ramo di successo sotto — compreso l'hook che
+        // ri-risolve l'eseguibile reale. Verificato con dati reali
+        // (ps aux durante un lancio riuscito): upc.exe e i suoi processi
+        // Chromium/CEF restavano vivi mentre il processo TRACCIATO
+        // (il wrapper Proton) risultava già chiuso. Prima di dichiarare
+        // fallimento, controlliamo quindi se esistono processi reali
+        // ancora vivi che matchano la cartella di installazione del
+        // gioco (non solo Ubisoft — generico, riusabile da qualunque
+        // altro launcher/gioco con lo stesso pattern stub-e-rilancia).
+        const installDirName = game.executablePath
+          ? game.executablePath.split('/').slice(-2, -1)[0]
+          : null;
+        let realProcessStillRunning = false;
+        if (installDirName) {
+          try {
+            const { execSync } = require('child_process');
+            const match = execSync(`pgrep -af -- "${installDirName}" || true`, { encoding: 'utf-8' }).trim();
+            realProcessStillRunning = !!match;
+          } catch {
+            // ps/pgrep non disponibile o altro errore — non blocchiamo il
+            // resto della logica, ripieghiamo sul comportamento precedente.
+          }
+        }
+
+        if (elapsedMs < GameManager.QUICK_EXIT_THRESHOLD_MS && !realProcessStillRunning) {
           // v0.99.90 — uscita sospettosamente rapida: probabile fallimento
           // di avvio (exe non trovato, prefix corrotta, dipendenza
           // mancante che fa crashare subito). A differenza del prompt di
@@ -331,6 +366,36 @@ class GameManager {
           }
           const errorText = logContent || 'Il processo si è chiuso pochi secondi dopo l\'avvio, senza output catturato su stdout/stderr.';
           this.addLog(`[LAUNCH] ${before.gameTitle} chiuso dopo ${Math.round(elapsedMs / 1000)}s — trattato come fallimento di avvio.`, 'error');
+          // Step 19d — log diagnostico richiesto dall'utente: il processo
+          // TRACCIATO (quello che monitoriamo per isLastLaunchedGameRunning)
+          // risulta chiuso, ma per Ubisoft Connect una finestra (nera o
+          // bianca a seconda del tentativo) compare comunque DOPO QUALCHE
+          // SECONDO — ben oltre un controllo immediato. Il primo giro di
+          // pgrep sul solo nome exe esatto non ha trovato nulla, ma Wine/
+          // Proton spesso rinominano o troncano il nome del processo
+          // internamente (limite del kernel a 15 caratteri + wrapper
+          // preloader di Proton) — un match troppo specifico può mancare
+          // un processo realmente in esecuzione. Ora: controllo più ampio
+          // (case-insensitive, "wine" o "ubisoft" ovunque nella riga di
+          // comando) E ripetuto con un ritardo, per catturare esattamente
+          // il momento in cui l'utente riporta che la finestra compare.
+          const dumpResidualProcesses = (label: string) => {
+            try {
+              const { execSync } = require('child_process');
+              const procs = execSync(`ps aux | grep -iE "wine|ubisoft" | grep -v grep || true`, { encoding: 'utf-8' }).trim();
+              this.addLog(
+                procs
+                  ? `[LAUNCH-DEBUG] (${label}) Processi wine/ubisoft attivi:\n${procs}`
+                  : `[LAUNCH-DEBUG] (${label}) Nessun processo wine/ubisoft trovato.`,
+                'system'
+              );
+            } catch (e) {
+              this.addLog(`[LAUNCH-DEBUG] (${label}) Verifica processi non riuscita: ${e}`, 'system');
+            }
+          };
+          dumpResidualProcesses('T+0s, subito dopo la chiusura tracciata');
+          // Non bloccante — il resto del daemon continua a girare nel frattempo.
+          setTimeout(() => dumpResidualProcesses('T+6s, ritardato'), 6000);
           notificationEngine.emit({ type: 'launch-error', gameId: before.gameId, gameTitle: before.gameTitle, error: errorText });
           return;
         }
@@ -345,6 +410,36 @@ class GameManager {
         // comunque l'autorità finale a ogni sync).
         db.addPlayTime(before.gameId, elapsedMs / (1000 * 60 * 60));
         this.notifyLibraryRefreshed(); // la sidebar mostra il tempo aggiornato subito, non al prossimo sync periodico
+
+        if (realProcessStillRunning && elapsedMs < GameManager.QUICK_EXIT_THRESHOLD_MS) {
+          this.addLog(`[LAUNCH] ${before.gameTitle}: processo tracciato chiuso dopo ${Math.round(elapsedMs / 1000)}s, ma processi reali ancora attivi in "${installDirName}" — trattato come lancio riuscito, non fallimento.`, 'system');
+        }
+
+        // Step 19d — se il "gioco" appena chiuso è Ubisoft Connect stesso
+        // e non è ancora bootstrappato, il processo appena chiuso era
+        // l'INSTALLER (executablePath punta ancora al file scaricato in
+        // ~/Downloads, vedi downloadManager.runUbisoftConnect) — ora che
+        // l'utente lo ha eseguito, cerchiamo il vero UbisoftConnect.exe
+        // dentro il prefix condiviso e lo registriamo come bootstrappato.
+        // BUG REALE TROVATO su hardware utente: findMainExe() sull'intero
+        // drive_c prendeva un'utility di sistema Wine (Explorer) invece
+        // del vero eseguibile — findInstalledLauncherExe() restringe la
+        // ricerca a Program Files* e prova prima l'hint dichiarato nel
+        // registro (thirdPartyLaunchers.ts).
+        if (game.store === 'Ubisoft' && game.id === UBISOFT_CONNECT_GAME_ID && !isLauncherBootstrapped('ubisoft-connect')) {
+          const realPrefixRoot = resolveSharedPrefixExecutionPath('ubisoft-connect');
+          const driveC = path.join(realPrefixRoot, 'drive_c');
+          const def = getThirdPartyLauncherDefinition('ubisoft-connect');
+          const realExe = findInstalledLauncherExe(driveC, def?.executableRelPathHint);
+          if (realExe) {
+            db.updateGameConfig(game.id, { executablePath: realExe });
+            const relExe = path.relative(driveC, realExe);
+            markLauncherBootstrapped('ubisoft-connect', game.runner ?? 'Proton 8.0-4', relExe);
+            this.addLog(`[UBISOFT] Bootstrap completato — eseguibile reale: ${realExe}`, 'system');
+          } else {
+            this.addLog(`[UBISOFT] Eseguibile reale non trovato dopo la chiusura dell'installer — l'utente dovrà riprovare il lancio.`, 'warning');
+          }
+        }
 
         if (game.verified) {
           // Spec: "se il gioco funziona il messaggio non appare più" —
@@ -410,6 +505,14 @@ class GameManager {
       db.upsertDownload(task);
 
       if (task.status === 'completed') {
+        // Step 19d — per Ubisoft Connect (o un futuro launcher condiviso)
+        // non ancora bootstrappato, "completed" qui significa "l'installer
+        // è stato individuato", non "l'app è pienamente installata" — ma
+        // isInstalled=true resta corretto da impostare comunque: è quello
+        // che fa funzionare il click sulla card per eseguire l'installer
+        // (handlePlay controlla proprio game.isInstalled). La notifica
+        // "Completato!" fuorviante è stata invece soppressa in server.ts
+        // per questo caso specifico — quella sì era sbagliata, questo no.
         db.updateGameStatus(task.gameId, true, 'Ready to Launch');
         const configUpdate: {
           executablePath?: string;
@@ -424,7 +527,9 @@ class GameManager {
         if (Object.keys(configUpdate).length > 0) {
           db.updateGameConfig(task.gameId, configUpdate);
         }
-        if (task.executablePath) {
+        if (task.store === 'Ubisoft' && !isLauncherBootstrapped('ubisoft-connect')) {
+          this.addLog(`[DOWNLOAD] ${task.gameTitle}: installer individuato (${task.executablePath}) — clicca di nuovo la card per eseguirlo e completare l'installazione.`, 'system');
+        } else if (task.executablePath) {
           this.addLog(`[DOWNLOAD] ${task.gameTitle} completato. Exe: ${task.executablePath}`, 'system');
         } else {
           this.addLog(`[DOWNLOAD] ${task.gameTitle} completato. (nessun exe rilevato — imposta il percorso manualmente nell'overlay)`, 'system');
@@ -1099,6 +1204,19 @@ class GameManager {
             .split('\n')
             .map((l: string) => l.trim())
             .filter((l: string) => ALL_KNOWN_WINE_VERBS.includes(l));
+          // Step 19d — winetricks.log è un log cumulativo (solo append):
+          // se in passato sono stati applicati sia win10 sia win7 da
+          // terminale, `installedVerbs` li conterrebbe entrambi anche se
+          // solo l'ultimo è realmente attivo nel registro. Teniamo solo
+          // l'ULTIMA occorrenza fra i verb versione OS, nell'ordine in
+          // cui compaiono nel log (= ordine cronologico di applicazione).
+          const lastOsVersionIdx = installedVerbs
+            .map((v: string, i: number) => OS_VERSION_VERBS.includes(v) ? i : -1)
+            .filter((i: number) => i !== -1)
+            .pop();
+          const installedVerbsDeduped = installedVerbs.filter((v: string, i: number) =>
+            !OS_VERSION_VERBS.includes(v) || i === lastOsVersionIdx
+          );
           // v1.1.119-dev.1 — ripulisce anche ciò che era già stato scritto
           // in precedenza (robaccia da una sincronizzazione fatta prima
           // di questo fix, come il caso reale segnalato dall'utente): non
@@ -1106,10 +1224,18 @@ class GameManager {
           // già salvati resterebbero lì per sempre (l'unione precedente
           // si limitava ad aggiungere, mai a togliere).
           const trackedVerbsClean: string[] = (profile?.winetricksVerbs ?? []).filter((v: string) => ALL_KNOWN_WINE_VERBS.includes(v));
-          const newlyFound = installedVerbs.filter((v: string) => !trackedVerbsClean.includes(v));
+          const newlyFound = installedVerbsDeduped.filter((v: string) => !trackedVerbsClean.includes(v));
           const droppedJunk = (profile?.winetricksVerbs ?? []).length - trackedVerbsClean.length;
           if (newlyFound.length > 0 || droppedJunk > 0) {
-            const merged = [...trackedVerbsClean, ...newlyFound];
+            // Step 19d — se newlyFound porta una NUOVA versione OS e il
+            // profilo tracciato ne aveva già una diversa, quella vecchia va
+            // rimossa dal merge finale: stessa esclusività reciproca
+            // applicata anche qui, non solo lato UI.
+            const incomingOsVersion = newlyFound.find((v: string) => OS_VERSION_VERBS.includes(v));
+            const trackedWithoutStaleOs = incomingOsVersion
+              ? trackedVerbsClean.filter((v: string) => !OS_VERSION_VERBS.includes(v))
+              : trackedVerbsClean;
+            const merged = [...trackedWithoutStaleOs, ...newlyFound];
             const currentProfile = profile ?? { fsr: false, gameMode: false, mangohud: 0 as const, eac: false, battleye: false };
             db.upsertCompatProfile(id, { ...currentProfile, winetricksVerbs: merged });
             if (newlyFound.length > 0) this.addLog(`[LAUNCH] Rilevati verb installati manualmente, aggiunti al profilo: ${newlyFound.join(', ')}`, 'system');
@@ -1150,6 +1276,7 @@ class GameManager {
         mangohud: profile?.mangohud ?? 0,
         eac:      profile?.eac      ?? false,
         battleye: profile?.battleye ?? false,
+        umuRun:   profile?.umuRun   ?? false,
       };
       // v1.1.30 — giochi Epic: sempre via legendary launch, non l'exe
       // diretto. Vedi launchEpicViaLegendary per il motivo esatto (alcuni
@@ -1532,6 +1659,8 @@ class GameManager {
     scummvmId?: string;
     scrapeTitle?: string;
     runner?: string;
+    // Step 19d — switch "Launcher condiviso" in Game Options.
+    requiresLauncher?: string | null;
   }) {
     db.updateGameConfig(id, config);
     const summary = Object.entries(config)

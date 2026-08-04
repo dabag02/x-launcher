@@ -115,7 +115,15 @@ db.exec(`
     winetricks_verbs TEXT,
     disable_wine_sync INTEGER NOT NULL DEFAULT 0,
     use_known_fixes INTEGER NOT NULL DEFAULT 0,
-    known_fixes_notes TEXT
+    known_fixes_notes TEXT,
+    -- v1.5.20-dev.2 — switch "Umu-launcher" (Compatibility Layer). Bug reale
+    -- v1.5.20-dev.1: il campo era stato aggiunto solo in types.ts/App.tsx,
+    -- MAI qui — upsertCompatProfile/getCompatProfile hanno una lista di
+    -- colonne fissa, un campo assente dalla query non genera errore, viene
+    -- solo ignorato in silenzio (nessun crash che lo segnalasse). Risultato:
+    -- lo switch sembrava funzionare in overlay ma non veniva mai scritto su
+    -- disco, azzerato alla chiusura. Vedi CHANGELOG.md.
+    umu_run INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS runners (
@@ -218,6 +226,22 @@ db.exec(`
     output_tokens INTEGER NOT NULL,
     created_at    TEXT    NOT NULL
   );
+
+  -- Step 19d — prefix Proton CONDIVISO per launcher di terze parti
+  -- (Ubisoft Connect/EA App/Battle.net/Rockstar), riusato da tutti i
+  -- giochi che dichiarano games.requires_launcher = questo id, invece di
+  -- un prefix isolato per-gioco. Vedi sharedLauncherManager.ts. Runner
+  -- sempre Proton/GE-Proton per decisione esplicita dell'utente (supporto
+  -- anticheat), mai Wine — nessun campo runner_family: sarebbe sempre
+  -- 'proton', quindi solo rumore.
+  CREATE TABLE IF NOT EXISTS shared_launcher_prefixes (
+    launcher_id     TEXT PRIMARY KEY,
+    prefix_path     TEXT NOT NULL,
+    launcher_exe    TEXT,
+    bootstrapped_at TEXT,
+    runner          TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // ---------------------------------------------------------------------------
@@ -274,6 +298,15 @@ if (!existingCols.includes('scrape_title')) {
 if (!existingCols.includes('predicted_size_bytes')) {
   db.exec("ALTER TABLE games ADD COLUMN predicted_size_bytes INTEGER");
 }
+// Step 19d — dipendenza da un launcher terzo condiviso, impostata
+// manualmente dall'utente nell'overlay — mai auto-rilevata, nessun modo
+// affidabile di sapere in anticipo se un titolo la richiede prima di
+// provarlo. NULL = nessuna dipendenza, prefix isolato per-gioco come
+// sempre. Valorizzato = prefixPath di questo gioco viene risolto sul
+// prefix condiviso di quel launcher (vedi sharedLauncherManager.ts).
+if (!existingCols.includes('requires_launcher')) {
+  db.exec("ALTER TABLE games ADD COLUMN requires_launcher TEXT");
+}
 // v1.1.108-dev.1: budget token per-provider (sostituisce l'unico numero
 // globale precedente, vedi appConfig.ts) + tracciamento mese già avvisato
 // alla soglia 80%.
@@ -306,6 +339,14 @@ if (!compatCols.includes('use_known_fixes')) {
 // solo per consultazione manuale — vedi CompatibilityProfile.knownFixesNotes.
 if (!compatCols.includes('known_fixes_notes')) {
   db.exec("ALTER TABLE compat_profiles ADD COLUMN known_fixes_notes TEXT");
+}
+// v1.5.20-dev.2 — fix bug reale: colonna dimenticata in v1.5.20-dev.1 (vedi
+// CREATE TABLE sopra e CHANGELOG.md) — installazioni già esistenti (CREATE
+// TABLE IF NOT EXISTS non tocca tabelle già create) necessitano di questa
+// migrazione esplicita per avere la colonna, esattamente come eac/battleye
+// sopra quando furono aggiunti.
+if (!compatCols.includes('umu_run')) {
+  db.exec("ALTER TABLE compat_profiles ADD COLUMN umu_run INTEGER NOT NULL DEFAULT 0");
 }
 
 // v0.99.35 — correzione storica: giochi installati con status='Not Installed'
@@ -369,6 +410,7 @@ function rowToGame(row: any): Game {
     verified:           row.verified === 1,
     verifiedAt:         row.verified_at ?? undefined,
     verificationMethod: row.verification_method ?? undefined,
+    requiresLauncher:   row.requires_launcher ?? undefined,
   };
 }
 
@@ -765,6 +807,10 @@ export function updateGameConfig(id: string, config: {
   scummvmId?: string | null;
   scrapeTitle?: string | null;
   runner?: string;
+  // Step 19d — impostato/rimosso manualmente dall'utente nell'overlay.
+  // null = rimuove la dipendenza (il gioco torna a un prefix isolato al
+  // prossimo lancio/installazione).
+  requiresLauncher?: string | null;
 }): void {
   // Mappa campo JS → colonna SQL
   const colMap: Record<string, string> = {
@@ -778,6 +824,7 @@ export function updateGameConfig(id: string, config: {
     scummvmId:      'scummvm_id',
     scrapeTitle:    'scrape_title',
     runner:         'runner',
+    requiresLauncher: 'requires_launcher',
   };
 
   // Costruisce SET dinamico solo per le chiavi presenti nel payload
@@ -807,8 +854,8 @@ export function updateGameConfig(id: string, config: {
 
 export function upsertCompatProfile(gameId: string, profile: CompatibilityProfile): void {
   db.prepare(`
-    INSERT INTO compat_profiles (game_id, fsr, game_mode, mangohud, eac, battleye, custom_env, winetricks_verbs, disable_wine_sync, use_known_fixes, known_fixes_notes)
-    VALUES (@gameId, @fsr, @gameMode, @mangohud, @eac, @battleye, @customEnv, @winetricksVerbs, @disableWineSync, @useKnownFixes, @knownFixesNotes)
+    INSERT INTO compat_profiles (game_id, fsr, game_mode, mangohud, eac, battleye, custom_env, winetricks_verbs, disable_wine_sync, use_known_fixes, known_fixes_notes, umu_run)
+    VALUES (@gameId, @fsr, @gameMode, @mangohud, @eac, @battleye, @customEnv, @winetricksVerbs, @disableWineSync, @useKnownFixes, @knownFixesNotes, @umuRun)
     ON CONFLICT(game_id) DO UPDATE SET
       fsr               = excluded.fsr,
       game_mode         = excluded.game_mode,
@@ -819,7 +866,8 @@ export function upsertCompatProfile(gameId: string, profile: CompatibilityProfil
       winetricks_verbs  = excluded.winetricks_verbs,
       disable_wine_sync = excluded.disable_wine_sync,
       use_known_fixes   = excluded.use_known_fixes,
-      known_fixes_notes = excluded.known_fixes_notes
+      known_fixes_notes = excluded.known_fixes_notes,
+      umu_run           = excluded.umu_run
   `).run({
     gameId,
     fsr:             profile.fsr       ? 1 : 0,
@@ -832,6 +880,7 @@ export function upsertCompatProfile(gameId: string, profile: CompatibilityProfil
     disableWineSync: profile.disableWineSync ? 1 : 0,
     useKnownFixes:   profile.useKnownFixes   ? 1 : 0,
     knownFixesNotes: profile.knownFixesNotes ? JSON.stringify(profile.knownFixesNotes) : null,
+    umuRun:          profile.umuRun ? 1 : 0,
   });
 }
 
@@ -849,6 +898,7 @@ export function getCompatProfile(gameId: string): CompatibilityProfile | undefin
     disableWineSync: row.disable_wine_sync === 1,
     useKnownFixes:   row.use_known_fixes   === 1,
     knownFixesNotes: row.known_fixes_notes ? JSON.parse(row.known_fixes_notes) : undefined,
+    umuRun:          row.umu_run === 1,
   };
 }
 
@@ -1285,6 +1335,71 @@ export function getAiUsageThisMonth(): AiUsageSummary {
     totalTokens += row.total;
   }
   return { totalTokens, byProvider };
+}
+
+// ---------------------------------------------------------------------------
+// API — Shared Launcher Prefixes (Step 19d)
+// ---------------------------------------------------------------------------
+
+export interface SharedLauncherPrefixRow {
+  launcherId:      string;
+  prefixPath:      string;
+  launcherExe?:    string;
+  bootstrappedAt?: string;
+  runner:          string;
+}
+
+function rowToSharedLauncherPrefix(row: any): SharedLauncherPrefixRow {
+  return {
+    launcherId:     row.launcher_id,
+    prefixPath:     row.prefix_path,
+    launcherExe:    row.launcher_exe    ?? undefined,
+    bootstrappedAt: row.bootstrapped_at ?? undefined,
+    runner:         row.runner,
+  };
+}
+
+export function getSharedLauncherPrefix(launcherId: string): SharedLauncherPrefixRow | undefined {
+  const row = db.prepare('SELECT * FROM shared_launcher_prefixes WHERE launcher_id = ?').get(launcherId) as any;
+  return row ? rowToSharedLauncherPrefix(row) : undefined;
+}
+
+export function upsertSharedLauncherPrefix(row: SharedLauncherPrefixRow): void {
+  // v0.99.38 — tutte le chiavi nominate presenti esplicitamente, anche a
+  // null: better-sqlite3 fa fallire il bind se una chiave manca del
+  // tutto (non solo se è undefined), lezione già pagata cara altrove.
+  db.prepare(`
+    INSERT INTO shared_launcher_prefixes (launcher_id, prefix_path, launcher_exe, bootstrapped_at, runner)
+    VALUES (@launcherId, @prefixPath, @launcherExe, @bootstrappedAt, @runner)
+    ON CONFLICT(launcher_id) DO UPDATE SET
+      prefix_path     = excluded.prefix_path,
+      launcher_exe    = excluded.launcher_exe,
+      bootstrapped_at = excluded.bootstrapped_at,
+      runner          = excluded.runner
+  `).run({
+    launcherId:     row.launcherId,
+    prefixPath:     row.prefixPath,
+    launcherExe:    row.launcherExe ?? null,
+    bootstrappedAt: row.bootstrappedAt ?? null,
+    runner:         row.runner,
+  });
+}
+
+/**
+ * Conta i giochi INSTALLATI che dipendono da questo launcher — usato per
+ * decidere se il prefix condiviso può essere rimosso all'uninstall
+ * dell'ultimo gioco che lo usa (vedi canRemoveSharedPrefix in
+ * sharedLauncherManager.ts). excludeGameId esclude il gioco che si sta
+ * disinstallando ORA — il suo is_installed potrebbe non essere ancora
+ * stato riportato a 0 nel DB nel momento esatto in cui questa funzione
+ * viene chiamata durante il flusso di uninstall.
+ */
+export function countInstalledGamesForLauncher(launcherId: string, excludeGameId?: string): number {
+  const row = db.prepare(`
+    SELECT COUNT(*) as count FROM games
+    WHERE requires_launcher = ? AND is_installed = 1 AND id != ?
+  `).get(launcherId, excludeGameId ?? '') as any;
+  return row.count;
 }
 
 export default db;

@@ -47,7 +47,8 @@
     "Playing": "Playing"
   },
   "storePluginNames": {
-    "Classic_Console": "Classic Console"
+    "Classic_Console": "Classic Console",
+    "Ubisoft": "Ubisoft Connect"
   },
   "footer": {
     "select": "Select",

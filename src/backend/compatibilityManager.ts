@@ -268,6 +268,11 @@ class CompatibilityManager {
       mangohud: this.binaryExists('mangohud') ? 1 : 0,
       eac: false,
       battleye: false,
+      // v1.5.20-dev.1 — default spento per qualunque gioco: switch
+      // opzionale, mai attivato automaticamente nemmeno per i launcher
+      // condivisi (requiresLauncher) — resta una scelta esplicita
+      // dell'utente in Game Options, coerente con eac/battleye/fsr sopra.
+      umuRun: false,
     };
   }
 
@@ -311,6 +316,11 @@ class CompatibilityManager {
       mangohud:  this.binaryExists('mangohud'),
       gamemode:  this.binaryExists('gamemoderun'),
       protonup:  this.binaryExists('protonup'),
+      // v1.5.20-dev.1 — umu-run (umu-launcher): il comando si chiama
+      // `umu-run`, il pacchetto `umu-launcher` — rilevato per nome
+      // binario reale, non per nome pacchetto (stesso principio già
+      // usato per gamemode/gamemoderun sopra).
+      umu:       this.binaryExists('umu-run'),
       lutris:    this.binaryExists('lutris'),
       steam:     this.binaryExists('steam'),
       retroarch: this.binaryExists('retroarch'),

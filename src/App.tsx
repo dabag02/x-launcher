@@ -12,6 +12,7 @@ import {
   Download, 
   Info, 
   ChevronRight,
+  ChevronLeft,
   Terminal,
   Activity,
   Cpu,
@@ -54,7 +55,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { MOCK_STORES, MOCK_GAMES, MOCK_LOGS } from './mockData';
 import { Game, StoreType, RunnerType, LogEntry, ViewState, Theme, AppNotification } from './types';
-import { DEFAULT_WINE_VERBS, OPTIONAL_WINE_VERBS } from './wineVerbs';
+import { DEFAULT_WINE_VERBS, OPTIONAL_WINE_VERBS, OS_VERSION_VERBS } from './wineVerbs';
 import { FocusProvider, Focusable, useFocus } from './components/FocusProvider';
 import { NavDebugOverlay } from './components/NavDebugOverlay';
 import { AudioProvider, useAudio } from './components/AudioProvider';
@@ -555,6 +556,21 @@ function MainApp() {
   const [activeSettingsTab, setActiveSettingsTab] = useState<'engine' | 'accounts' | 'input' | 'plugins' | 'ai-models' | 'hardware'>('accounts');
   const [availableRunners, setAvailableRunners] = useState<any[]>([]);
   const [installableRunners, setInstallableRunners] = useState<any[]>([]);
+  // Step 19d — stato dei launcher terzi condivisi (Ubisoft Connect/EA
+  // App/Battle.net/Rockstar), usato dallo switch "Launcher condiviso" in
+  // Game Options. Stesso pattern economico di availableRunners sopra:
+  // /api/shared-launchers legge solo il registro dichiarativo + lo stato
+  // già in DB, nessuna scansione filesystem.
+  const [sharedLaunchers, setSharedLaunchers] = useState<any[]>([]);
+  useEffect(() => {
+    // L'endpoint restituisce già `available` (installerUrl non vuoto —
+    // il launcher ha un'implementazione reale, non solo un placeholder
+    // nel registro) — nessuna rimappatura necessaria qui.
+    fetch('/api/shared-launchers')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setSharedLaunchers(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, []);
   // v0.99.90 — Step 15d: modelli Ollama disponibili sulla macchina e
   // flag di raggiungibilità. ollamaAvailable determina se la tab
   // "AI Models" compare affatto nell'header di Impostazioni — se Ollama
@@ -764,7 +780,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.5.7-Venus');
+  const [appVersion, setAppVersion] = useState('v1.5.20-dev.5');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -936,6 +952,13 @@ function MainApp() {
   // senza passare dalla Virtual Keyboard.
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [showKeyboard, setShowKeyboard] = useState(false);
+  // v1.5.20-dev.5 — posizione del cursore riportata da VirtualKeyboard
+  // (vedi onCursorChange lì) — usata SOLO per disegnare il cursore nel
+  // riquadro fluttuante sotto, l'editing vero resta interamente dentro
+  // VirtualKeyboard.tsx. null finché non arriva il primo report (subito
+  // dopo il mount) — il fallback nel render usa comunque la fine della
+  // stringa corrente in quel breve intervallo, nessun lampo visibile.
+  const [vkCursorPos, setVkCursorPos] = useState<number | null>(null);
 
   const { focusedId, setFocusedId, moveFocus, setFocusFrozen, isFocusFrozen, activeGroup, setActiveGroup, triggerFocusedAction, focusFirstInGroup, cycleSequential, setGroupStrategy } = useFocus();
   // Ref sincronizzato con focusedId: stesso motivo di activeStoreRef.
@@ -1449,6 +1472,9 @@ function MainApp() {
             rawLog:         n.raw_log,
             primaryAction:  n.primary_action   ? JSON.parse(n.primary_action)   : undefined,
             secondaryAction:n.secondary_action ? JSON.parse(n.secondary_action) : undefined,
+            tertiaryAction: n.tertiary_action  ? JSON.parse(n.tertiary_action)  : undefined,
+            linkUrl:        n.link_url ?? undefined,
+            linkLabel:      n.link_label ?? undefined,
             source:         n.source ?? 'system',
             aiProvider:     n.ai_provider,
             confidence:     n.confidence,
@@ -1724,7 +1750,14 @@ function MainApp() {
       lastMiddleId  = nonDefaultCores.length > 0 ? `core-${nonDefaultCores[nonDefaultCores.length - 1].name}` : undefined;
     } else if (selectedGame.store !== 'Classic Console') {
       firstMiddleId = 'compat-fsr';
-      lastMiddleId  = 'compat-battleye';
+      // v1.5.20-dev.3 — era 'compat-battleye': valido finché quello era
+      // l'ultimo tile della griglia Compatibility Layer. Con l'aggiunta di
+      // 'umuRun' come 7° tile (v1.5.20-dev.1), battleye è diventato il
+      // penultimo — questo anchor doveva seguirlo, non l'ho aggiornato
+      // insieme al resto della navigazione della griglia. Bug di
+      // navigazione minore (nessun id inesistente, quindi non rilevato da
+      // check-focus-ids: 'compat-battleye' esiste comunque), non un crash.
+      lastMiddleId  = 'compat-umuRun';
     }
 
     // v1.1.3 — ingresso deterministico dal pulsante di chiusura (in alto a
@@ -1947,7 +1980,16 @@ function MainApp() {
   useEffect(() => {
     if (!showGameOptions || !selectedGame) return;
     fetch(`/api/games/${selectedGame.id}/compat`)
-      .then(r => r.ok ? r.json() : {})
+      // v1.5.20-dev.3 — fix causa reale di 10 errori tsc pre-esistenti
+      // (9 + il nuovo profile.umuRun aggiunto qui): il ramo `: {}` di
+      // questo ternario non era una Promise, mentre r.json() lo è —
+      // TypeScript inferiva il tipo del .then() successivo come '{}'
+      // invece di 'any', segnalando ogni singolo accesso a profile.X
+      // come proprietà inesistente. Promise.resolve({}) allinea i due
+      // rami allo stesso tipo Promise, risolvendo tutti gli accessi
+      // in un colpo solo — nessuna logica cambiata, stesso identico
+      // comportamento a runtime.
+      .then(r => r.ok ? r.json() : Promise.resolve({}))
       .then(profile => {
         setLocalCompatProfile({
           fsr:      !!profile.fsr,
@@ -1955,6 +1997,15 @@ function MainApp() {
           mangohud: Number(profile.mangohud ?? 0),
           eac:      !!profile.eac,
           battleye: !!profile.battleye,
+          // v1.5.20-dev.3 — bug reale segnalato dall'utente: umuRun mancava
+          // qui, quindi anche con il valore salvato correttamente nel DB
+          // (fix v1.5.20-dev.2), l'overlay lo scartava ad ogni apertura e
+          // mostrava sempre lo switch spento — oggetto ricostruito da zero
+          // con una lista di campi hardcoded, non un merge col profilo
+          // ricevuto. Stesso identico bug avrebbe colpito qualunque nuovo
+          // campo booleano futuro aggiunto a CompatibilityProfile senza
+          // toccare anche questo punto.
+          umuRun:   !!profile.umuRun,
         });
         setCustomEnvText(
           Object.entries(profile.customEnv ?? {})
@@ -1990,6 +2041,10 @@ function MainApp() {
       libretroCore:   selectedGame.libretroCore   ?? '',
       scummvmId:      selectedGame.scummvmId      ?? '',
       scrapeTitle:    selectedGame.scrapeTitle    ?? '',
+      // Step 19d — switch "Launcher condiviso". Stringa vuota = nessuna
+      // dipendenza, stesso principio degli altri campi in questa mappa
+      // (mai null/undefined qui, solo nel salvataggio verso il backend).
+      requiresLauncher: selectedGame.requiresLauncher ?? '',
     });
     fetch('/api/runners')
       .then(r => r.json())
@@ -2081,7 +2136,7 @@ function MainApp() {
     // senza un vero concetto di login (Steam, Amazon, Battle.net, Classic
     // Console), per cui isConnected non implica una sessione da poter
     // perdere nello stesso senso.
-    const NO_LOGIN_STORES = new Set(['Steam', 'Battle.net', 'Classic Console']);
+    const NO_LOGIN_STORES = new Set(['Steam', 'Battle.net', 'Classic Console', 'Ubisoft']);
     result = result.filter(g => {
       const store = g.store as string;
       if (NO_LOGIN_STORES.has(store)) return true;
@@ -2198,7 +2253,7 @@ function MainApp() {
     // come sopra — il gioco potrebbe comunque funzionare (cache locale,
     // modalità offline), ma l'utente deve sapere del rischio prima di
     // procedere, dato che la sessione non è più valida.
-    const NO_LOGIN_STORES_HANDLEPLAY = new Set(['Steam', 'Battle.net', 'Classic Console']);
+    const NO_LOGIN_STORES_HANDLEPLAY = new Set(['Steam', 'Battle.net', 'Classic Console', 'Ubisoft']);
     if (ps && !ps.drmFree && !NO_LOGIN_STORES_HANDLEPLAY.has(game.store as string)) {
       const connected = storeConnectedMapRef.current.get(game.store as string);
       if (connected === false) {
@@ -2757,7 +2812,7 @@ Vuoi provare ad avviarlo comunque?`);
         });
         const first = visibleAccountStores[0];
         if (!first) return null;
-        const noLogin = ['Battle.net', 'Classic Console'].includes(first.id);
+        const noLogin = ['Battle.net', 'Classic Console', 'Ubisoft'].includes(first.id);
         if (noLogin) return null; // nessun controllo interattivo su questa card
         return first.isConnected ? `store-unlink-${first.id}` : `store-connect-${first.id}`;
       }
@@ -3283,6 +3338,12 @@ Vuoi provare ad avviarlo comunque?`);
   // ricaricarla (ridondante ma innocuo) insieme ai dati più pesanti.
   useEffect(() => {
     fetch('/api/runners').then(r => r.json()).then(setAvailableRunners).catch(() => {});
+  }, []);
+
+  // Step 19d — stesso principio del fetch sopra: economico, caricato una
+  // volta all'avvio indipendentemente da quale tab/overlay è aperto.
+  useEffect(() => {
+    fetch('/api/shared-launchers').then(r => r.json()).then(setSharedLaunchers).catch(() => {});
   }, []);
 
   // v0.99.90 — Step 15d: verifica raggiungibilità Ollama + elenco modelli.
@@ -4676,6 +4737,33 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         </div>
                         <span className="text-xs font-black italic text-blue-400">{task.speed}</span>
                       </div>
+
+                      {/* Step 19d — link alla pagina ufficiale di download,
+                          consolidato qui invece che in una notifica a
+                          parte: l'utente ha chiarito che l'interazione per
+                          le installazioni vive sempre nel pannello
+                          Download, non ha senso spezzarla su un'altra
+                          colonna. */}
+                      {task.status === 'awaiting_installer' && task.downloadUrl && (
+                        <Focusable
+                          group="downloads"
+                          id={`dl-link-${task.gameId}`}
+                          onEnter={() => {
+                            fetch('/api/open-url', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ url: task.downloadUrl }),
+                            });
+                          }}
+                        >
+                          {(isFocused) => (
+                            <div className={cn(
+                              "mb-3 px-3 py-2 rounded-lg text-[10px] font-bold text-center underline cursor-pointer transition-all",
+                              isFocused ? "bg-blue-500/30 text-blue-200" : "text-blue-400"
+                            )}>{task.downloadUrl}</div>
+                          )}
+                        </Focusable>
+                      )}
                       
                       <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden mb-3">
                         <motion.div 
@@ -4685,9 +4773,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         />
                       </div>
                       
-                      <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-bold opacity-40 uppercase tracking-widest italic">{t('downloads:percentComplete', { pct: task.progress.toFixed(0) })}</span>
-                        <div className="flex gap-2">
+                      <div className="flex justify-between items-center flex-wrap gap-y-2">
+                        {/* Step 19d — bug segnalato dall'utente: 3 pulsanti
+                            (Continua/Sfoglia/Annulla) uscivano dal widget
+                            perché il contenitore non andava mai a capo.
+                            La percentuale non è pertinente in attesa
+                            dell'installer (resta sempre 0%) — nascosta per
+                            lasciare spazio ai pulsanti senza affollare la riga. */}
+                        {task.status !== 'awaiting_installer' && (
+                          <span className="text-[10px] font-bold opacity-40 uppercase tracking-widest italic">{t('downloads:percentComplete', { pct: task.progress.toFixed(0) })}</span>
+                        )}
+                        <div className="flex flex-wrap justify-end gap-2 ml-auto">
                           {confirmCancelDownloadId === task.gameId ? (
                             <>
                               <Focusable
@@ -4731,21 +4827,64 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               <Focusable 
                                 group="downloads"
                                 id={`dl-pause-${task.gameId}`} 
-                                onEnter={() => fetch(task.status === 'paused' ? '/api/downloads/resume' : '/api/downloads/pause', {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ id: task.gameId })
-                                })}
+                                onEnter={() => {
+                                  // Step 19d — in attesa dell'installer,
+                                  // "Pausa" non ha senso (non c'è nulla in
+                                  // corso da mettere in pausa): il click
+                                  // ricontrolla ~/Downloads (stesso
+                                  // endpoint di "Continua"), invece del
+                                  // generico pause/resume pensato per un
+                                  // download vero e proprio. Consolidato
+                                  // qui dopo feedback utente: le notifiche
+                                  // di installazione sono sempre vissute
+                                  // nel pannello Download, non ha senso
+                                  // spezzare il flusso su un'altra colonna.
+                                  if (task.status === 'awaiting_installer') {
+                                    fetch('/api/downloads/installer-continue', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ gameId: task.gameId }),
+                                    });
+                                    return;
+                                  }
+                                  fetch(task.status === 'paused' ? '/api/downloads/resume' : '/api/downloads/pause', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ id: task.gameId })
+                                  });
+                                }}
                               >
                                 {(isFocused) => (
                                   <button className={cn(
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
                                     isFocused ? "bg-blue-600 text-white" : "bg-white/10 opacity-60"
                                   )}>
-                                    {task.status === 'paused' ? t('downloads:resume') : t('downloads:pause')}
+                                    {task.status === 'awaiting_installer'
+                                      ? t('downloads:continue')
+                                      : task.status === 'paused' ? t('downloads:resume') : t('downloads:pause')}
                                   </button>
                                 )}
                               </Focusable>
+                              {task.status === 'awaiting_installer' && (
+                                <Focusable
+                                  group="downloads"
+                                  id={`dl-browse-${task.gameId}`}
+                                  onEnter={() => {
+                                    fetch('/api/downloads/installer-browse', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ gameId: task.gameId }),
+                                    });
+                                  }}
+                                >
+                                  {(isFocused) => (
+                                    <button className={cn(
+                                      "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
+                                      isFocused ? "bg-blue-600 text-white" : "bg-white/10 opacity-60"
+                                    )}>{t('downloads:browse')}</button>
+                                  )}
+                                </Focusable>
+                              )}
                               {/* v0.99.38 — annulla davvero il download: elimina
                                   processo, task E i file parziali già scaricati/
                                   estratti su disco (vedi downloadManager.ts/
@@ -4920,6 +5059,24 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         )}
                         {!isDone && (
                           <div className="flex gap-2">
+                            {notif.linkUrl && (
+                              <Focusable
+                                group="notifications"
+                                id={`notif-link-${notif.id}`}
+                                onEnter={() => { fetch('/api/open-url', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ url: notif.linkUrl }),
+                                }).catch(() => {}); }}
+                              >
+                                {(isFocused) => (
+                                  <div className={cn(
+                                    "w-full mb-2 px-3 py-2 rounded-xl text-[10px] font-bold text-center underline transition-all cursor-pointer",
+                                    isFocused ? "bg-blue-500/30 text-blue-200" : "text-blue-300"
+                                  )}>{notif.linkLabel ?? notif.linkUrl}</div>
+                                )}
+                              </Focusable>
+                            )}
                             {notif.status === 'applied' ? (
                               <>
                                 <Focusable group="notifications" id={`notif-ok-${notif.id}`} onEnter={() => resolveNotification(notif.id, true)}>
@@ -4973,6 +5130,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     )}>{notif.secondaryAction?.label ?? t('notifications:close')}</button>
                                   )}
                                 </Focusable>
+                                {notif.tertiaryAction && (
+                                  <Focusable group="notifications" id={`notif-tertiary-${notif.id}`} onEnter={() => dismissNotification(notif.id)}>
+                                    {(isFocused) => (
+                                      <button className={cn(
+                                        "flex-1 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-center transition-all",
+                                        isFocused ? "bg-white/25" : "bg-white/10"
+                                      )}>{notif.tertiaryAction!.label}</button>
+                                    )}
+                                  </Focusable>
+                                )}
                               </>
                             )}
                           </div>
@@ -5260,7 +5427,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       const isWaiting = authPolling === store.id;
                       const msg       = authMessage[store.id];
                       const url       = authUrl[store.id];
-                      const noLogin   = ['Battle.net', 'Classic Console'].includes(store.id);
+                      const noLogin   = ['Battle.net', 'Classic Console', 'Ubisoft'].includes(store.id);
                       // Steam ha login (rileva il client locale) ma nessun
                       // vero concetto di logout — non è un account OAuth.
                       // Il backend già risponde success:false di default per
@@ -5306,7 +5473,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       // Amazon, più a destra, lo scoring trovava lo switch
                       // per puro allineamento orizzontale, da cui il
                       // percorso "funzionante" scoperto dall'utente).
-                      const NO_LOGIN_GRID_STORES = ['Battle.net', 'Classic Console'];
+                      const NO_LOGIN_GRID_STORES = ['Battle.net', 'Classic Console', 'Ubisoft'];
                       const belowStore = arr[idx + 2];
                       const noElementBelowInGrid = !belowStore || NO_LOGIN_GRID_STORES.includes(belowStore.id);
                       const storeDownNeighbor = noElementBelowInGrid ? 'cloud-backup-toggle-google-drive' : undefined;
@@ -5336,12 +5503,25 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div className="flex justify-between items-start mb-6">
                             <div className="flex items-center gap-4">
                               <div className={cn(
-                                "w-12 h-12 rounded-2xl flex items-center justify-center shadow-2xl",
+                                // v1.5.20-dev.5 — bug reale segnalato dall'utente: l'icona si
+                                // deformava (perdeva la forma quadrata) quando lo store
+                                // risultava sincronizzato. Causa: nessun `shrink-0` su questo
+                                // contenitore — la label accanto ("Sessione attiva (N
+                                // sincronizzati, M installati)") è molto più lunga di
+                                // "Disconnesso", e senza `shrink-0` il flex item con
+                                // flex-shrink di default (1) si restringe in LARGHEZZA
+                                // quando lo spazio del contenitore flex si riduce, mentre
+                                // l'altezza (governata da h-12, non da flex-shrink sull'asse
+                                // riga) resta fissa — risultato: un rettangolo schiacciato
+                                // invece del quadrato voluto. shrink-0 blocca qualunque
+                                // restringimento, indipendentemente da quanto sia lunga la
+                                // label del fratello.
+                                "w-12 h-12 shrink-0 rounded-2xl flex items-center justify-center shadow-2xl",
                                 store.isConnected ? "bg-green-600 shadow-green-500/20"
                                   : isWaiting    ? "bg-blue-600 shadow-blue-500/20"
                                   : theme === 'dark' ? "bg-white/10" : "bg-gray-200"
                               )}>
-                                <Gamepad2 size={20} />
+                                <Gamepad2 size={20} className="shrink-0" />
                               </div>
                               <div>
                                 <h4 className="text-lg font-black italic uppercase tracking-tighter">{translateStorePluginName(store.id, store.name)}</h4>
@@ -6067,6 +6247,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               ['fsr',       'FSR (Wine ≥7)'],
                               ['eac',       'EAC Runtime'],
                               ['battleye',  'BattlEye Runtime'],
+                              // v1.5.20-dev.1 — umu-run (pacchetto
+                              // umu-launcher), stesso trattamento
+                              // puramente informativo delle altre voci.
+                              ['umu',       'Umu-launcher'],
                               // v1.1.105-dev.1 — tool di decompressione
                               // Classic Console, vedi archiveExtractors.ts.
                               ['unzip',     'Unzip'],
@@ -6956,6 +7140,18 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         const runnerId    = r.id || r;
                         const isActive    = selectedGame?.runner === runnerId;
                         const isLastRunnerRow = idx === nonDefaultRunners.length - 1;
+                        // Step 19d — un gioco legato a un launcher condiviso
+                        // (requiresLauncher impostato) gira SEMPRE nel
+                        // prefix Proton di quella scatola condivisa — mai
+                        // Wine, decisione esplicita dell'utente per il
+                        // supporto anticheat. Stesso principio "oscurato e
+                        // non selezionabile" già in uso per i tile EAC/
+                        // BattlEye quando il runner attivo è incompatibile:
+                        // il tile resta visibile (indici/neighbor invariati)
+                        // ma non cliccabile.
+                        const lockedToSharedLauncher = !!localGameConfig.requiresLauncher;
+                        const isProtonRunner = /proton/i.test(runnerId);
+                        const runnerLocked = lockedToSharedLauncher && !isProtonRunner;
                         return (
                           <Focusable
                             key={runnerId}
@@ -6970,6 +7166,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             sequentialChain="game-options-runner-bridge"
                             neighbors={isLastRunnerRow ? { down: overlayNavAnchors.firstMiddleId } : undefined}
                             onEnter={async () => {
+                              if (runnerLocked) { play('back'); return; }
                               // Toggle: se già attivo → torna a Wine-Lutris (default)
                               // altrimenti → attiva questo runner
                               const newRunner = isActive ? 'Wine-Lutris' : runnerId;
@@ -6993,7 +7190,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   ? "border-blue-400 bg-blue-500/10"
                                   : theme === 'dark'
                                     ? "border-white/10 bg-white/5"
-                                    : "border-gray-200 bg-gray-50"
+                                    : "border-gray-200 bg-gray-50",
+                                runnerLocked && "opacity-50"
                               )}>
                                 {/* Info runner */}
                                 <div className="flex-1 min-w-0">
@@ -7183,11 +7381,30 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         { key: 'mangohud', label: 'MangoHud',      desc: 'overlay FPS/GPU',       sysKey: 'mangohud' },
                         { key: 'eac',      label: 'EasyAntiCheat', desc: 'EAC runtime',           sysKey: 'eac'      },
                         { key: 'battleye', label: 'BattlEye',      desc: 'BE runtime',            sysKey: 'battleye' },
+                        // Step 19d — 6° tile, stessa griglia/dimensione delle
+                        // altre 5: riempie lo slot vuoto accanto a BattlEye
+                        // (ultima riga, 2ª colonna), sotto EasyAntiCheat.
+                        // sysKey vuoto: la disponibilità di questo tile non
+                        // dipende da systemTools, è gestita a parte sotto
+                        // (available sempre true — le singole opzioni non
+                        // ancora costruite sono già escluse da cycleOptions,
+                        // non mostrate come tile disabilitato).
+                        { key: 'sharedLauncher', label: t('gameOptions:sharedLauncher'), desc: t('gameOptions:sharedLauncherDesc'), sysKey: '' },
+                        // v1.5.20-dev.1 — 7° tile, stesso trattamento
+                        // semplice booleano di fsr/gameMode (non un ciclo
+                        // N-stati come sharedLauncher). sysKey: 'umu' lega
+                        // la disponibilità a systemTools.umu, stesso
+                        // principio delle altre voci con rilevamento reale.
+                        { key: 'umuRun', label: t('gameOptions:umuLauncher'), desc: t('gameOptions:umuLauncherDesc'), sysKey: 'umu' },
                       ] as const).map(({ key, label, desc, sysKey }, idx, arr) => {
                         // v1.1.104-dev.1 — mangohud non è più booleano ma
                         // un livello 0/1/2 (spento/compatta/completa).
                         const mangohudLevel = key === 'mangohud' ? (Number((localCompatProfile as any).mangohud) || 0) : 0;
-                        const enabled   = key === 'mangohud' ? mangohudLevel > 0 : ((localCompatProfile as any)[key] ?? false);
+                        const enabled   = key === 'mangohud'
+                          ? mangohudLevel > 0
+                          : key === 'sharedLauncher'
+                            ? (localGameConfig.requiresLauncher ?? '') !== ''
+                            : ((localCompatProfile as any)[key] ?? false);
                         // v1.5.3-dev.1 — richiesta utente: EAC/BattlEye
                         // funzionano SOLO col runner Proton, mai con wine
                         // puro (verificato: le variabili
@@ -7197,15 +7414,46 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // lato codice). Oscurati (non selezionabili) se il
                         // runner attivo per QUESTO gioco è quello di
                         // default (Wine-Lutris) invece di un runner Proton.
-                        const requiresProton = key === 'eac' || key === 'battleye';
+                        // v1.5.20-dev.1 — umu-run richiede sempre una build
+                        // Proton come PROTONPATH (vedi ProtonRunner.launch):
+                        // stessa restrizione/oscuramento già applicata a
+                        // eac/battleye quando il runner attivo è Wine-Lutris.
+                        const requiresProton = key === 'eac' || key === 'battleye' || key === 'umuRun';
                         const protonActive = !!selectedGame?.runner && selectedGame.runner !== 'Wine-Lutris';
-                        const available = !!systemTools[sysKey] && (!requiresProton || protonActive);
+                        // Step 19d — il tile sharedLauncher non dipende da
+                        // systemTools (sysKey vuoto sopra): sempre "available",
+                        // le opzioni non ancora costruite sono già filtrate
+                        // fuori da cycleOptions, non rappresentate come stato
+                        // disabilitato di QUESTO tile.
+                        const available = key === 'sharedLauncher'
+                          ? true
+                          : !!systemTools[sysKey] && (!requiresProton || protonActive);
+                        // Step 19d — dati del ciclo N+1 stati (Nessuno + un
+                        // launcher per ciascuno già costruito), calcolati qui
+                        // solo per key==='sharedLauncher', stesso principio
+                        // di mangohudLevel sopra per key==='mangohud'.
+                        const sharedLauncherCycleOptions = key === 'sharedLauncher'
+                          ? ['', ...sharedLaunchers.filter((l: any) => l.available).map((l: any) => l.id)]
+                          : [];
+                        const sharedLauncherCurrent = localGameConfig.requiresLauncher ?? '';
+                        const sharedLauncherCurrentLabel = sharedLauncherCurrent === ''
+                          ? t('gameOptions:sharedLauncherNone')
+                          : (sharedLaunchers.find((l: any) => l.id === sharedLauncherCurrent)?.displayName ?? sharedLauncherCurrent);
                         // v1.0.0 — collega esplicitamente il primo elemento
                         // a Runner Bridge (sopra) e l'ultimo a Executable
-                        // Path (sotto) — vedi overlayNavAnchors.
+                        // Path (sotto) — vedi overlayNavAnchors. Griglia a 2
+                        // colonne: l'ultima RIGA ha 2 elementi se arr.length
+                        // è pari, 1 solo se dispari (v1.5.20-dev.1 — con 7
+                        // voci ora l'ultima riga è singola: idx 6 da solo,
+                        // non più una coppia come quando le voci erano 6 —
+                        // formula generalizzata così non richiede altro
+                        // aggiustamento manuale alla prossima voce aggiunta).
+                        // TUTTI gli elementi dell'ultima riga vanno agganciati
+                        // esplicitamente, non solo l'ultimo dell'array.
+                        const itemsInLastRow = arr.length % 2 === 0 ? 2 : 1;
                         const compatNeighbors: { up?: string; down?: string } = {};
                         if (idx === 0) compatNeighbors.up = overlayNavAnchors.lastRunnerBridgeId;
-                        if (idx === arr.length - 1) compatNeighbors.down = 'field-executablePath';
+                        if (idx >= arr.length - itemsInLastRow) compatNeighbors.down = 'field-executablePath';
                         // v1.1.104-dev.2 — didascalia dinamica solo per
                         // MangoHud tramite i18next (non stringhe hardcoded).
                         const tileDesc = key === 'mangohud'
@@ -7218,6 +7466,23 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             id={`compat-${key}`}
                             neighbors={compatNeighbors}
                             onEnter={async () => {
+                              // Step 19d — ciclo N+1 stati, percorso separato
+                              // dalla logica generica sotto: endpoint diverso
+                              // (/config non /compat), nessun concetto di
+                              // "oscurato" per questo tile (vedi available
+                              // sempre true sopra).
+                              if (key === 'sharedLauncher') {
+                                const idx2 = sharedLauncherCycleOptions.indexOf(sharedLauncherCurrent);
+                                const next2 = sharedLauncherCycleOptions[(idx2 + 1) % sharedLauncherCycleOptions.length];
+                                setLocalGameConfig(prev => ({ ...prev, requiresLauncher: next2 }));
+                                await fetch(`/api/games/${selectedGame.id}/config`, {
+                                  method: 'PATCH',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ requiresLauncher: next2 === '' ? null : next2 }),
+                                });
+                                play('select');
+                                return;
+                              }
                               // v1.5.3-dev.1 — richiesta utente: se il
                               // tile è oscurato (non disponibile), non
                               // deve essere selezionabile per davvero, non
@@ -7270,14 +7535,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <div className="flex flex-col items-start gap-0.5">
                                   <div className="flex items-center gap-2">
                                     <span>{label}</span>
-                                    <span className={cn(
-                                      "text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-full border",
-                                      available
-                                        ? "text-green-400 bg-green-400/10 border-green-400/20"
-                                        : "text-red-400 bg-red-400/10 border-red-400/20"
-                                    )}>
-                                      {available ? '✓' : '✗'}
-                                    </span>
+                                    {key !== 'sharedLauncher' && (
+                                      <span className={cn(
+                                        "text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-full border",
+                                        available
+                                          ? "text-green-400 bg-green-400/10 border-green-400/20"
+                                          : "text-red-400 bg-red-400/10 border-red-400/20"
+                                      )}>
+                                        {available ? '✓' : '✗'}
+                                      </span>
+                                    )}
                                   </div>
                                   <span className="text-[8px] font-mono opacity-30 normal-case">{tileDesc}</span>
                                 </div>
@@ -7289,6 +7556,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
                                       mangohudLevel === 0 ? "left-0.5" : mangohudLevel === 1 ? "left-[14px]" : "left-[26px]"
                                     )} />
+                                  </div>
+                                ) : key === 'sharedLauncher' ? (
+                                  // Step 19d — selettore a N stati (Nessuno +
+                                  // un launcher per ciascuno costruito), non
+                                  // un semplice on/off: chevron al posto del
+                                  // pill, stesso principio del vecchio widget
+                                  // standalone (ora fuso in questa griglia).
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <ChevronLeft size={11} className="opacity-30" />
+                                    <span className="text-blue-300 normal-case font-bold text-[9px] max-w-[70px] truncate">{sharedLauncherCurrentLabel}</span>
+                                    <ChevronRight size={11} className="opacity-30" />
                                   </div>
                                 ) : (
                                   <div className={cn("w-8 h-4 rounded-full transition-all relative shrink-0", enabled ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
@@ -7728,12 +8006,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   </div>
                 </div>
 
-                {/* Step 10 — Winetricks dipendenze (GOG, Epic, Amazon —
+                {/* Step 10 — Winetricks dipendenze (GOG, Epic, Amazon, Ubisoft —
                     v1.1.114-dev.1: runAmazon() in downloadManager.ts usa
                     già filterVerbsForEnv(task.winetricksVerbs) esattamente
                     come GOG/Epic, mancava solo qui il permesso di
-                    mostrarlo/modificarlo dall'overlay) */}
-                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games') && (
+                    mostrarlo/modificarlo dall'overlay. Step 19d: Ubisoft
+                    Connect aggiunto — bug reale trovato due volte,
+                    verificato di nuovo qui per essere certi che regga. */}
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games' || selectedGame.store === 'Ubisoft') && (
                   <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Package size={16} className="text-blue-400" />
@@ -7811,7 +8091,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             // raggiungibile solo premendo destra).
                             neighbors={
                               verbIdx === 0 ? { up: 'wine-deps-expand-toggle' }
-                              : isLastVerb ? { down: 'envvar-0' }
+                              : isLastVerb ? { down: wineDepsExpanded ? 'os-version-default' : 'envvar-0' }
                               : undefined
                             }
                           >
@@ -7846,6 +8126,94 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         );
                       })}
                     </div>
+
+                    {/* Step 19d — Versione OS: sezione separata dalla
+                        checklist sopra perché semanticamente diversa —
+                        verificato nel sorgente reale di winetricks
+                        (w_metadata <verbo> settings): questi verb non
+                        installano nulla, impostano solo la versione di
+                        Windows dichiarata da Wine/Proton al programma in
+                        esecuzione, e la prefix ne ha una sola attiva alla
+                        volta — scelta singola (radio), non checkbox
+                        cumulabili. Visibile solo a vista espansa, stesso
+                        gate di dotnet35 sopra. */}
+                    {wineDepsExpanded && (() => {
+                      // Un gioco legato a un launcher condiviso NON può
+                      // cambiare la versione OS della prefix: è la stessa
+                      // "scatola" usata dal launcher stesso (es. Ubisoft
+                      // Connect richiede win10) e da altri giochi che vi
+                      // si appoggiano — cambiarla qui romperebbe tutti gli
+                      // altri. Stesso principio già applicato al vincolo
+                      // Runner Bridge per questi titoli.
+                      const osVersionLocked = !!localGameConfig.requiresLauncher;
+                      const options = ['', ...OS_VERSION_VERBS];
+                      return (
+                        <div className="mt-4 pt-4 border-t border-white/10">
+                          <div className="flex items-center gap-2 mb-3">
+                            <span className="text-[10px] font-black uppercase tracking-widest opacity-50">{t('gameOptions:osVersion')}</span>
+                            {osVersionLocked && (
+                              <span className="text-[9px] text-yellow-400/60 uppercase tracking-widest">{t('gameOptions:osVersionLockedBySharedLauncher')}</span>
+                            )}
+                          </div>
+                          <div className="space-y-2">
+                            {options.map((verb, idx, arr) => {
+                              const isSelected = verb === ''
+                                ? !OS_VERSION_VERBS.some(v => winetricksVerbs.includes(v))
+                                : winetricksVerbs.includes(verb);
+                              const isLastOption = idx === arr.length - 1;
+                              const toggleOsVersion = async () => {
+                                if (osVersionLocked) { play('back'); return; }
+                                const withoutOsVerbs = winetricksVerbs.filter(v => !OS_VERSION_VERBS.includes(v));
+                                const next = verb === '' ? withoutOsVerbs : [...withoutOsVerbs, verb];
+                                setWinetricksVerbs(next);
+                                const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
+                                const current = compatRes.ok ? await compatRes.json() : {};
+                                await fetch(`/api/games/${selectedGame.id}/compat`, {
+                                  method: 'PATCH',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ ...current, winetricksVerbs: next }),
+                                });
+                                play('select');
+                              };
+                              return (
+                                <Focusable
+                                  key={verb || 'default'}
+                                  group="game-options"
+                                  id={`os-version-${verb || 'default'}`}
+                                  onEnter={toggleOsVersion}
+                                  neighbors={isLastOption ? { down: 'envvar-0' } : undefined}
+                                >
+                                  {(isFocused) => (
+                                    <div className={cn(
+                                      "flex items-center gap-3 px-3 py-2 rounded-xl transition-all border",
+                                      osVersionLocked ? "opacity-40" : "cursor-pointer",
+                                      isFocused
+                                        ? "bg-blue-600/20 border-blue-500/60"
+                                        : "border-transparent hover:bg-white/5"
+                                    )}>
+                                      {/* Indicatore radio, non checkbox: scelta singola */}
+                                      <div className={cn(
+                                        "w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0",
+                                        isSelected
+                                          ? "border-blue-500"
+                                          : isFocused
+                                            ? "border-blue-400"
+                                            : "border-white/20"
+                                      )}>
+                                        {isSelected && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                                      </div>
+                                      <span className="text-xs font-mono flex-1">
+                                        {verb === '' ? t('gameOptions:osVersionDefault') : verb}
+                                      </span>
+                                    </div>
+                                  )}
+                                </Focusable>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -8315,11 +8683,33 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     "text-white break-all whitespace-pre-wrap leading-snug",
                     activeField ? "font-mono text-lg md:text-xl" : "font-black tracking-wide text-2xl"
                   )}>
-                    {(activeField ? activeField.value : searchQuery) || (
-                      <span className="opacity-20 italic font-normal text-lg">
-                        {activeField ? t('dashboard:keyboard.emptyField') : t('dashboard:keyboard.startTyping')}
-                      </span>
-                    )}
+                    {(() => {
+                      const currentValue = activeField ? activeField.value : searchQuery;
+                      if (!currentValue) {
+                        return (
+                          <span className="opacity-20 italic font-normal text-lg">
+                            {activeField ? t('dashboard:keyboard.emptyField') : t('dashboard:keyboard.startTyping')}
+                          </span>
+                        );
+                      }
+                      // v1.5.20-dev.5 — richiesta utente: cursore visibile
+                      // che indichi dove si scriverà/correggerà, non solo
+                      // il testo intero senza alcun riferimento di
+                      // posizione. Clampato sempre entro i limiti della
+                      // stringa CORRENTE: se vkCursorPos arriva da un
+                      // report leggermente in ritardo rispetto a un
+                      // cambio di campo/valore (es. appena aperta la
+                      // tastiera per un campo più corto del precedente),
+                      // non deve mai puntare oltre la fine.
+                      const pos = Math.max(0, Math.min(currentValue.length, vkCursorPos ?? currentValue.length));
+                      return (
+                        <>
+                          <span>{currentValue.slice(0, pos)}</span>
+                          <span className="inline-block w-[2px] h-[1em] align-middle bg-blue-400 animate-pulse mx-px" />
+                          <span>{currentValue.slice(pos)}</span>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
                 {(activeField ? activeField.value : searchQuery) && (
@@ -8339,6 +8729,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     setSearchQuery(val);
                   }
                 }}
+                onCursorChange={setVkCursorPos}
                 onClose={() => {
                   if (activeField) {
                     closeKeyboard();

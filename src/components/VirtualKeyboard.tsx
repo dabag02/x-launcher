@@ -2,9 +2,10 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { useTranslation } from 'react-i18next';
 import { Focusable, useFocus } from './FocusProvider';
-import { Delete, Space, CornerDownLeft, ArrowBigUp, Languages, ClipboardPaste } from 'lucide-react';
+import { Delete, Space, CornerDownLeft, ArrowBigUp, Languages, ClipboardPaste, ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Theme } from '../types';
+import { InputManager } from '../input/InputManager';
 
 // v1.1.16 — un suggerimento rapido può portare un breve commento
 // contestuale (es. per i launch argument/le variabili d'ambiente più
@@ -55,6 +56,14 @@ interface VirtualKeyboardProps {
   // selezione: si vede il commento mentre si scorre con D-pad/stick,
   // prima ancora di premere A.
   onSuggestionFocus?: (tip: string | undefined) => void;
+  // v1.5.20-dev.5 — richiesta utente: un cursore visibile nel campo,
+  // spostabile, per correggere/cercare a metà stringa invece di poter
+  // solo aggiungere in fondo o cancellare l'ultimo carattere. La
+  // posizione vive qui (unico punto che la usa per inserire/cancellare
+  // davvero), notificata al chiamante SOLO per disegnarla nel riquadro
+  // fluttuante — stesso principio già usato per onSuggestionFocus sopra:
+  // stato di visualizzazione, non parte del valore vero e proprio.
+  onCursorChange?: (pos: number) => void;
 }
 
 /**
@@ -211,6 +220,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
   className,
   altSuggestions,
   onSuggestionFocus,
+  onCursorChange,
 }) => {
   const { focusedId } = useFocus();
   // Step 19b (v1.1.61) — namespace 'dashboard', per le sole etichette UI
@@ -261,7 +271,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
     // tasti fisici a fianco della barra spaziatrice: fanno parte della
     // stessa riga logica ai fini della mappa dei vicini, cosi sx/dx e
     // su/giù restano deterministici come per ogni altro tasto.
-    const rowSpace = ['key-lang', 'key-space', 'key-paste'];
+    const rowSpace = ['key-lang', 'key-cursor-left', 'key-space', 'key-cursor-right', 'key-paste'];
     // Richiesta utente — i suggerimenti (chip Shift) entrano anche loro
     // nel ciclo su/giù, come qualunque altra riga: dalla riga numeri si
     // sale ai suggerimenti, dai suggerimenti si scende ai numeri, e il
@@ -288,6 +298,94 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
   const mountTimeRef = React.useRef(Date.now());
   const BOUNCE_GUARD_MS = 200;
 
+  // v1.5.20-dev.5 — richiesta utente: tenendo premuto il tasto Canc/Del
+  // per 4 secondi continui, il campo si svuota del tutto invece di
+  // cancellare un carattere alla volta. onEnter di Focusable scatta solo
+  // al fronte "appena premuto" (singolo tap, sia gamepad che
+  // mouse/touch via onClick) — non basta a misurare una pressione
+  // prolungata, serve leggere lo stato continuativamente, stesso
+  // identico principio già usato in App.tsx per "tieni premuto B" nel
+  // test controller (GAMEPAD_TEST_EXIT_HOLD_MS): un intervallo che
+  // legge lo stato ogni 50ms indipendentemente da eventuali "cambiamenti"
+  // di isJustPressed. Qui unificato per DUE sorgenti di input possibili
+  // sullo stesso tasto: gamepad (A tenuto premuto mentre key-back ha il
+  // focus, letto da InputManager) e puntatore (mouse/touch, tracciato a
+  // parte con onMouseDown/onTouchStart perché InputManager non vede
+  // affatto mouse/touch — pointerHoldRef sotto).
+  const CLEAR_HOLD_MS = 4000;
+  const [clearHoldProgress, setClearHoldProgress] = React.useState(0);
+  const clearHoldStartRef = React.useRef<number | null>(null);
+  const clearHoldFiredRef = React.useRef(false);
+  const pointerHoldRef = React.useRef(false);
+
+  // v1.5.20-dev.5 — posizione del cursore: parte dalla fine del valore
+  // iniziale (comportamento invariato per chi non sposta mai il cursore
+  // — identico ad "append in fondo" di prima). VirtualKeyboard viene
+  // smontata/rimontata ad ogni apertura per un campo diverso (App.tsx
+  // condiziona il render intero su showKeyboard, non riusa mai la stessa
+  // istanza per due campi) — l'inizializzatore ricalcola quindi da solo
+  // ad ogni apertura, senza bisogno di un effetto di reset esplicito.
+  const [cursorPos, setCursorPos] = React.useState(() => value.length);
+
+  // Notifica il chiamante ad ogni spostamento — SOLO per disegnare il
+  // cursore nel riquadro fluttuante (App.tsx), non per l'editing vero
+  // (che resta interamente qui, vedi insertAtCursor/handleBackspace).
+  React.useEffect(() => {
+    onCursorChange?.(cursorPos);
+  }, [cursorPos, onCursorChange]);
+
+  // Difesa: se per qualunque motivo `value` arrivasse più corto della
+  // posizione corrente (es. un cambiamento esterno imprevisto), riporta
+  // il cursore dentro i limiti invece di lasciarlo puntare oltre la
+  // fine della stringa — mai lo sposta in avanti, solo lo riduce se
+  // necessario.
+  React.useEffect(() => {
+    setCursorPos(p => Math.min(p, value.length));
+  }, [value]);
+
+  const insertAtCursor = (text: string) => {
+    const next = value.slice(0, cursorPos) + text + value.slice(cursorPos);
+    onChange(next);
+    setCursorPos(cursorPos + text.length);
+  };
+
+  const moveCursor = (delta: number) => {
+    setCursorPos(prev => Math.max(0, Math.min(value.length, prev + delta)));
+  };
+
+  const handleClearHoldPointerStart = React.useCallback(() => {
+    pointerHoldRef.current = true;
+  }, []);
+  const handleClearHoldPointerEnd = React.useCallback(() => {
+    pointerHoldRef.current = false;
+  }, []);
+
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      const gamepadHeld = focusedId === 'key-back' && InputManager.readPrimary().buttons.has('A');
+      const held = gamepadHeld || pointerHoldRef.current;
+      if (held && clearHoldStartRef.current === null) {
+        clearHoldStartRef.current = Date.now();
+        clearHoldFiredRef.current = false;
+      } else if (!held && clearHoldStartRef.current !== null) {
+        clearHoldStartRef.current = null;
+        clearHoldFiredRef.current = false;
+        setClearHoldProgress(0);
+      }
+      if (clearHoldStartRef.current !== null) {
+        const elapsed = Date.now() - clearHoldStartRef.current;
+        const progress = Math.min(1, elapsed / CLEAR_HOLD_MS);
+        setClearHoldProgress(progress);
+        if (progress >= 1 && !clearHoldFiredRef.current) {
+          clearHoldFiredRef.current = true;
+          onChange('');
+          setCursorPos(0);
+        }
+      }
+    }, 50);
+    return () => clearInterval(interval);
+  }, [focusedId, onChange]);
+
   const handleKey = (keyDef: KeyDef) => {
     if (Date.now() - mountTimeRef.current < BOUNCE_GUARD_MS) return;
     // Le lettere (nessuna coppia normal/shifted esplicita) seguono la
@@ -297,15 +395,33 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
     const char = keyDef.normal === keyDef.shifted && isLetter(keyDef.normal)
       ? (isShift ? keyDef.normal.toUpperCase() : keyDef.normal.toLowerCase())
       : (isShift ? keyDef.shifted : keyDef.normal);
-    onChange(value + char);
+    insertAtCursor(char);
   };
 
-  const handleBackspace  = () => onChange(value.slice(0, -1));
-  const handleSpace      = () => onChange(value + ' ');
+  const handleBackspace = () => {
+    // v1.5.20-dev.5 — cancella il carattere PRIMA del cursore, non più
+    // sempre l'ultimo della stringa (vedi cursorPos sopra). Nessun
+    // effetto se il cursore è già a inizio stringa.
+    if (cursorPos === 0) return;
+    const next = value.slice(0, cursorPos - 1) + value.slice(cursorPos);
+    onChange(next);
+    setCursorPos(cursorPos - 1);
+  };
+  const handleSpace      = () => insertAtCursor(' ');
   const handleSuggestion = (s: SuggestionItem) => {
-    if (s.insertMode === 'replace') { onChange(s.value); return; }
-    if (s.insertMode === 'append-space') { onChange(value ? `${value} ${s.value}` : s.value); return; }
-    onChange(value + s.value);
+    if (s.insertMode === 'replace') { onChange(s.value); setCursorPos(s.value.length); return; }
+    if (s.insertMode === 'append-space') {
+      // Un intero nuovo argomento aggiunto in fondo alla lista esistente
+      // (Launch Arguments) — resta un'aggiunta di coda concettuale, non
+      // un inserimento al punto di modifica corrente, stesso
+      // comportamento di sempre. Il cursore segue alla fine del nuovo
+      // valore risultante.
+      const next = value ? `${value} ${s.value}` : s.value;
+      onChange(next);
+      setCursorPos(next.length);
+      return;
+    }
+    insertAtCursor(s.value);
   };
 
   // v1.1.13 — pulsante "Incolla": legge la clipboard REALE del sistema
@@ -324,7 +440,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
         setTimeout(() => setPasteStatus('idle'), 1800);
         return;
       }
-      onChange(value + text.trim());
+      insertAtCursor(text.trim());
     } catch {
       // Permesso negato o Clipboard API non disponibile in questo
       // contesto — non un crash, solo un feedback breve per l'utente.
@@ -458,7 +574,26 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
           {layout.numbers.map((keyDef, i) => renderLetterKey(0, keyDef, i))}
           <Focusable group="keyboard" id="key-back" onEnter={handleBackspace} neighbors={neighborMap['key-back']} className="max-w-[44px]">
             {(isFocused: boolean) => (
-              <div className={wideKeyClass(isFocused, 'red')}><Delete size={16} /></div>
+              <div
+                className={cn(wideKeyClass(isFocused, 'red'), 'relative overflow-hidden')}
+                onMouseDown={handleClearHoldPointerStart}
+                onMouseUp={handleClearHoldPointerEnd}
+                onMouseLeave={handleClearHoldPointerEnd}
+                onTouchStart={handleClearHoldPointerStart}
+                onTouchEnd={handleClearHoldPointerEnd}
+                onTouchCancel={handleClearHoldPointerEnd}
+              >
+                {/* Riempimento progressivo — cresce dal basso mentre si tiene
+                    premuto, cosi si vede arrivare lo svuotamento completo
+                    invece che scoprirlo di colpo dopo 4 secondi. */}
+                {clearHoldProgress > 0 && (
+                  <div
+                    className="absolute inset-x-0 bottom-0 bg-white/30 pointer-events-none"
+                    style={{ height: `${clearHoldProgress * 100}%` }}
+                  />
+                )}
+                <Delete size={16} className="relative" />
+              </div>
             )}
           </Focusable>
         </div>
@@ -512,7 +647,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
           </p>
         )}
         <div className="flex justify-center items-stretch gap-1 md:gap-1.5 mt-0.5">
-          <Focusable group="keyboard" id="key-lang" onEnter={() => setLayout(layoutId === 'it' ? 'en' : 'it')} neighbors={neighborMap['key-lang']} className="w-1/5">
+          <Focusable group="keyboard" id="key-lang" onEnter={() => setLayout(layoutId === 'it' ? 'en' : 'it')} neighbors={neighborMap['key-lang']} className="w-1/6">
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center gap-1.5 text-[9px] font-black uppercase tracking-widest transition-all touch-none',
@@ -524,6 +659,27 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               )}>
                 <Languages size={13} />
                 {layout.label}
+              </div>
+            )}
+          </Focusable>
+          {/* v1.5.20-dev.5 — richiesta utente: spostamento del cursore, non
+              solo scrittura/cancellazione sempre in fondo alla stringa.
+              Tasti dedicati (non D-pad sinistra/destra, già impegnato a
+              navigare fra i TASTI stessi) — ogni conferma sposta di UNA
+              posizione, stesso schema "un'azione per pressione" di
+              qualunque altro tasto di questa tastiera (nessun key-repeat
+              automatico da nessuna parte, coerente col resto). */}
+          <Focusable group="keyboard" id="key-cursor-left" onEnter={() => moveCursor(-1)} neighbors={neighborMap['key-cursor-left']} className="w-1/6">
+            {(isFocused: boolean) => (
+              <div className={cn(
+                'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
+                isFocused
+                  ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
+                  : isLight
+                    ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
+                    : 'bg-white/5 opacity-80'
+              )}>
+                <ChevronLeft size={16} />
               </div>
             )}
           </Focusable>
@@ -541,7 +697,21 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               </div>
             )}
           </Focusable>
-          <Focusable group="keyboard" id="key-paste" onEnter={handlePaste} neighbors={neighborMap['key-paste']} className="w-1/5">
+          <Focusable group="keyboard" id="key-cursor-right" onEnter={() => moveCursor(1)} neighbors={neighborMap['key-cursor-right']} className="w-1/6">
+            {(isFocused: boolean) => (
+              <div className={cn(
+                'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
+                isFocused
+                  ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
+                  : isLight
+                    ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
+                    : 'bg-white/5 opacity-80'
+              )}>
+                <ChevronRight size={16} />
+              </div>
+            )}
+          </Focusable>
+          <Focusable group="keyboard" id="key-paste" onEnter={handlePaste} neighbors={neighborMap['key-paste']} className="w-1/6">
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center gap-1.5 text-[9px] font-black uppercase tracking-widest transition-all touch-none',

@@ -13,6 +13,14 @@ import * as attemptTracker from './src/backend/aiProviders/attemptTracker';
 import { readAppConfig, writeAppConfig, hasLanguageBeenSet } from './src/backend/appConfig';
 import { getSystemInfo } from './src/backend/systemInfo';
 import { DATA_DIR, ENV_PATH } from './src/backend/paths';
+import { THIRD_PARTY_LAUNCHERS } from './src/backend/plugins/thirdPartyLaunchers';
+import {
+  getSharedLauncherState,
+  openInstallerPage,
+  markLauncherBootstrapped,
+  launchSharedLauncher,
+  isLauncherBootstrapped,
+} from './src/backend/sharedLauncherManager';
 import fs from 'fs';
 import os from 'os';
 import { spawn, execSync } from 'child_process';
@@ -82,7 +90,16 @@ async function startServer() {
 
   // Aggancia gli eventi del DownloadManager al NotificationEngine
   downloadManager.onComplete((gameId, gameTitle) => {
-    notificationEngine.emit({ type: 'download-completed', gameId, gameTitle });
+    // Step 19d — bug reale segnalato dall'utente: per Ubisoft Connect (o
+    // un futuro launcher condiviso) non ancora bootstrappato, questo
+    // "completed" significa solo "installer individuato", non "app
+    // installata" — una notifica "Completato!" qui sarebbe fuorviante,
+    // l'utente deve ancora eseguire il setup lanciando la card.
+    const task = downloadManager.getTasks().find(t => t.gameId === gameId);
+    const pendingSharedLauncher = task?.store === 'Ubisoft' && !isLauncherBootstrapped('ubisoft-connect');
+    if (!pendingSharedLauncher) {
+      notificationEngine.emit({ type: 'download-completed', gameId, gameTitle });
+    }
     // v1.1.20 — stesso bug del percorso di disinstallazione, versione
     // installazione: il completamento aggiornava già isInstalled nel DB
     // (vedi downloadManager, fine del flusso di installazione) ma non
@@ -100,6 +117,13 @@ async function startServer() {
   downloadManager.onKnownFixesResult((gameId, gameTitle, found, verbs) => {
     notificationEngine.emit({ type: 'known-fixes-result', gameId, gameTitle, found, verbs });
   });
+  // Step 19d — RIMOSSO: l'installer mancante di un launcher condiviso
+  // NON genera più una notifica separata (feedback utente: le
+  // interazioni di installazione sono sempre vissute nel pannello
+  // Download, spezzarle su un'altra colonna non ha senso). Il task
+  // stesso porta già status='awaiting_installer' + downloadUrl, letti
+  // direttamente dal pannello Download via il normale polling di
+  // /api/downloads.
 
   // Aspetta che gameManager abbia finito il boot (plugin + runner + libreria)
   // prima di accettare richieste — evita race condition sulle prime chiamate API.
@@ -398,6 +422,32 @@ async function startServer() {
     res.json(logs);
   });
 
+  // Step 19d — apre un URL qualunque nel browser esterno (usato dal link
+  // nel pannello Download quando un installer manuale è richiesto).
+  // Stesso meccanismo firefox/xdg-open già in uso altrove nel backend
+  // (sharedLauncherManager.ts/googleDrive.ts) — duplicato qui per
+  // coerenza con quella convenzione (helper per-file, non un'utility
+  // condivisa), non un'astrazione nuova da mantenere.
+  app.post("/api/open-url", (req, res) => {
+    const url = req.body?.url;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ success: false, message: 'url required' });
+    }
+    try {
+      execSync('which firefox', { stdio: 'ignore' });
+      spawn('firefox', [url], { detached: true, stdio: 'ignore' }).unref();
+    } catch {
+      try {
+        execSync('which xdg-open', { stdio: 'ignore' });
+        spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+      } catch {
+        writeLog('warning', `[open-url] Nessun browser trovato (firefox/xdg-open) — apri manualmente: ${url}`);
+        return res.json({ success: false, message: 'Nessun browser trovato.' });
+      }
+    }
+    res.json({ success: true });
+  });
+
   app.get("/api/downloads", (req, res) => {
     res.json(downloadManager.getTasks());
   });
@@ -424,6 +474,21 @@ async function startServer() {
   app.post("/api/downloads/cancel", (req, res) => {
     downloadManager.cancelTask(req.body.gameId ?? req.body.id);
     res.json({ success: true });
+  });
+
+  // Step 19d — flusso installer manuale Ubisoft Connect: l'utente conferma
+  // di aver scaricato (ricontrolla ~/Downloads) o indica il file a mano
+  // (zenity/kdialog via filePicker.ts).
+  app.post("/api/downloads/installer-continue", (req, res) => {
+    const gameId = req.body.gameId ?? req.body.id;
+    if (!gameId) return res.status(400).json({ success: false, message: 'gameId required' });
+    res.json(downloadManager.continueInstaller(gameId));
+  });
+
+  app.post("/api/downloads/installer-browse", async (req, res) => {
+    const gameId = req.body.gameId ?? req.body.id;
+    if (!gameId) return res.status(400).json({ success: false, message: 'gameId required' });
+    res.json(await downloadManager.browseInstaller(gameId));
   });
 
   app.get("/api/runners", (req, res) => {
@@ -510,6 +575,74 @@ async function startServer() {
   app.post("/api/steam/bigpicture", (req, res) => {
     const { openSteamBigPicture } = require('./src/backend/runners/implementations');
     res.json(openSteamBigPicture());
+  });
+
+  // ---------------------------------------------------------------------------
+  // Step 19d — Launcher terze parti condivisi (Fase 1)
+  // ---------------------------------------------------------------------------
+
+  // Stato di tutti i launcher condivisi (registro + bootstrap già fatto o
+  // meno) — usato dal frontend per decidere se la card mostra "installer"
+  // o "launcher" (stesso principio della card Steam Big Picture, ma qui
+  // lo stato è reale, non sintetico).
+  app.get("/api/shared-launchers", (_req, res) => {
+    const list = THIRD_PARTY_LAUNCHERS.map(def => {
+      const state = getSharedLauncherState(def.id);
+      return {
+        id: def.id,
+        displayName: def.displayName,
+        verified: def.verified,
+        bootstrapped: !!state?.bootstrappedAt,
+        runner: state?.runner ?? null,
+        // Step 19d — distingue i launcher gia' costruiti (Ubisoft
+        // Connect, installerUrl compilato) da quelli ancora placeholder
+        // (EA App/Battle.net/Rockstar, installerUrl vuoto) — usato dallo
+        // switch "Launcher condiviso" in Game Options per oscurare le
+        // voci non ancora selezionabili, stesso principio gia' in uso
+        // per i tile EAC/BattlEye quando il runner e' incompatibile.
+        available: !!def.installerUrl,
+      };
+    });
+    res.json(list);
+  });
+
+  // Runner disponibili per il selettore di bootstrap — filtrati a sole
+  // build Proton/GE-Proton (mai Wine, decisione esplicita dell'utente per
+  // il supporto anticheat). Riusa compatibilityManager.getAvailableRunners()
+  // esistente, nessun secondo scanner.
+  app.get("/api/shared-launchers/:id/runners", (_req, res) => {
+    const allRunners = compatibilityManager.getAvailableRunners();
+    const protonRunners = allRunners.filter(r => /proton/i.test(r.id));
+    res.json(protonRunners);
+  });
+
+  // Apre la pagina ufficiale di download nel browser — MAI un download
+  // automatico, vedi nota su installerUrl in thirdPartyLaunchers.ts.
+  app.post("/api/shared-launchers/:id/open-installer-page", (req, res) => {
+    res.json(openInstallerPage(req.params.id));
+  });
+
+  // Conferma bootstrap completato: l'utente ha già installato manualmente
+  // il launcher dentro il prefix condiviso con la Proton scelta.
+  app.post("/api/shared-launchers/:id/bootstrap", (req, res) => {
+    const { runner, launcherExe } = req.body;
+    if (!runner || !launcherExe) {
+      res.status(400).json({ success: false, message: 'runner e launcherExe sono richiesti.' });
+      return;
+    }
+    try {
+      markLauncherBootstrapped(req.params.id, runner, launcherExe);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ success: false, message: e?.message ?? String(e) });
+    }
+  });
+
+  // Avvia il launcher terzo stesso (card in stato "launcher", dopo il
+  // bootstrap) — stesso principio della card Steam Big Picture.
+  app.post("/api/shared-launchers/:id/launch", async (req, res) => {
+    const result = await launchSharedLauncher(req.params.id);
+    res.json(result);
   });
 
   app.get("/api/fixes/:gameId", (req, res) => {

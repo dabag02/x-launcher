@@ -2,6 +2,153 @@
 
 ---
 
+## v1.5.20-dev.1 — Step 19d: switch "Umu-launcher" generalizzato nel Compatibility Layer
+
+Implementato il fix `umu-launcher` deciso a fine sessione precedente (vedi diario di sessione dopo v1.5.19-dev.1), ma **generalizzato su richiesta dell'utente**: non solo per i launcher condivisi, uno switch disponibile in Compatibility Layer per QUALUNQUE gioco con runner Proton.
+
+### Verificato prima di scrivere codice (nessuna assunzione)
+
+- **Pacchettizzazione reale per distro**: Arch → `umu-launcher` in multilib (`sudo pacman -S umu-launcher`, confermato su archlinux.org). Debian/Ubuntu e Fedora → **nessun pacchetto ufficiale nei repo** — il progetto (Open-Wine-Components/umu-launcher) pubblica `.deb` precompilati per debian-12/13/ubuntu-noble e `.rpm` per fc42/fc43 direttamente sulla pagina GitHub Releases. Il binario si chiama `umu-run` (nome diverso dal pacchetto `umu-launcher`).
+- **Sintassi di invocazione reale** (man umu, wiki FAQ ufficiale): `WINEPREFIX=<prefix> PROTONPATH=<cartella build proton> GAMEID=<id arbitrario> umu-run <exe> [args]`. `PROTON_VERB=waitforexitandrun` è già il default, non serve impostarlo esplicitamente. `PROTONPATH` è la cartella che CONTIENE il binario `proton`, non il binario stesso.
+- **Compatibilità con la prefix già esistente, verificata leggendo il codice reale**: `resolveRunnerWineEnv()` (downloadManager.ts) crea già oggi la vera prefix Wine in `<containerPrefixPath>/pfx` per qualunque runner Proton — esattamente il path che `umu-run` si aspetta come `WINEPREFIX` diretto. Nessuna migrazione necessaria: lo stesso prefix funziona identico attivando/disattivando lo switch.
+
+### `src/types.ts`
+
+Nuovo campo `umuRun?: boolean` in `CompatibilityProfile`, default `false` per qualunque gioco (mai auto-attivato, nemmeno per i launcher condivisi — scelta esplicita dell'utente come eac/battleye/fsr).
+
+### `src/backend/compatibilityManager.ts`
+
+`detectSystemTools()`: nuova chiave `umu: this.binaryExists('umu-run')`. `getDefaultProfile()`: `umuRun: false`.
+
+### `src/backend/runners/base.ts` + `src/backend/gameManager.ts`
+
+`RunnerConfig.umuRun?: boolean` aggiunto e propagato da `profile?.umuRun` nella costruzione di `runnerConfig` prima di `runner.launch()`.
+
+### `src/backend/runners/implementations.ts` — `ProtonRunner.launch()`
+
+Se `config.umuRun` è attivo e `umu-run` è installato: sostituisce `<protonBin> run <exe>` con `umu-run <exe>`, impostando `WINEPREFIX=<prefix>/pfx`, `PROTONPATH=<dirname(protonBin)>`, `GAMEID=x-launcher-<gameId>`. GameMode (se attivo) avvolge `umu-run` esattamente come avvolgeva `protonBin` prima. Se il toggle è attivo ma `umu-run` non è installato: log di avviso, fallback esplicito al `proton run` diretto attuale — mai un lancio bloccato. Il log diagnostico `[PROTON-ENV]` (introdotto in v1.5.18-dev.1 per il debug di Ubisoft Connect) ora include anche `GAMEID`.
+
+**Non ancora verificato su hardware reale**: se le variabili `STEAM_COMPAT_DATA_PATH`/`STEAM_COMPAT_CLIENT_INSTALL_PATH` (già calcolate per il percorso diretto) interferiscono con la gestione interna del container fatta da `umu-run` — lasciate invariate nell'ambiente per ora, marcato esplicitamente nel codice come da confermare con un test reale.
+
+**Fuori scope per questa voce**: il percorso Epic via `legendary --wrapper` (launchEpicViaLegendary) non è stato toccato — combinare `umu-run` con il meccanismo `--wrapper` di legendary non è stato verificato, resta sul `proton run` diretto attuale finché non si verifica esplicitamente anche quel caso.
+
+### `src/App.tsx`
+
+- **Tool di sistema** (tab Sistema): nuova tile `['umu', 'Umu-launcher']`, stesso trattamento informativo delle altre.
+- **Compatibility Layer**: 7° tile "Umu-launcher" (`gameOptions:umuLauncher`/`umuLauncherDesc`, it+en), switch booleano semplice come FSR/GameMode. Oscurato se il runner attivo non è Proton (stessa restrizione già applicata a EAC/BattlEye, `requiresProton` esteso a includere `umuRun`). **Fix navigazione**: con 7 voci su griglia a 2 colonne l'ultima riga ha un solo elemento (non più una coppia come con 6 voci) — la formula di ancoraggio `neighbors.down` per l'ultima riga è stata generalizzata (`arr.length % 2 === 0 ? 2 : 1` invece del fisso `-2`), così non richiede un altro aggiustamento manuale alla prossima voce aggiunta.
+
+### Traduzioni
+
+`gameOptions.json` it+en: nuove chiavi `umuLauncher`/`umuLauncherDesc`.
+
+### `setup-linux.sh`
+
+`umu-run` aggiunto come dipendenza raccomandata (mai auto-installata) nei tre blocchi distro: comando diretto per Arch, link alla pagina Releases con istruzioni `dpkg`/`dnf` per Debian/Fedora (nessun pacchetto ufficiale nei repo).
+
+### Verifica
+
+`tsc --noEmit`: 18 errori pre-esistenti invariati, zero nuovi. `node scripts/check-focus-ids.cjs`: 94 id, zero riferimenti rotti, stessi 8 pattern dinamici non risolvibili staticamente di sempre (nessuno nuovo — `compat-${key}` è un pattern già noto, il 7° elemento dell'array non introduce un nuovo caso).
+
+**Da fare alla prossima sessione**: test reale su Ubisoft Connect con lo switch attivato, per confermare che risolva davvero la finestra nera dal secondo avvio.
+
+---
+
+## v1.5.20-dev.2 — Fix bug reale: switch "Umu-launcher" non persistente
+
+Segnalato dall'utente: lo switch si azzerava riaprendo l'overlay Game Options. Causa trovata leggendo il codice reale (non ipotizzata): il campo `umuRun` era stato aggiunto in v1.5.20-dev.1 solo in `types.ts`/`compatibilityManager.ts`/`App.tsx` — **mai nello schema SQLite**. `upsertCompatProfile`/`getCompatProfile` (db.ts) hanno una lista di colonne fissa (non dinamica); un campo assente dalla query non genera errore, viene semplicemente ignorato in silenzio — nessun crash che segnalasse il problema, il valore restava solo nello stato React locale (`localCompatProfile`) finché l'overlay restava aperto.
+
+### `src/backend/db.ts`
+
+- **`CREATE TABLE compat_profiles`**: aggiunta colonna `umu_run INTEGER NOT NULL DEFAULT 0`.
+- **Migrazione**: nuovo blocco `if (!compatCols.includes('umu_run')) ALTER TABLE ...` — installazioni esistenti (CREATE TABLE IF NOT EXISTS non tocca tabelle già create) ottengono la colonna al prossimo avvio del daemon, stesso schema già usato per eac/battleye/disable_wine_sync in passato.
+- **`upsertCompatProfile`**: `umu_run` aggiunto a INSERT, VALUES, ON CONFLICT UPDATE SET, e ai parametri bind (`umuRun: profile.umuRun ? 1 : 0`).
+- **`getCompatProfile`**: aggiunta `umuRun: row.umu_run === 1` al mapping di ritorno.
+
+Non toccato: `exportCompatProfilesRaw`/`importCompatProfilesRaw` (Cloud Backup) — leggono/scrivono le colonne dinamicamente via `Object.keys`, già compatibili senza modifiche.
+
+### Verifica
+
+**Test isolato con better-sqlite3 in memoria** (schema reale, stesso statement SQL di db.ts): scrittura con `umuRun:true` → lettura → PATCH simulato di un campo diverso (fsr) → rilettura pulita (simula chiusura/riapertura overlay) — `umuRun` sopravvive invariato in ogni passaggio. Testata anche la migrazione su un DB con lo schema vecchio (senza `umu_run`): colonna aggiunta correttamente, righe esistenti preservate, default `0`.
+
+`tsc --noEmit`: 18 errori pre-esistenti invariati. `check-focus-ids.cjs`: zero riferimenti rotti (nessuna modifica alla navigazione in questa voce).
+
+---
+
+## v1.5.20-dev.3 — Fix bug reale: switch non visibile alla riapertura + audit tsc
+
+Secondo bug segnalato dall'utente dopo il fix v1.5.20-dev.2: il valore era ormai salvato correttamente nel DB (confermato dall'utente via `sqlite3 PRAGMA table_info`), ma l'overlay Game Options lo mostrava **sempre spento** alla riapertura, dando l'impressione che non si salvasse affatto.
+
+### Causa reale (trovata leggendo il codice, non ipotizzata)
+
+`src/App.tsx` — l'`useEffect` che carica il profilo compat quando si apre l'overlay (`showGameOptions`/`selectedGame`) ricostruisce `localCompatProfile` da zero con una lista di campi **hardcoded** (`fsr`, `gameMode`, `mangohud`, `eac`, `battleye`) invece di fare merge col profilo ricevuto dal server — `umuRun` non era in quella lista, quindi veniva scartato ad ogni apertura indipendentemente da cosa contenesse il DB. Il salvataggio lato server (fix v1.5.20-dev.2) era corretto fin da subito; il problema era solo nella lettura per la visualizzazione.
+
+### Fix
+
+- **`src/App.tsx`**: aggiunta `umuRun: !!profile.umuRun` all'oggetto costruito in quell'effect.
+- **Bug di navigazione minore trovato nello stesso punto**: `overlayNavAnchors.lastMiddleId` (usato dal campo Executable Path per il tasto "su") puntava ancora a `compat-battleye`, valido finché quello era l'ultimo tile della griglia Compatibility Layer — con l'aggiunta di `umuRun` come 7° tile in v1.5.20-dev.1, battleye è diventato il penultimo. Non rilevato da `check-focus-ids.cjs` perché `compat-battleye` è comunque un id esistente (nessun riferimento rotto, solo geometricamente impreciso). Corretto a `compat-umuRun`.
+
+### Bonus — audit tsc: baseline abbassato da 18 a 8
+
+Aggiungere `profile.umuRun` faceva salire tsc da 18 a 19 errori: stessa causa già presente per gli altri 9 campi dello stesso oggetto (`fsr`, `gameMode`, `mangohud`, `eac`, `battleye`, `customEnv`, `winetricksVerbs` ×2, `disableWineSync`, `useKnownFixes`) — il ramo `: {}` del ternario `r.ok ? r.json() : {}` non è una `Promise`, mentre `r.json()` lo è: TypeScript inferiva il tipo del `.then()` successivo come `{}` invece di `any`, segnalando come inesistente ogni singolo accesso a `profile.X`. Corretto con `Promise.resolve({})` al posto di `{}` — stesso comportamento a runtime, ma allinea i due rami allo stesso tipo. Risolve tutti e 10 gli accessi in un colpo solo (i 9 pre-esistenti + il nuovo `umuRun`).
+
+**NUOVA BASELINE tsc --noEmit: 8 errori pre-esistenti** (scesa da 18 — audit esplicito, non una regressione mascherata: verificato riga per riga che i 10 errori spariti sono tutti "Property does not exist on type '{}'" sullo stesso oggetto `profile`, gli 8 rimasti sono gli altri già noti e distinti — RefObject useScrollOnceOverflow, notif.primaryAction, pendingRunnerAction ×2, mapButtons ×2, compatibilityManager execSync overload, modulo howlongtobeat mancante).
+
+### Verifica
+
+`tsc --noEmit`: 8 (nuova baseline, confermata riga per riga contro la baseline precedente di 18 — zero errori di categoria diversa introdotti). `check-focus-ids.cjs`: 94 id, zero riferimenti rotti.
+
+---
+
+## v1.5.20-dev.4 — Umu-launcher esteso a Epic Games (legendary)
+
+Domanda dell'utente dopo il test riuscito su Ubisoft Connect: possibile anche per Epic, esplicitamente lasciato fuori scope in v1.5.20-dev.1 perché la combinazione legendary+umu-run non era verificata. **Verificato prima di scrivere codice** (non un'estensione ipotizzata): Heroic Games Launcher offre un'opzione "Use UMU as Proton runtime" per i titoli Epic esattamente tramite lo stesso meccanismo `--wrapper` di legendary già usato in questo progetto — confermato con issue reali su GitHub Heroic (log che mostrano `GAMEID` e comandi Wine passare per umu quando l'opzione è attiva). Stessa combinazione, non una nuova invenzione.
+
+### `src/backend/runners/implementations.ts` — `launchEpicViaLegendary()`
+
+Nel ramo Proton (`isProton`): se `config.umuRun` è attivo e `umu-run` è installato, il wrapper passato a legendary diventa `umu-run` invece di `'<protonBin>' run`, con `WINEPREFIX=<prefix>/pfx`/`PROTONPATH`/`GAMEID` al posto di `STEAM_COMPAT_DATA_PATH`/`STEAM_COMPAT_CLIENT_INSTALL_PATH` — stesso identico schema già usato in `ProtonRunner.launch()`. legendary si limita a prependere il wrapper davanti a `<exe> [argomenti EOS]`, nessun'altra differenza nel resto del flusso legendary/autenticazione EOS. Fallback esplicito con log di avviso se `umu-run` non è installato, mai lancio bloccato. EAC/BattlEye (`applyProtonAnticheatEnv`) invariati: sono variabili lette dallo script Proton stesso, che `umu-run` invoca comunque al suo interno.
+
+Il tile "Umu-launcher" in Compatibility Layer non aveva bisogno di alcuna modifica: la sua disponibilità dipendeva già solo dal runner (Proton sì, Wine-Lutris no), mai dallo store — questa voce chiude semplicemente il gap fra cosa la UI prometteva e cosa succedeva davvero al lancio per i titoli Epic.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 94 id, zero riferimenti rotti (nessuna modifica al JSX in questa voce).
+
+**Non ancora testato su hardware reale** — stesso principio di prudenza delle voci precedenti: verificare con un titolo Epic reale prima di considerarlo definitivo.
+
+---
+
+## v1.5.20-dev.5 — 4 bugfix: hold-to-clear, cursore tastiera virtuale, card Ubisoft Connect, icone store deformate
+
+### 1) Tenere premuto Canc/Del per 4 secondi svuota il campo
+
+`src/components/VirtualKeyboard.tsx`: `onEnter` di `Focusable` scatta solo al fronte "appena premuto" — non basta a misurare una pressione prolungata. Aggiunto un intervallo a 50ms che legge `InputManager.readPrimary().buttons.has('A')` mentre `key-back` ha il focus (stesso identico principio già usato in App.tsx per "tieni premuto B" nel test controller), unificato con un tracking separato per mouse/touch (`onMouseDown`/`onTouchStart` più `onMouseUp`/`onMouseLeave`/`onTouchEnd`/`onTouchCancel`, dato che `InputManager` non vede affatto puntatore). Riempimento progressivo visivo sul tasto stesso durante l'attesa.
+
+### 2) Cursore visibile e spostabile nel campo di testo
+
+Il più esteso dei quattro: prima non esisteva alcun concetto di posizione — ogni tasto scriveva sempre in fondo alla stringa, Backspace cancellava sempre l'ultimo carattere.
+
+- **`VirtualKeyboard.tsx`**: nuovo stato `cursorPos` (parte dalla fine del valore iniziale, comportamento invariato per chi non lo sposta mai). `insertAtCursor()`/`handleBackspace()` ora operano al punto del cursore, non più sempre a fine stringa. Due nuovi tasti dedicati `key-cursor-left`/`key-cursor-right` (◄►) nella riga della barra spaziatrice (non D-pad sinistra/destra, già impegnato a navigare fra i tasti) — ogni conferma sposta di una posizione, stesso schema "un'azione per pressione" di qualunque altro tasto. `handleSuggestion`/`handlePaste` aggiornati per inserire al cursore invece che sempre in coda (eccetto `insertMode: 'append-space'`, che resta un'aggiunta di coda concettuale per i Launch Arguments). Nuova prop `onCursorChange?: (pos: number) => void` — notifica il chiamante SOLO per disegnare il cursore, stesso principio già usato per `onSuggestionFocus`.
+- **`App.tsx`**: nuovo stato `vkCursorPos`, passato a `VirtualKeyboard` via `onCursorChange`. Il riquadro fluttuante che mostra il testo ora disegna un cursore lampeggiante (`animate-pulse`) al punto giusto, splittando il valore in due span attorno alla posizione (clampata sempre entro i limiti della stringa corrente, per sicurezza contro report leggermente in ritardo rispetto a un cambio di campo).
+- **Verificato con un test isolato** (node, logica pura estratta e replicata): sequenza spostamento-sinistra → inserimento → backspace → backspace a inizio stringa (no-op atteso) → spostamento oltre i limiti (clamp atteso) — tutti i casi confermati corretti prima della consegna.
+
+### 3) Card Ubisoft Connect sempre "Disconnesso" in Manage Accounts
+
+`src/backend/plugins/ubisoftConnectPlugin.ts`: causa trovata leggendo il codice — il plugin non sovrascriveva mai `isAuthenticated()`, ereditando il default della classe base (`isPublic || authenticated`, entrambi sempre `false` qui, dato che Ubisoft è in NO_LOGIN_STORES e nessun login viene mai chiamato). Fix: sovrascritto `isAuthenticated()` per restituire `isLauncherBootstrapped('ubisoft-connect')` (sharedLauncherManager.ts, già esistente) — stesso principio già usato da `SteamPlugin.isAuthenticated()` (= trovato su disco, non un vero login), ma più preciso di un controllo grezzo sull'esistenza della cartella: verifica che il bootstrap sia stato davvero completato (installer eseguito + primo lancio riuscito), non solo che la cartella esista (creata comunque in anticipo da `getSharedPrefixBasePath`).
+
+### 4) Icone store deformate quando l'account è sincronizzato
+
+`src/App.tsx`, card account in Manage Accounts: causa trovata — il contenitore dell'icona (`w-12 h-12`, `<Gamepad2>` dentro) non aveva `shrink-0`. La label accanto ("Sessione attiva (N sincronizzati, M installati)") è molto più lunga di "Disconnesso": senza `shrink-0`, il flex item con `flex-shrink` di default (1) si restringeva in LARGHEZZA quando lo spazio del contenitore flex si riduceva, mentre l'altezza (governata da `h-12`, non da `flex-shrink` sull'asse riga) restava fissa — un rettangolo schiacciato invece del quadrato voluto. Aggiunto `shrink-0` al contenitore e all'icona stessa.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata, diff riga-per-riga confermato — stessi errori, solo spostati di poche righe per le aggiunte sopra). `check-focus-ids.cjs`: 94 id, zero riferimenti rotti (le modifiche a VirtualKeyboard.tsx non sono coperte da questo script, che analizza solo App.tsx per costruzione — verificate a mano la consistenza di `rowSpace` e dei nuovi id).
+
+---
+
+### Nota — script diagnostico esterno generalizzato (non versionato, non parte del progetto)
+
+`launch-ubisoft-connect-debug.sh` riscritto e rinominato `launch-debug.sh`: non più specifico per Ubisoft Connect, ora strumento generico per qualunque gioco/launcher Proton in difficoltà. Aggiunta la modalità `--mode umu` (via `umu-run`, il fix di questa stessa voce) accanto a `--mode direct` (comportamento precedente, bypassa il container SLR) per un confronto A/B diretto sullo stesso prefix/eseguibile. Tutti i percorsi prima hardcoded (runner, prefix, eseguibile, DLL override) sono ora parametri da riga di comando (`--runner`, `--prefix`, `--gameid`, `--dll-override`, `--env`, `--gamemode`, `--game-logs`, ecc. — vedi `--help`). Log di Proton/umu-run e l'intera sessione (stdout/stderr del processo incluso) finiscono in un'unica cartella con timestamp, elencata per intero a fine esecuzione invece di assumere un nome file preciso (la naming convention interna di `steam-<appid>.log` non è stata verificata in ogni dettaglio). Testato con binari finti (`proton`/`umu-run`/`gamemoderun` mock) per entrambe le modalità, percorsi con spazi, variabili extra ed elenco log del gioco — nessun test su hardware reale ancora.
+
 ## Step 2 — Steam Plugin reale + regole di sviluppo
 
 ### Novità
@@ -4160,3 +4307,225 @@ Con questo sono cinque gli hook estratti in totale: `useCloudBackupProviders`, `
 ### Verifica
 
 `tsc --noEmit`: **18 errori pre-esistenti, invariati, zero nuovi**. `check-focus-ids.cjs`: nessuna differenza nella struttura di navigazione.
+
+## v1.5.14-Venus — MILESTONE STABILE
+
+Congelata su richiesta esplicita dell'utente, quarta della serie Venus. Precede questa milestone `v1.5.7-Venus`.
+
+### Nuovo strumento: analisi statica della navigazione (v1.5.8-dev.1, v1.5.9-dev.1)
+
+`scripts/check-focus-ids.cjs` — analizza `App.tsx` ed estrae ogni `id` dichiarato su un `<Focusable>` e ogni riferimento in `neighbors={{...}}`/`sequentialChain`, segnalando riferimenti a id mai dichiarati (bug quasi certo) e catene dichiarate da un solo elemento (non possono incatenare nulla), riconoscendo il caso — verificato con un esempio reale durante lo sviluppo dello strumento stesso — in cui una dichiarazione dentro un `.map()` ha una cardinalità a runtime che il solo testo sorgente non può rivelare.
+
+### Rimodulazione di App.tsx: cinque hook estratti (v1.5.10-dev.1 → v1.5.14-dev.1)
+
+Primo passo concreto di modularizzazione, concordato con l'utente: **nessuno split del JSX** (il sistema di navigazione collega gli elementi tramite id testuali sparsi nel file, mai verificati dal compilatore — spezzare il JSX rischierebbe di romperli silenziosamente) — solo estrazione di **stato e logica pura**, senza alcun `id`/`neighbors`/`sequentialChain` coinvolto, in hook dedicati sotto `src/hooks/`:
+
+- **`useCloudBackupProviders.ts`** — stato Cloud Backup, OAuth, polling
+- **`useNotifications.ts`** — pannello Notifiche (il canale SSE resta deliberatamente in `App.tsx`: gestisce anche altri eventi non di notifica)
+- **`useAiAdvisorProviders.ts`** — Ollama + i quattro provider cloud AI
+- **`useInputDevices.ts`** — dispositivi controller connessi
+- **`useStorePluginRegistry.ts`** — registro plugin store (GOG/Epic/Amazon/ecc.)
+
+Un sesto candidato, `useDownloadTasks()`, è stato **scartato dopo investigazione**: `downloads` risultato intrecciato con `logs` in un unico polling condiviso — estrarlo avrebbe richiesto toccare quel meccanismo condiviso per un beneficio minimo (una riga di stato spostata).
+
+**`App.tsx` è sceso da 8.946 a 8.592 righe** in cinque passaggi. Ogni singola estrazione è stata verificata con una procedura doppia, sempre nello stesso ordine: `tsc --noEmit` (zero errori nuovi — un solo errore benigno già noto si è spostato di file insieme al codice che lo genera, non è un errore nuovo) e `scripts/check-focus-ids.cjs` (stesso numero di id/riferimenti/catene, zero differenze nella struttura di navigazione).
+
+### Architettura per gli sviluppi futuri, documentata in `X-Launcher-Roadmap.md`
+
+Su richiesta esplicita dell'utente, i criteri usati per queste cinque estrazioni sono ora documentati come convenzione permanente (sezione "Architettura App.tsx: quando estrarre in `hooks/`"): quando una nuova funzione è un buon candidato per un hook dedicato (zero id di navigazione, nessun polling condiviso con un concetto scorrelato, setter grezzi esposti se il JSX li chiama direttamente), e la stessa procedura di verifica doppia da seguire ad ogni estrazione. Pensata per essere applicata direttamente ai prossimi sviluppi, non solo a questo giro, per non fare ricrescere `App.tsx` in modo incontrollato.
+
+Nessun altro cambiamento di codice in questa voce oltre a quanto già elencato nelle build di sviluppo precedenti — solo il congelamento: `metadata.json` aggiornato, pacchetto ricreato per intero come `X-Launcher_v1_5_14-Venus.zip`, stesse esclusioni già usate per le milestone precedenti.
+
+### Verifica
+
+`tsc --noEmit`: **18 errori pre-esistenti, invariati, zero nuovi**. `check-focus-ids.cjs`: nessuna differenza nella struttura di navigazione. `metadata.json` validato. Zip verificato: `node_modules` assente, tutti i file chiave presenti (inclusi i cinque nuovi hook e lo script di verifica), versione corretta sia in `package.json` sia nel fallback letterale di `App.tsx`.
+
+## v1.5.15-dev.1 — Step 19d, Fase 1 (parte 1): fondamenta backend per i launcher terzi condivisi
+
+Primo passo concreto di Step 19d, dopo una sessione di studio architetturale approfondita con l'utente (modello a prefix condiviso invece di uno isolato per-gioco, verificato via ricerca reale sulla wiki di Heroic — Ubisoft Connect deve vivere nello stesso prefix dei giochi che lo richiedono, vincolo Wine/Proton reale non aggirabile con un symlink, idea scartata dall'utente dopo discussione). Runner sempre Proton/GE-Proton per tutti i launcher condivisi (mai Wine), scelta esplicita dell'utente per il supporto anticheat più versatile.
+
+### Schema DB
+
+- Nuova tabella `shared_launcher_prefixes` (`launcher_id` PK, `prefix_path`, `launcher_exe`, `bootstrapped_at`, `runner`) — un solo prefix per launcher, riusato da tutti i giochi che lo richiedono. Nessuna colonna `runner_family`: sarebbe sempre `'proton'`, solo rumore.
+- Nuova colonna `games.requires_launcher` (nullable, impostata manualmente dall'utente nell'overlay — mai auto-rilevata, nessun modo affidabile di sapere in anticipo se un titolo la richiede prima di provarlo).
+
+### Nuovi file
+
+- **`src/backend/plugins/thirdPartyLaunchers.ts`** — registro dichiarativo `ThirdPartyLauncherDefinition[]`, nessuna logica per-launcher hardcoded. Solo Ubisoft Connect compilato sul serio (`verified: false` finché non testato con un bootstrap reale) — gli altri tre (EA App, Battle.net, Rockstar Games Launcher) restano placeholder, un launcher alla volta con verifica reale prima di scrivere codice, stesso principio già seguito per Amazon/nile (Step 19c). `installerUrl` per Ubisoft Connect verificato puntare alla pagina ufficiale (`ubisoft.com/en-us/ubisoft-connect/download`), **mai un `.exe` diretto**: la pagina reale triggera il download solo via JavaScript verso uno short-link non stabile.
+- **`src/backend/sharedLauncherManager.ts`** — orchestrazione del prefix condiviso. Bug potenziale trovato e corretto prima che finisse in produzione, leggendo `ProtonRunner.launch()` reale: il path da passare come `config.prefix` dev'essere quello **base** (`STEAM_COMPAT_DATA_PATH`), mai già risolto con `/pfx` — passare quello sbagliato avrebbe causato un doppio annidamento silenzioso `.../pfx/pfx/`. Due funzioni distinte: `getSharedPrefixBasePath()` (per il lancio) e `resolveSharedPrefixExecutionPath()` (solo per risolvere percorsi assoluti da leggere, es. l'eseguibile del launcher). `openInstallerPage()` riusa lo stesso meccanismo Firefox/xdg-open già in `cloudBackup/googleDrive.ts`. `launchSharedLauncher()` riusa `ProtonRunner.launch()` reale con un oggetto `Game` minimale invece di duplicarne la logica di spawn/env.
+- 5 nuovi endpoint in `server.ts`: `GET /api/shared-launchers`, `GET /api/shared-launchers/:id/runners` (filtrati a sole build Proton/GE-Proton via regex su `compatibilityManager.getAvailableRunners()` esistente — nessun secondo scanner), `POST .../open-installer-page`, `POST .../bootstrap`, `POST .../launch`.
+
+### Decisioni prese durante lo studio (valide per gli altri 3 launcher quando affrontati)
+
+- Selezione build Proton: l'utente sceglie liberamente fra quelle installate; default automatico solo se non ambiguo (Proton Steam se presente, altrimenti l'unica GE-Proton se ce n'è una sola, altrimenti scelta esplicita richiesta).
+- Toggle EAC/BattlEye restano **per-gioco** anche con più titoli Ubisoft nello stesso prefix condiviso — le env var Proton sono lette per-invocazione al lancio, non stato persistito nel prefix, quindi nessun conflitto atteso fra giochi diversi nello stesso prefix (da confermare comunque su hardware reale in Fase 2).
+- Lancio diretto stile `steam://rungameid` esiste (`uplay://launch/{id}/0`) ma **non è garantito** — un report reale mostra il lancio restare bloccato su "initializing" pur sembrando eseguire. Serve sempre un fallback esplicito (aprire il launcher stesso).
+- Reference counting obbligatorio all'uninstall: un gioco condiviso non deve mai far rimuovere il prefix se altri giochi installati lo usano ancora.
+
+### Verifica
+
+`tsc --noEmit` eseguito realmente nel sandbox (npm install + build, non solo letto a vista): **zero errori nei file toccati/creati**. 26 errori totali riportati, tutti pre-esistenti altrove (App.tsx, compatibilityManager.ts, metadataManager.ts, useInputDevices.ts) — nota per sessioni future: il sandbox di verifica ha TypeScript 5.8.3 mentre `tsconfig.json` richiede 6.0 (`ignoreDeprecations`), quindi il numero 26 non è direttamente comparabile alla baseline reale di 18 su questo ambiente diverso, ma l'assenza di errori nuovi nei file toccati è confermata con certezza.
+
+## v1.5.16-dev.1 — Step 19d, Fase 1 (parte 2): card Ubisoft Connect nella libreria
+
+Seconda parte della Fase 1, sullo stesso principio già consolidato per la card "Steam Big Picture" — letta a fondo `FocusProvider.tsx` prima di scrivere, su richiesta esplicita dell'utente di riusare le stesse convenzioni di navigazione già stabilite invece di inventarne di nuove. Confermato leggendo il render reale della griglia: **nessuna card, nemmeno Steam Big Picture, ha `neighbors`/`fallbackPriority` espliciti** — tutto scoring geometrico puro su `grid-cols-4` — quindi la nuova card eredita lo stesso comportamento senza bisogno di alcun link esplicito, zero rischio di navigazione aggiunto.
+
+### Aggiunto
+
+- `UBISOFT_CONNECT_CARD_ID`, `makeUbisoftConnectCard()`/`appendThirdPartyLauncherCards()` in `App.tsx` — mirror esatto di `makeSteamBigPictureCard()`/`appendSteamBigPictureCard()`, con una differenza sostanziale: `isInstalled` riflette uno stato **reale** dal backend (`bootstrapped_at`, via `/api/shared-launchers`), non un valore sempre vero come per Steam Big Picture — la card fa quindi doppio servizio, installer guidato se non ancora bootstrappata, launcher vero e proprio se sì, esattamente come una qualunque altra card gioco (Installed/Not Installed reale), non un'eccezione a parte.
+- **`src/hooks/useThirdPartyLaunchers.ts`** (nuovo file) — stesso stile esatto di `useStorePluginRegistry.ts`: stato dei launcher condivisi, `fetchAvailableRunners`, `openInstallerPage`, `bootstrapLauncher`, `launchThirdPartyLauncher`.
+- `Game.thirdPartyLauncherCard` in `types.ts` — stesso principio di `isBigPictureLauncher`, generalizzato a un campo stringa (l'id del launcher) invece di un booleano dedicato per ciascuno dei 4 launcher futuri.
+- `handlePlay`: lancia il launcher se già bootstrappato, apre solo la pagina ufficiale di download se no — **solo il primo passo**: l'overlay guidato di conferma bootstrap (selettore Proton/GE-Proton, conferma path eseguibile, chiamata a `bootstrapLauncher`) resta da progettare a parte, con lo stesso rigore su `activeGroup`/`focusFirstInGroup` già applicato a Manage Accounts/Game Options in passato — non abbozzato di fretta in questo giro.
+- `openGameOptions`: stesso guard già in uso per Steam Big Picture — X/click destro esegue la stessa azione di Invio (nessun overlay di configurazione ancora costruito per questa card).
+- Guard nella riconciliazione della selezione dopo un refresh libreria (`prev === UBISOFT_CONNECT_CARD_ID`), stesso principio già in uso per la card Big Picture — la card è virtuale, mai presente in `newGames`.
+
+### Verifica
+
+Doppia, stesso ordine di sempre: `node scripts/check-focus-ids.cjs` (89 id, 33 riferimenti `neighbors`, 6 catene `sequentialChain` — **zero riferimenti a id inesistenti**, gli 8 pattern dinamici non risolvibili staticamente sono gli stessi già noti da sessioni precedenti, nessuno nuovo) e `tsc --noEmit` (diff riga per riga col run precedente: solo uno spostamento di ~96 righe sugli stessi 26 errori pre-esistenti — stesso pattern "errore benigno spostato di posizione, non nuovo" già documentato in v1.5.13-dev.1).
+
+---
+
+**NOTA DI CORREZIONE (post v1.5.16-dev.1)**: l'architettura descritta nelle due voci sopra — una card virtuale mai persistita, mirror di Steam Big Picture — è stata **scartata** dopo discussione con l'utente. Ubisoft Connect non doveva essere una card sintetica ma un **gioco vero**, con una riga reale in `games`, trattato dalla pipeline standard di installazione/lancio/verifica senza eccezioni. Le voci sotto (v1.5.17-dev.1 in poi) descrivono l'architettura definitiva che ha sostituito questa. `UBISOFT_CONNECT_CARD_ID`, `makeUbisoftConnectCard`, `appendThirdPartyLauncherCards`, `handlePlay`/`openGameOptions` dedicati e il file `src/hooks/useThirdPartyLaunchers.ts` sono stati rimossi per intero da `App.tsx` nella correzione — non esistono più nel codice. Il lavoro backend di queste due voci (`db.ts`, `thirdPartyLaunchers.ts`, `sharedLauncherManager.ts`, i 5 endpoint `/api/shared-launchers`) **resta valido**, riusato dalla nuova architettura.
+
+## v1.5.17-dev.1 — Step 19d: correzione architetturale — Ubisoft Connect come gioco vero
+
+Ubisoft Connect (e ogni futuro launcher condiviso) è ora trattato **esattamente come un gioco**: una riga vera in `games`, seedata all'avvio del daemon, con una libreria/tab dedicata. A installa/lancia, X apre Game Options (Runner Bridge vincolato a sole build Proton/GE-Proton — mai Wine, scelta esplicita dell'utente per il supporto anticheat — + winetricks verb), stessa identica pipeline di installazione/verifica già in uso per GOG/Epic/Amazon, nessuna eccezione. Entra in Collection solo dopo l'installazione, come un titolo reale.
+
+### Perché non più una card virtuale
+
+Una card sintetica non ha overlay di configurazione, non si installa, non ha verb — Ubisoft Connect invece sì. Trattarlo come un gioco vero permette a **tutta** la pipeline esistente di funzionare senza modifiche: l'unica parte davvero speciale è che il "download" non chiama legendary/lgogdownloader/nile, cerca l'installer in `~/Downloads` e attende conferma manuale se non lo trova.
+
+### Nuovi file
+
+- **`src/backend/plugins/ubisoftConnectPlugin.ts`** — `UbisoftConnectPlugin extends StorePlugin`, stub sottile coerente con GOG/Epic/Amazon (`installGame()`/`uninstallGame()` non fanno nulla di reale — la vera pipeline vive in `downloadManager.ts`, **verificato leggendo il codice reale dei tre plugin esistenti** prima di scrivere questo). `ensureSeeded()` crea la riga `games` (id stabile `ubisoft-connect-launcher`) se assente, riusando lo stesso principio "insert once, protect on conflict" già in `db.ts`. Runner di default risolto dinamicamente da `compatibilityManager.getAvailableRunners()` invece di un segnaposto fisso (bug trovato più tardi in questa stessa saga — vedi v1.5.18-dev.1).
+- **`src/backend/filePicker.ts`** — `browseForFile()`, un solo punto di innesto per "Sfoglia": prova `zenity` poi `kdialog` poi fallback a campo testo. Sintassi di entrambi verificata via ricerca reale prima di scrivere (`zenity --file-selection`, stdout=path, exit 0/1/5; `kdialog --getopenfilename`, argomenti posizionali). Pensato esplicitamente per essere sostituito in futuro da un file browser interno controller-navigabile (idea annotata in roadmap, non costruita ora) senza toccare i chiamanti.
+
+### Scoperta: `battlenetPlugin.ts` esisteva già
+
+Placeholder vuoto ("TODO Step 8" nel commento), `getLibrary()` ritorna `[]`, mai un'implementazione reale — spiega perché "Battle.net" appariva già come 6° store nel bug di navigazione di Cloud Backup (v1.1.124). Usato come modello di riferimento per lo shape minimo di `UbisoftConnectPlugin`.
+
+### `downloadManager.ts`
+
+- `findMainExe` esportata (riusata da `gameManager.ts`, non duplicata).
+- Nuova `findInstallerInDownloads()` — euristica su nome file (`*ubisoft*`/`*uplay*` in `~/Downloads`), **non verificata su un download reale**, segnata esplicitamente come da confermare.
+- `runUbisoftConnect(task)` — stesso schema di `runGOG`/`runEpic`: Step 1 (creazione prefix condivisa via `resolveRunnerWineEnv`+`prepareWinePrefix`), Step 2 (applicazione winetricks verb), Step 3 (ricerca installer). Se non trovato: fase `awaiting_installer`, altrimenti l'installer diventa l'`executablePath` temporaneo del "gioco" — il primo lancio lo esegue, e un hook post-chiusura (vedi `gameManager.ts` sotto) ri-risolve l'eseguibile vero.
+- `continueInstaller(gameId)`/`browseInstaller(gameId)` — richiamati dagli endpoint sotto.
+- `prefixPath` per `store === 'Ubisoft'` ora punta a `getSharedPrefixBasePath('ubisoft-connect')` invece che a un prefix isolato per-gioco (unico punto di override in `addTask`).
+
+### `gameManager.ts`
+
+- `UbisoftConnectPlugin` registrato nell'array plugin.
+- Nuovo hook in `startGameExitPolling`: se il gioco chiuso è Ubisoft Connect stesso e non ancora bootstrappato, cerca il vero eseguibile dentro il prefix condiviso e chiama `markLauncherBootstrapped()`.
+
+### `server.ts`
+
+- 2 nuovi endpoint: `POST /api/downloads/installer-continue`, `POST /api/downloads/installer-browse` — stesso stile degli altri endpoint `/api/downloads` esistenti (`gameId` nel body, non come path param).
+
+### `App.tsx` — switch "Launcher condiviso"
+
+Per i giochi **normali** che dipendono da un launcher condiviso: switch ciclabile multi-stato in Game Options, stesso pattern del selettore MangoHud (0/1/2), qui N+1 stati (Nessuno + un launcher per ciascuno costruito, identificati per id-stringa non indice — aggiungere un launcher futuro non richiede rinumerare nulla). Vincola anche il Runner Bridge a sole build Proton per quel titolo. Fuso come 6° tile **dentro** la stessa griglia del Compatibility Layer (accanto a BattlEye, sotto EasyAntiCheat) invece di restare un blocco separato sotto — stessa dimensione degli altri 5, chevron al posto del pill on/off dato che gli stati sono più di due.
+
+Card in Manage Accounts + toggle in Plugins: **zero codice di rendering nuovo necessario** — entrambe le sezioni erano già generiche (iterano su `stores`/`pluginRegistry`), serviva solo aggiungere `'Ubisoft'` alle liste `NO_LOGIN_STORES` già usate per Battle.net/Classic Console (5 punti nel codice) per evitare che mostrasse pulsanti Connetti/Disconnetti privi di senso.
+
+### Traduzioni
+
+`gameOptions.json` (`sharedLauncher`/`sharedLauncherDesc`/`sharedLauncherNone`), `dashboard.json` (`storePluginNames.Ubisoft`), `settings.json` (`storePluginDescriptions.Ubisoft` — scoperta: le description dei plugin **sono** traducibili via `translateStorePluginDescription()`, non solo hardcoded come inizialmente assunto).
+
+### `setup-linux.sh`
+
+`zenity`/`kdialog` aggiunte come dipendenze **raccomandate** (mai installate automaticamente) nei tre blocchi distro.
+
+### Verifica
+
+`node scripts/check-focus-ids.cjs` e `tsc --noEmit` eseguiti dopo ogni singola modifica di questa voce, confrontati per differenza contro la baseline nota di 18 errori pre-esistenti — zero riferimenti di navigazione rotti, zero errori nuovi in ogni passaggio.
+
+## v1.5.18-dev.1 — Step 19d: debug su hardware reale — 8 bug trovati e corretti, 1 problema aperto
+
+Sessione di debug estesa con l'utente su hardware reale, dopo aver reso disponibile v1.5.17-dev.1. Elenco in ordine cronologico, tutti verificati con `tsc --noEmit`/`check-focus-ids.cjs` (zero regressioni ad ogni fix).
+
+### Bug corretti
+
+1. **Verb winetricks invisibili nell'overlay per Ubisoft Connect** — condizione `selectedGame.store === 'GOG Galaxy' || 'Epic Games' || 'Amazon Games'` non includeva `'Ubisoft'` in `App.tsx`. Corretto — e sparito una volta senza causa chiara durante la sessione, riapplicato una seconda volta con un ancoraggio testuale più solido.
+2. **I verb non venivano mai applicati davvero** — `runUbisoftConnect` (prima versione) saltava del tutto creazione prefix e applicazione winetricks, andando dritto alla ricerca dell'installer. Riscritta con lo schema Step1/Step2/Step3 descritto in v1.5.17-dev.1.
+3. **Fallback silenzioso al wine di sistema** — quando il runner di default (segnaposto, prima di essere risolto dinamicamente) non corrispondeva a nessuna build Proton reale installata, `resolveRunnerWineEnv` ripiegava silenziosamente su wine di sistema, violando "sempre Proton mai Wine" per i launcher condivisi. Aggiunto un blocco esplicito: se il fallback avviene, l'installazione si ferma con un errore chiaro invece di procedere.
+4. **`findMainExe()` sull'intero `drive_c` prendeva un'utility di sistema Wine** invece del vero eseguibile installato (un `drive_c` completo contiene anche `windows/`, a differenza della cartella isolata di un singolo gioco per cui quella funzione era stata scritta). Creata `findInstalledLauncherExe()`, che prova prima l'hint dichiarato nel registro e poi restringe la ricerca a `Program Files*` soltanto.
+5. **Notifica "Completato!" fuorviante** quando l'installer viene solo *trovato*, non ancora eseguito — soppressa specificamente per questo caso in `server.ts`. `isInstalled=true` resta comunque necessario e non va toccato: un tentativo di lasciarlo `false` in questo stato avrebbe rotto il meccanismo (verificato) per cui cliccare la card "già installata" è ciò che esegue davvero il setup.
+6. **Pulsanti Continua/Sfoglia/Annulla fuori dal widget** nel pannello Download (3 pulsanti invece dei soliti 2, contenitore senza `flex-wrap`). Corretto.
+7. **`/api/open-url` non esisteva** — il link nella UI lo chiamava, sarebbe fallito silenziosamente al primo click. Creato (stesso meccanismo firefox/xdg-open già in uso altrove).
+8. **Wiring mancante fra lo switch "Launcher condiviso" e l'installazione reale** — trovato dall'utente installando un gioco Ubisoft comprato su Epic: `addTask()` guardava solo `store === 'Ubisoft'` per decidere il prefix, mai `game.requiresLauncher` sui giochi normali che lo dichiarano — legendary creava sempre una prefix isolata di default, ignorando la scatola condivisa. Corretto: qualunque gioco con `requiresLauncher` impostato ora usa la scatola condivisa di quel launcher, indipendentemente dallo store.
+
+### Consolidamento richiesto dall'utente
+
+Il flusso "installer non trovato" (link + Continua/Sfoglia/Annulla) inizialmente viveva in una notifica separata nella colonna Notifiche — l'utente ha chiarito che le notifiche di installazione vivono sempre nel pannello Download, non ha senso spezzare il processo su due colonne diverse. Rimosso interamente il percorso via `notificationEngine` per questo flusso specifico (tipo evento dedicato, wiring in `server.ts`, dispatcher lato frontend — diventato un no-op vuoto una volta tolti i suoi soli due scopi). Tutto consolidato nella riga del task nel pannello Download: link cliccabile, pulsante "Continua" al posto di "Pausa" per questa fase, nuovo pulsante "Sfoglia" dedicato.
+
+### Problema aperto — Ubisoft Connect inaffidabile su Proton
+
+Diagnosi approfondita con log reali forniti dall'utente:
+
+- Il processo tracciato (`UbisoftConnect.exe`) lancia un processo figlio reale (`upc.exe` + `UplayService.exe` + diversi `UplayWebCore.exe`, conferma di un'interfaccia CEF/Chromium) e **poi esce da solo entro ~4 secondi per design** — non un crash. La soglia `QUICK_EXIT_THRESHOLD_MS=8000` in `gameManager.ts` trattava questo come fallimento sempre, saltando l'intero ramo di codice "successo" (compreso l'hook di correzione automatica dell'eseguibile). **Corretto**: prima di dichiarare fallimento, ora si verifica con `ps`/`pgrep` se esistono processi reali ancora vivi che matchano la cartella di installazione del gioco — se sì, il lancio è trattato come riuscito.
+- Con questo fix, il **primo avvio funziona davvero**: l'utente ha completato login e navigazione dell'interfaccia.
+- **Dal secondo avvio in poi (una volta che la cartella cache esiste), ritorna sempre una finestra bianca o nera**, riproducibile in modo consistente, indipendentemente dalle variabili d'ambiente provate (`WINEDLLOVERRIDES` su tutta la catena D3D/DXGI, `--no-sandbox --disable-gpu`, `PROTON_USE_WINED3D`, ecc.). Nessuna soluzione trovata finora. Da decidere con l'utente come procedere: continuare l'indagine, riconsiderare Wine invece di Proton per questa scatola condivisa (rinunciando al supporto EAC/BattlEye per i giochi che vi si appoggeranno), o mettere in pausa Ubisoft Connect specificamente mantenendo valida l'architettura generale.
+
+### Verifica
+
+`tsc --noEmit` e `node scripts/check-focus-ids.cjs` eseguiti dopo ogni singolo fix di questa voce — 18 errori pre-esistenti invariati in ogni passaggio, zero riferimenti di navigazione rotti.
+
+## v1.5.19-dev.1 — Step 19d: verb Versione OS + fix didascalia widget Launcher condiviso
+
+### Aggiunto — sezione "Versione OS" nell'overlay Dipendenze Wine
+
+Verificato leggendo il sorgente reale di `winetricks` prima di scrivere codice: i verb `win10`/`win81`/`win7`/`vista`/`winxp` sono categorizzati come `settings` (non pacchetti installabili) — chiamano `w_set_winver`, impostano solo la versione di Windows dichiarata da Wine/Proton al programma in esecuzione. A differenza dei verb esistenti (cumulabili liberamente), una prefix ha una sola versione attiva alla volta: serviva quindi una sezione a scelta singola (radio), non altre checkbox nella stessa checklist multi-selezione.
+
+- **`src/wineVerbs.ts`**: nuovo export `OS_VERSION_VERBS`, incluso in `ALL_KNOWN_WINE_VERBS` per il filtro-rumore di `list-installed`.
+- **`App.tsx`**: nuova sezione "Versione OS" nell'overlay Dipendenze Wine, sotto la checklist esistente (visibile solo a vista espansa, come `dotnet35`) — selezionarne una deseleziona automaticamente l'eventuale precedente. **Bloccata/oscurata** per i giochi con `requiresLauncher` impostato: la versione OS di una prefix condivisa (es. Ubisoft Connect richiede `win10`) non può essere cambiata dal singolo gioco che vi si appoggia, romperebbe il launcher stesso e ogni altro titolo nella stessa scatola — stesso principio già applicato al vincolo Runner Bridge per questi titoli.
+- **`gameManager.ts`**: la riconciliazione da `winetricks list-installed` teneva già conto dei verb applicati manualmente da terminale — trovato un dettaglio verificando il sorgente: `winetricks.log` è un log **cumulativo** (solo append), quindi se in passato sono stati applicati sia `win10` sia `win7` manualmente, compaiono entrambi nell'output anche se solo l'ultimo è realmente attivo nel registro. La riconciliazione ora tiene solo l'ultima occorrenza cronologica fra i verb versione OS, sia nella nuova rilevazione sia nel merge con il profilo già salvato.
+
+### Corretto — didascalia widget "Launcher condiviso"
+
+Segnalato dall'utente: "Prefix Proton condivisa richiesta da questo titolo" era troppo verbosa. Sostituita con "Prefix condivisa" (`gameOptions:sharedLauncherDesc`, it+en) — il nome del launcher scelto (Nessuno/Ubisoft Connect/ecc.) resta visibile accanto come già era.
+
+### Verifica
+
+`tsc --noEmit` e `node scripts/check-focus-ids.cjs` — 18 errori pre-esistenti invariati, zero riferimenti di navigazione rotti (94 id dichiarati, +1 coerente con il nuovo pattern `os-version-*`).
+
+---
+
+## Diario di sessione (post v1.5.19-dev.1) — indagine completa sul lancio di Ubisoft Connect via Proton
+
+**Nessun codice consegnato in questa sessione** — puro lavoro diagnostico, chiuso con una decisione architetturale concordata da implementare nella prossima sessione. Documentato qui per intero perché il percorso per arrivarci è stato lungo e non va perso.
+
+### Il problema di partenza
+
+Ubisoft Connect si installa e configura correttamente (prefix condivisa, verb winetricks, versione OS — tutto quanto costruito in v1.5.17/18/19). Al lancio dalla Dashboard, però: funziona al primo avvio (login e navigazione riusciti), ma dal secondo avvio in poi mostra sempre una finestra completamente nera o bianca, in modo riproducibile al 100%.
+
+### Percorso di eliminazione (tutto verificato con dati reali, non ipotesi)
+
+1. **Variabili d'ambiente**: provate sistematicamente `WINEDLLOVERRIDES` (da `d3d9=b` fino alla catena estesa `d3d9/d3d10core/d3d11/dxgi=b`), `PROTON_NO_ESYNC`/`PROTON_NO_FSYNC`, `PROTON_USE_WINED3D`, con e senza `--no-sandbox --disable-gpu`. Nessuna combinazione ha risolto il problema.
+2. **Wine puro invece di Proton**: stesso identico fallimento al secondo avvio. Questo ha escluso Proton/DXVK/VKD3D come causa — non è mai stato un problema del runner.
+3. **Log del launcher stesso** (non di Proton): rivelato un errore reale — `GameCatalogExtensionRegistration.cpp`, errore 5 (`ERROR_ACCESS_DENIED`). Confermato con una fonte esterna indipendente (bug report del progetto Whisky/Wine per macOS, stesso identico sintomo): Ubisoft Connect tenta di registrare voci "GCE" in un ramo di registro (`AppCompatFlags\Compatibility Assistant`) che Wine non implementa del tutto — un limite Wine noto, non risolvibile da X-Launcher, nessun workaround documentato trovato.
+4. **Log diagnostico Proton (`PROTON_LOG`)**: verificato nel sorgente reale dello script `proton` che senza la variabile `SteamGameId` impostata non scrive **alcun** file — non un nome strano, nessuna scrittura affatto. Consegnato uno script bash diagnostico esterno (`launch-ubisoft-connect-debug.sh`, non parte del progetto) con `SteamGameId` fittizio per farlo scrivere davvero.
+5. **Confronto diretto fra un log funzionante (Ubisoft Connect lanciato da Steam come app non-Steam) e uno rotto (stesso identico lancio dalla Dashboard)**: driver grafici/Vulkan/OpenGL identici in entrambi. Trovata un'eccezione non gestita specifica in **Xalia** — un tool di Valve stesso incluso in Proton (ponte di accessibilità/gamepad per app non native), non parte di Ubisoft Connect. Confermato con fonti esterne che Valve ha già dovuto correggere Xalia per conflitti identici con **altri** launcher terzi (EA App, Rockstar Launcher).
+6. **Fix Xalia verificato**: `PROTON_USE_XALIA=0` (verificato nel sorgente reale di Proton) elimina davvero l'eccezione — ma la finestra resta nera lo stesso. Bug reale trovato e corretto, ma non la causa del sintomo principale.
+7. **La differenza strutturale trovata confrontando le intestazioni dei due log**: solo il lancio via Steam mostra le righe `depot`/`pressure-vessel`/`steamrt4` — Steam avvolge **ogni** lancio Proton (anche per app non-Steam) in un proprio container (Steam Linux Runtime), che il nostro `proton run` diretto bypassa del tutto.
+8. **Esperimento decisivo**: l'utente ha lanciato l'installazione di Ubisoft Connect **che funziona perfettamente da Steam** usando invece lo script diagnostico (bypass del container) — stessa finestra nera. Prova definitiva: non è mai stato un problema di Ubisoft Connect, cache, o versione — è **richiedere il container Steam Linux Runtime per renderizzare correttamente**, un requisito architetturale, non un dettaglio di configurazione.
+
+### La soluzione trovata e concordata
+
+**`umu-launcher`** (comando `umu-run`) — stesso strumento usato da Lutris/Heroic/Bottles sotto il cofano, creato dal team Open Wine Components (lo stesso di GE-Proton). Replica esattamente il container Steam Linux Runtime **senza richiedere Steam in esecuzione**, gestendo lui il download/aggiornamento del runtime necessario. Pacchettizzato ufficialmente per Arch (`sudo pacman -S umu-launcher`, repository multilib, nessuna compilazione).
+
+Invocazione: `WINEPREFIX=<prefix> PROTONPATH=<build proton> GAMEID=<id> PROTON_VERB=waitforexitandrun umu-run <exe> [args]` — stesso verbo (`waitforexitandrun`) che Steam userebbe davvero.
+
+**Chiarito**: "UMU-Proton" (visto tra i runner già installati, probabilmente via Lutris) è una **build di Proton** diversa da `umu-run` (lo strumento di invocazione) — le due cose sono indipendenti, qualunque build Proton/GE-Proton può essere usata come `PROTONPATH` con `umu-run`.
+
+### Piano concordato per la prossima sessione (NON ancora implementato)
+
+1. `setup-linux.sh`: `umu-launcher` come dipendenza **raccomandata** (mai auto-installata), stesso trattamento di zenity/kdialog/Lutris
+2. **Scope volutamente limitato**: `umu-run` usato **solo per il flusso dei launcher condivisi** (Ubisoft Connect e futuri) — non per tutti i lanci Proton in generale, per non rischiare regressioni sui giochi normali che oggi funzionano già col meccanismo diretto
+3. **Fallback esplicito**: se `umu-run` non è installato, ripiegare sul `proton run` diretto attuale con un avviso chiaro, non bloccare l'uso di Ubisoft Connect per chi non vuole aggiungere la dipendenza
+4. Verificare (nuovo test reale, non assunto) che questo risolva davvero la finestra nera prima di considerare il problema chiuso
+
+### Idea proposta dall'utente per dopo (NON ancora progettata nei dettagli, esplicitamente rimandata a dopo la verifica del fix umu-launcher)
+
+Rilevamento automatico di launcher condivisi **già installati altrove** (es. Ubisoft Connect aggiunto a Steam come "app non-Steam", o scaricato come dipendenza di un gioco Ubisoft comprato su Steam) — se trovato, la Dashboard lo esporrebbe subito come "installato" nella propria libreria/tab dedicata (stessa card di oggi), condiviso dai giochi che lo richiedono, riusando `~/.local/share/x-launcher/shared-launchers/<id>/prefix` come **link simbolico** verso la prefix reale trovata altrove invece che una prefix propria. Tecnicamente valido (sia il meccanismo attuale sia `umu-run` seguono i link simbolici senza logica speciale), ma con due complessità reali non banali da affrontare quando ci si arriva: (a) il rilevamento richiede leggere `shortcuts.vdf` di Steam (formato binario proprietario) o scansionare le cartelle `compatdata/*/pfx/`, e il caso "dipendenza di un gioco Steam" spesso finisce dentro la prefix del gioco stesso, non in una separata; (b) un link simbolico penzolante (l'utente disinstalla l'app/gioco originale altrove) va rilevato esplicitamente, altrimenti la card resterebbe rotta silenziosamente. Da riprendere con lo stesso rigore di verifica-prima-di-scrivere-codice quando si arriva a questo punto.
+
+

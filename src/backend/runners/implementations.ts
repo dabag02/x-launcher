@@ -363,13 +363,73 @@ export class ProtonRunner extends BaseRunner {
     // accanto all'eseguibile). Stessa resolveLaunchCwd già usata da
     // WineRunner sopra.
     const cwd = resolveLaunchCwd(exePath, config?.cwd);
-    // v1.5.3-dev.1 — useGameMode calcolato sopra ma mai applicato al
-    // lancio vero e proprio: stesso schema "launchBin" già usato da
-    // WineRunner, gamemoderun avvolge indifferentemente proton o wine.
-    const protonArgs = ['run', exePath, ...(config?.args ?? [])];
-    const launchBin  = useGameMode ? 'gamemoderun' : protonBin;
-    const launchArgs = useGameMode ? [protonBin, ...protonArgs] : protonArgs;
-    writeLog('launch', `[PROTON] ${launchBin} ${launchArgs.join(' ')}`);
+
+    // v1.5.20-dev.1 — switch "Umu-launcher" (Compatibility Layer): rimpiazza
+    // `<protonBin> run <exe>` con `umu-run <exe>`, che replica il container
+    // Steam Linux Runtime (pressure-vessel) che Steam avvolge SEMPRE
+    // attorno ai lanci Proton — anche per app non-Steam — e che il nostro
+    // `proton run` diretto bypassa del tutto (causa reale del problema
+    // "finestra nera dal secondo avvio" di Ubisoft Connect, vedi
+    // CHANGELOG.md). Generalizzato: disponibile per QUALUNQUE gioco Proton,
+    // non solo i launcher condivisi.
+    //
+    // WINEPREFIX punta a `<prefix>/pfx` — la vera prefix Wine, esattamente
+    // dove resolveRunnerWineEnv/prepareWinePrefix (downloadManager.ts) la
+    // creano già oggi per questo stesso runner: nessuna prefix separata,
+    // nessuna migrazione, verificato leggendo il codice reale invece di
+    // assumere. PROTONPATH è la cartella che CONTIENE il binario `proton`
+    // (non il binario stesso — sintassi verificata su man umu/wiki
+    // ufficiale). GAMEID è un id arbitrario (prefissato per non collidere
+    // per errore con un vero id del database umu, che qui non serve:
+    // nessun protonfix specifico applicato). PROTON_VERB non impostato:
+    // `waitforexitandrun` è già il default di umu-run, stesso verbo che
+    // userebbe Steam.
+    //
+    // NON ancora verificato su hardware reale se le variabili
+    // STEAM_COMPAT_DATA_PATH/STEAM_COMPAT_CLIENT_INSTALL_PATH già presenti
+    // in `env` (calcolate sopra per il percorso diretto) interferiscono con
+    // la gestione interna del container fatta da umu-run — lasciate
+    // invariate per ora, da confermare con un test reale prima di
+    // considerare la feature definitiva.
+    const umuRunBin = config?.umuRun ? resolveBinaryPath('umu-run') : null;
+    if (config?.umuRun && !umuRunBin) {
+      writeLog('warning', `[PROTON] Umu-launcher richiesto per ${game.title} ma umu-run non è installato — fallback al lancio Proton diretto.`);
+    }
+
+    let launchBin: string;
+    let launchArgs: string[];
+    if (umuRunBin) {
+      env.WINEPREFIX = path.join(prefix, 'pfx');
+      env.PROTONPATH = path.dirname(protonBin);
+      env.GAMEID = `x-launcher-${game.id}`;
+      const umuArgs = [exePath, ...(config?.args ?? [])];
+      launchBin  = useGameMode ? 'gamemoderun' : umuRunBin;
+      launchArgs = useGameMode ? [umuRunBin, ...umuArgs] : umuArgs;
+      writeLog('launch', `[PROTON] (umu-run) ${launchBin} ${launchArgs.join(' ')}`);
+    } else {
+      // v1.5.3-dev.1 — useGameMode calcolato sopra ma mai applicato al
+      // lancio vero e proprio: stesso schema "launchBin" già usato da
+      // WineRunner, gamemoderun avvolge indifferentemente proton o wine.
+      const protonArgs = ['run', exePath, ...(config?.args ?? [])];
+      launchBin  = useGameMode ? 'gamemoderun' : protonBin;
+      launchArgs = useGameMode ? [protonBin, ...protonArgs] : protonArgs;
+      writeLog('launch', `[PROTON] ${launchBin} ${launchArgs.join(' ')}`);
+    }
+    // Step 19d — log diagnostico richiesto dall'utente durante il debug
+    // del crash/finestra nera di Ubisoft Connect: dump di TUTTE le
+    // variabili d'ambiente rilevanti (WINE*/DXVK*/VKD3D*/PROTON*/
+    // STEAM_COMPAT*/D3D*/DXGI*) passate a questo lancio specifico, per
+    // confrontarle riga per riga con un comando `wine` manuale che
+    // funziona — invece di continuare a indovinare quale override
+    // provare. Filtrato (non l'intero process.env, che include molto
+    // rumore non pertinente) — un solo log per lancio, non per ogni riga.
+    // v1.5.20-dev.1 — GAMEID aggiunto come alternativa esatta al filtro
+    // (non un prefisso come le altre): rilevante solo per il ramo umu-run
+    // sopra, assente — quindi innocuo — per il lancio diretto.
+    const envDebugKeys = Object.keys(env).filter(k =>
+      /^(WINE|DXVK|VKD3D|PROTON|STEAM_COMPAT|D3D|DXGI)/i.test(k) || /^GAMEID$/i.test(k)
+    ).sort();
+    writeLog('launch', `[PROTON-ENV] ${envDebugKeys.map(k => `${k}=${env[k]}`).join(' | ')}`);
     const logPath = gameLaunchLogPath(game.id);
     const { pid } = spawnDetached(launchBin, launchArgs, env, cwd, logPath);
     return { success: true, pid, message: `Launched via ${this.name}`, logPath };
@@ -439,18 +499,48 @@ export async function launchEpicViaLegendary(game: Game, runner: BaseRunner, con
       return { success: false, message: `Proton "${runner.id}" non trovato. Installalo via Steam o ProtonUp-Qt.` };
     }
     const prefix = expandHome(config?.prefix ?? `~/.local/share/proton-prefixes/${game.id}`);
-    // Sintassi verificata (issue reali Heroic/legendary su GitHub):
-    // --no-wine dice a legendary di non cercare un wine proprio,
-    // --wrapper delega l'intero avvio a "<proton> run", che si aspetta
-    // STEAM_COMPAT_DATA_PATH nell'ambiente — non WINEPREFIX diretto,
-    // stesso principio già scoperto per il bug prefix Proton in v1.0.0.
-    args.push('--no-wine', '--wrapper', `'${protonBin}' run`);
-    env.STEAM_COMPAT_DATA_PATH = prefix;
-    env.STEAM_COMPAT_CLIENT_INSTALL_PATH = `${homedir()}/.local/share/Steam`;
+
+    // v1.5.20-dev.4 — switch "Umu-launcher": stesso principio già applicato
+    // a ProtonRunner.launch(), qui per il percorso Epic via legendary
+    // (esplicitamente lasciato fuori scope in v1.5.20-dev.1 perché la
+    // combinazione legendary+umu-run non era ancora stata verificata).
+    // Confermato ora che è una combinazione reale e supportata: Heroic
+    // Games Launcher offre "Use UMU as Proton runtime" per i titoli Epic
+    // esattamente tramite questo stesso meccanismo --wrapper di legendary
+    // (non un'estensione nostra — verificato con issue reali Heroic su
+    // GitHub prima di scrivere questo, stesso rigore del resto del file).
+    const umuRunBin = config?.umuRun ? resolveBinaryPath('umu-run') : null;
+    if (config?.umuRun && !umuRunBin) {
+      writeLog('warning', `[EPIC] Umu-launcher richiesto per ${game.title} ma umu-run non è installato — fallback al wrapper Proton diretto.`);
+    }
+
+    if (umuRunBin) {
+      // Stesso identico schema WINEPREFIX/PROTONPATH/GAMEID di
+      // ProtonRunner.launch() — qui passato come --wrapper a legendary
+      // invece che invocato direttamente, legendary si limita a
+      // prependere questo wrapper davanti a <exe> [argomenti EOS] esattamente
+      // come faceva finora con "'<proton>' run" (nessun'altra differenza
+      // nel resto del flusso legendary/EOS sotto).
+      args.push('--no-wine', '--wrapper', umuRunBin);
+      env.WINEPREFIX = path.join(prefix, 'pfx');
+      env.PROTONPATH = path.dirname(protonBin);
+      env.GAMEID = `x-launcher-${game.id}`;
+    } else {
+      // Sintassi verificata (issue reali Heroic/legendary su GitHub):
+      // --no-wine dice a legendary di non cercare un wine proprio,
+      // --wrapper delega l'intero avvio a "<proton> run", che si aspetta
+      // STEAM_COMPAT_DATA_PATH nell'ambiente — non WINEPREFIX diretto,
+      // stesso principio già scoperto per il bug prefix Proton in v1.0.0.
+      args.push('--no-wine', '--wrapper', `'${protonBin}' run`);
+      env.STEAM_COMPAT_DATA_PATH = prefix;
+      env.STEAM_COMPAT_CLIENT_INSTALL_PATH = `${homedir()}/.local/share/Steam`;
+    }
 
     // v1.5.7-dev.1 — EAC/BattlEye: funzione condivisa, vedi commento
     // sopra WineRunner. Funzionano SOLO qui (ramo Proton), mai sotto
-    // wine puro — verificato v1.5.3-dev.1.
+    // wine puro — verificato v1.5.3-dev.1. Invariato dal ramo umu-run
+    // sopra: sono variabili lette dallo script Proton stesso, che
+    // umu-run invoca comunque al suo interno.
     applyProtonAnticheatEnv(env, config, 'EPIC');
   } else {
     const wineBin = resolveBinaryPath('wine-lutris') ?? resolveBinaryPath('wine');

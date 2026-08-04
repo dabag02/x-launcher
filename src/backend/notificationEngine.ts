@@ -45,6 +45,17 @@ export interface StoredNotification {
   raw_log?:       string;
   primary_action?:   string;  // JSON serializzato
   secondary_action?: string;  // JSON serializzato
+  // Step 19d — terzo slot, introdotto per il flusso di installazione
+  // manuale di Ubisoft Connect (Continua/Annulla/Sfoglia insieme non
+  // entravano nei soli 2 slot esistenti). Generico, riusabile da
+  // qualunque notifica futura ne avesse bisogno.
+  tertiary_action?:  string;  // JSON serializzato
+  // Link cliccabile/selezionabile da controller, distinto dai pulsanti
+  // azione sopra — es. la pagina ufficiale di download di un launcher
+  // terzo. Renderizzato come elemento a sé nella card, non dentro `body`
+  // (evita di dover fare parsing di link dentro testo libero).
+  link_url?:      string;
+  link_label?:    string;
   source:         string;
   ai_provider?:   string;
   confidence?:    string;
@@ -95,16 +106,32 @@ class NotificationStore {
         created_at      TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+    // Step 19d — migrazione sicura per DB già esistenti: la tabella sopra
+    // potrebbe già esistere senza queste 3 colonne. Stesso pattern
+    // "verifica prima di alterare" già in uso in db.ts, adattato qui dove
+    // non c'è un array existingCols precalcolato.
+    const existingCols = (this.db.prepare(`PRAGMA table_info(notifications)`).all() as any[]).map(c => c.name);
+    if (!existingCols.includes('tertiary_action')) {
+      this.db.exec(`ALTER TABLE notifications ADD COLUMN tertiary_action TEXT`);
+    }
+    if (!existingCols.includes('link_url')) {
+      this.db.exec(`ALTER TABLE notifications ADD COLUMN link_url TEXT`);
+    }
+    if (!existingCols.includes('link_label')) {
+      this.db.exec(`ALTER TABLE notifications ADD COLUMN link_label TEXT`);
+    }
   }
 
   insert(n: StoredNotification): void {
     this.db.prepare(`
       INSERT OR REPLACE INTO notifications
         (id, type, status, title, body, game_id, game_title, raw_log,
-         primary_action, secondary_action, source, ai_provider, confidence, created_at)
+         primary_action, secondary_action, tertiary_action, link_url, link_label,
+         source, ai_provider, confidence, created_at)
       VALUES
         (@id, @type, @status, @title, @body, @game_id, @game_title, @raw_log,
-         @primary_action, @secondary_action, @source, @ai_provider, @confidence, @created_at)
+         @primary_action, @secondary_action, @tertiary_action, @link_url, @link_label,
+         @source, @ai_provider, @confidence, @created_at)
     `).run(n);
   }
 
@@ -340,6 +367,7 @@ class NotificationEngine {
     const complete: StoredNotification = {
       game_id: null as any, game_title: null as any, raw_log: null as any,
       primary_action: null as any, secondary_action: null as any,
+      tertiary_action: null as any, link_url: null as any, link_label: null as any,
       ai_provider: null as any, confidence: null as any,
       ...notif,
     };
