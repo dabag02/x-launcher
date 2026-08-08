@@ -64,6 +64,20 @@ interface VirtualKeyboardProps {
   // fluttuante — stesso principio già usato per onSuggestionFocus sopra:
   // stato di visualizzazione, non parte del valore vero e proprio.
   onCursorChange?: (pos: number) => void;
+  // v1.5.20-dev.7 — richiesta utente: tag genere/categoria selezionabili
+  // "sotto al campo di ricerca", raggiungibili da D-pad insieme al resto
+  // della tastiera. Vivono FUORI da questo componente (App.tsx) per
+  // principio già stabilito qui sopra — VirtualKeyboard non deve
+  // conoscere concetti come "genere di gioco", resta generico. L'unico
+  // punto di contatto necessario: la navigazione verticale ciclica
+  // interna (v1.1.79 — l'intera tastiera come un unico ciclo, "su" dalla
+  // riga suggerimenti in cima avvolge alla barra spaziatrice in fondo)
+  // deve poter essere interrotta SOLO quando esiste qualcosa di esterno
+  // sopra da raggiungere — un id opzionale, mai un concetto di dominio:
+  // se assente, il ciclo interno resta ESATTAMENTE quello di sempre
+  // (retrocompatibile con ogni altro campo — Launch Arguments, Custom
+  // Env, Executable Path — che non passano questa prop).
+  topRowExternalUpId?: string;
 }
 
 /**
@@ -221,8 +235,9 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
   altSuggestions,
   onSuggestionFocus,
   onCursorChange,
+  topRowExternalUpId,
 }) => {
-  const { focusedId } = useFocus();
+  const { focusedId, setFocusedId } = useFocus();
   // Step 19b (v1.1.61) — namespace 'dashboard', per le sole etichette UI
   // di questo componente (pulsante Incolla, messaggi clipboard). Nessun
   // legame con `layoutId` qui sotto: quello è il LAYOUT FISICO dei tasti
@@ -284,8 +299,22 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
     // questi id non avrebbe comunque effetto: nessun conflitto reale fra
     // i due meccanismi, si dividono pulitamente gli assi.
     const rowSugg  = activeSuggestions.map((_, i) => `key-sugg-${i}`);
-    return buildNeighborMap([rowSugg, rowNum, rowQ, rowA, rowZ, rowSpace]);
-  }, [layout, activeSuggestions]);
+    const map = buildNeighborMap([rowSugg, rowNum, rowQ, rowA, rowZ, rowSpace]);
+    // v1.5.20-dev.7 — override mirato SOLO di "su" dalla riga suggerimenti
+    // (la prima, in cima): se il chiamante fornisce un ancoraggio esterno,
+    // rompe il ciclo verticale interno esattamente in quel punto invece di
+    // avvolgere a rowSpace come sempre — "giù" da quell'ancoraggio esterno
+    // spetta al chiamante stesso (i suoi Focusable puntano già a
+    // 'key-sugg-0', il primo id di rowSugg, sempre presente). Nessun altro
+    // vicino tocca to: senza questa prop il comportamento resta
+    // identico a prima per ogni altro campo.
+    if (topRowExternalUpId) {
+      for (const id of rowSugg) {
+        if (map[id]) map[id].up = topRowExternalUpId;
+      }
+    }
+    return map;
+  }, [layout, activeSuggestions, topRowExternalUpId]);
 
   // Spostata qui da App.tsx (che puntava a un pulsante "Fatto" rimosso da
   // tempo, quindi non più realmente in funzione — vedi il commento su
@@ -312,7 +341,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
   // focus, letto da InputManager) e puntatore (mouse/touch, tracciato a
   // parte con onMouseDown/onTouchStart perché InputManager non vede
   // affatto mouse/touch — pointerHoldRef sotto).
-  const CLEAR_HOLD_MS = 4000;
+  // v1.5.20-dev.6 — richiesta utente: soglia abbassata da 4 a 3 secondi.
+  const CLEAR_HOLD_MS = 3000;
   const [clearHoldProgress, setClearHoldProgress] = React.useState(0);
   const clearHoldStartRef = React.useRef<number | null>(null);
   const clearHoldFiredRef = React.useRef(false);
@@ -423,6 +453,137 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
     }
     insertAtCursor(s.value);
   };
+
+  // v1.5.20-dev.6 — richiesta utente: scrittura da tastiera fisica, non
+  // solo controller/mouse — "premendo A, Q, Canc sulla tastiera vera
+  // corrisponde lo stesso tasto su quella virtuale". Battitura pura:
+  // niente combinazioni con modificatori (Ctrl/Alt/Meta restano riservati
+  // alle scorciatoie di sistema — vedi i listener globali in App.tsx, che
+  // già controllano quei modificatori esplicitamente prima di agire, zero
+  // sovrapposizione). Ogni carattere sposta anche il focus visivo sul
+  // tasto corrispondente a schermo (se esiste in QUESTO layout — lettere
+  // accentate IT in layout EN, o viceversa, restano scritte comunque, solo
+  // senza un tasto da evidenziare), così le due tastiere restano
+  // visibilmente "la stessa cosa" e non solo funzionalmente equivalenti.
+  //
+  // v1.5.20-dev.8 — Invio e Spazio erano stati deliberatamente lasciati
+  // fuori qui in dev.6 (rischio di doppia azione col listener bubble di
+  // Focusable, ordine di attach non garantito). Bug reale emerso proprio
+  // per Invio: segnalato dall'utente, risolto registrando il listener
+  // sotto in fase CAPTURE — vedi il commento lì per il motivo per cui
+  // questo garantisce l'ordine invece di sperarci soltanto. Ora entrambi
+  // sono gestiti correttamente.
+  const findOnScreenKeyId = React.useCallback((char: string): string | null => {
+    const rows: [number, KeyDef[]][] = [
+      [0, layout.numbers],
+      [1, layout.row2],
+      [2, layout.row3],
+      [3, layout.row4],
+    ];
+    // Le lettere sono salvate in un'unica forma canonica (es. k('Q') →
+    // {normal:'Q', shifted:'Q'}, mai due voci distinte per maiuscolo/
+    // minuscolo — vedi renderKeyLabel/handleKey, che derivano il case da
+    // isShift al momento del render/battitura, non dal KeyDef stesso).
+    // Confronto case-insensitive SOLO per le lettere, altrimenti un fisico
+    // "q" minuscolo (il caso comune) non troverebbe mai 'Q' e
+    // l'evidenziazione fallirebbe in silenzio per ogni lettera minuscola
+    // — bug reale trovato con un test isolato prima della consegna, non
+    // solo teorico. I simboli (dove normal/shifted sono davvero due
+    // caratteri diversi, es. '1'/'!') restano a confronto esatto.
+    for (const [rowIdx, row] of rows) {
+      const i = row.findIndex(kd => {
+        if (isLetter(kd.normal)) return kd.normal.toLowerCase() === char.toLowerCase();
+        return kd.normal === char || kd.shifted === char;
+      });
+      if (i !== -1) return keyId(rowIdx, row[i], i);
+    }
+    return null;
+  }, [layout]);
+
+  React.useEffect(() => {
+    const handlePhysicalKeydown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+      // v1.5.20-dev.8 — bug reale segnalato dall'utente: premendo Invio
+      // dopo aver digitato, veniva ripremuto l'ULTIMO tasto digitato
+      // invece di chiudere/inviare la ricerca. Causa verificata (non
+      // ipotizzata): Focusable (FocusProvider.tsx) ha un proprio listener
+      // — in fase bubble — che attiva onEnter() del tasto ATTUALMENTE a
+      // fuoco su un fisico Invio o Spazio. Dato che ogni carattere digitato
+      // qui sopra sposta il focus visivo sul tasto corrispondente (vedi
+      // findOnScreenKeyId sotto), il tasto "a fuoco" quando si preme Invio
+      // è sempre l'ultima lettera scritta, MAI key-enter — da qui il
+      // doppio tasto invece dell'invio. Rimandato deliberatamente in
+      // v1.5.20-dev.6 perché l'ordine fra due listener indipendenti sullo
+      // stesso window (entrambi in fase bubble) non è garantito — qui
+      // risolto DAVVERO registrando questo listener in fase CAPTURE
+      // (terzo argomento `true` sotto): per specifica DOM, un listener in
+      // capture su un target viene invocato PRIMA di qualunque listener in
+      // bubble sullo stesso target, quindi PRIMA del listener di
+      // Focusable, indipendentemente da quale dei due sia stato
+      // registrato per primo (ordine di attach, non affidabile — quello
+      // che avevo scartato in dev.6). stopPropagation() qui impedisce
+      // all'evento di raggiungere la fase bubble, quindi il listener di
+      // Focusable non si attiva affatto per Invio/Spazio: nessuna doppia
+      // azione, garantita dalla specifica del DOM, non da un'assunzione.
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        insertAtCursor(' ');
+        setFocusedId('key-space');
+        return;
+      }
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleBackspace();
+        setFocusedId('key-back');
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        e.stopPropagation();
+        moveCursor(-1);
+        setFocusedId('key-cursor-left');
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        e.stopPropagation();
+        moveCursor(1);
+        setFocusedId('key-cursor-right');
+        return;
+      }
+      // Un solo carattere reale (Spazio già gestito sopra) — copre
+      // lettere, cifre, simboli, accenti: tutto ciò che la tastiera fisica
+      // sa produrre, non solo il sottoinsieme presente nel layout a
+      // schermo.
+      if (e.key.length === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        insertAtCursor(e.key);
+        const matchId = findOnScreenKeyId(e.key);
+        if (matchId) setFocusedId(matchId);
+      }
+    };
+    // true = fase capture, vedi commento sopra su Invio/Spazio — non è
+    // solo una questione di stile, cambia davvero l'ordine di invocazione
+    // rispetto al listener bubble di Focusable.
+    window.addEventListener('keydown', handlePhysicalKeydown, true);
+    return () => window.removeEventListener('keydown', handlePhysicalKeydown, true);
+    // value/cursorPos in dipendenza: insertAtCursor/handleBackspace/
+    // moveCursor non sono avvolte in useCallback, catturano il valore
+    // corrente per closure a ogni render — l'effetto si ri-sottoscrive a
+    // ogni battitura (costo trascurabile per un input a bassa frequenza
+    // come la digitazione umana), mai una closure con value/cursorPos
+    // ormai superati.
+  }, [value, cursorPos, findOnScreenKeyId, setFocusedId, onClose]);
 
   // v1.1.13 — pulsante "Incolla": legge la clipboard REALE del sistema
   // (non un buffer interno alla Dashboard), utile soprattutto per valori
@@ -646,8 +807,32 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
             {pasteStatus === 'empty' ? t('dashboard:keyboard.clipboardEmpty') : t('dashboard:keyboard.clipboardUnavailable')}
           </p>
         )}
+        {/* v1.5.20-dev.9 — richiesta utente: l'intera riga deve restringersi
+            in modo che l'estremità sx di "lingua" e l'estremità dx di
+            "incolla" coincidano rispettivamente con l'estremità sx del
+            tasto Z e l'estremità dx del tasto @ così come disposti nella
+            riga 4 del layout ITALIANO (row4: Z...M,ù,',','.','-',@,' —
+            13 tasti dopo Shift). Calcolo esatto, non a occhio: ogni tasto
+            è 44px (md:w-11), ogni gap 6px (md:gap-1.5) — stessi valori
+            già usati in tutto il file. Lo span Z→@ copre 12 tasti
+            (Z,X,C,V,B,N,M,ù,',','.','-','@') e 11 gap interni:
+            12×44 + 11×6 = 594px totali. Simmetria verificata: Shift e
+            l'apostrofo (esclusi dallo span) pesano ESATTAMENTE uguale su
+            entrambi i lati (44px+6px di gap ciascuno), quindi lo span
+            Z→@ risulta centrato esattamente al centro di riga 4 — e
+            questa riga, centrata a sua volta nello stesso contenitore
+            (justify-center), ne eredita perfettamente i due bordi.
+            Scomposizione dei 594px totali fra i 5 elementi (4 gap da 6px
+            = 24px): lingua 94px (due tasti+gap) + freccia sx 44px (un
+            tasto) + barra spaziatrice 294px (nuovo tetto esplicito, prima
+            senza limite) + freccia dx 44px + incolla 94px = 570px + 24px
+            di gap = 594px. Vale in modo esatto solo con il layout
+            ITALIANO attivo: la riga 4 inglese ha un tasto in meno (manca
+            "ù", esclusivo IT) — passando a EN i bordi non coincidono più
+            con altrettanta precisione, limite intrinseco della richiesta
+            così come formulata (ancorata esplicitamente al layout IT). */}
         <div className="flex justify-center items-stretch gap-1 md:gap-1.5 mt-0.5">
-          <Focusable group="keyboard" id="key-lang" onEnter={() => setLayout(layoutId === 'it' ? 'en' : 'it')} neighbors={neighborMap['key-lang']} className="w-1/6">
+          <Focusable group="keyboard" id="key-lang" onEnter={() => setLayout(layoutId === 'it' ? 'en' : 'it')} neighbors={neighborMap['key-lang']} className="flex-1 max-w-[94px]">
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center gap-1.5 text-[9px] font-black uppercase tracking-widest transition-all touch-none',
@@ -669,7 +854,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               posizione, stesso schema "un'azione per pressione" di
               qualunque altro tasto di questa tastiera (nessun key-repeat
               automatico da nessuna parte, coerente col resto). */}
-          <Focusable group="keyboard" id="key-cursor-left" onEnter={() => moveCursor(-1)} neighbors={neighborMap['key-cursor-left']} className="w-1/6">
+          <Focusable group="keyboard" id="key-cursor-left" onEnter={() => moveCursor(-1)} neighbors={neighborMap['key-cursor-left']} className="flex-1 max-w-[44px]">
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
@@ -683,7 +868,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               </div>
             )}
           </Focusable>
-          <Focusable group="keyboard" id="key-space" onEnter={handleSpace} neighbors={neighborMap['key-space']} className="flex-1">
+          <Focusable group="keyboard" id="key-space" onEnter={handleSpace} neighbors={neighborMap['key-space']} className="flex-1 max-w-[294px]">
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
@@ -697,7 +882,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               </div>
             )}
           </Focusable>
-          <Focusable group="keyboard" id="key-cursor-right" onEnter={() => moveCursor(1)} neighbors={neighborMap['key-cursor-right']} className="w-1/6">
+          <Focusable group="keyboard" id="key-cursor-right" onEnter={() => moveCursor(1)} neighbors={neighborMap['key-cursor-right']} className="flex-1 max-w-[44px]">
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
@@ -711,7 +896,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               </div>
             )}
           </Focusable>
-          <Focusable group="keyboard" id="key-paste" onEnter={handlePaste} neighbors={neighborMap['key-paste']} className="w-1/6">
+          <Focusable group="keyboard" id="key-paste" onEnter={handlePaste} neighbors={neighborMap['key-paste']} className="flex-1 max-w-[94px]">
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center gap-1.5 text-[9px] font-black uppercase tracking-widest transition-all touch-none',

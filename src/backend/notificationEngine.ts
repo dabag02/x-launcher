@@ -75,6 +75,7 @@ export type EngineEvent =
   | { type: 'runner-uninstalled'; runnerId: string }
   | { type: 'runner-error';       runnerId: string; error: string }
   | { type: 'validation-prompt';  gameId: string; gameTitle: string }
+  | { type: 'shared-launcher-idle'; gameId: string; gameTitle: string; launcherId: string; launcherName: string }
   | { type: 'system';             message: string; level: 'info' | 'warning' | 'error' };
 
 // ---------------------------------------------------------------------------
@@ -599,6 +600,32 @@ class NotificationEngine {
           // già seguono questo pattern — qui mancava.
           raw_log: null as any, primary_action: null as any, secondary_action: null as any,
           ai_provider: null as any, confidence: null as any,
+        };
+
+      case 'shared-launcher-idle':
+        // v1.5.20-dev.22 — richiesta utente: filosofia della Dashboard,
+        // mai un'automazione silenziosa quando la scelta ha un impatto
+        // reale — alla chiusura di un gioco che usa un launcher
+        // condiviso, chiediamo esplicitamente se tenerlo pronto per il
+        // prossimo gioco che ne dipende o chiuderlo. Emessa da
+        // gameManager.ts SOLO se il launcher risulta ANCORA in
+        // esecuzione a quel punto (altrimenti non c'è nulla da chiedere).
+        return {
+          id: this.mkId(), type: 'info', status: 'pending',
+          title: lang === 'en' ? `${event.launcherName} is still open` : `${event.launcherName} è ancora aperto`,
+          body: lang === 'en'
+            ? 'Keep it ready in the background for the next game that needs it, or close it now?'
+            : 'Vuoi tenerlo pronto in background per il prossimo gioco che lo richiede, o chiuderlo ora?',
+          game_id: event.gameId, game_title: event.gameTitle,
+          source: 'system', created_at: this.now(),
+          primary_action: JSON.stringify({
+            label: lang === 'en' ? 'Close now' : 'Chiudi ora',
+            handler: 'close_shared_launcher',
+            params: { launcherId: event.launcherId },
+          }),
+          secondary_action: JSON.stringify({
+            label: lang === 'en' ? 'Keep open' : 'Tieni aperto',
+          }),
         };
 
       case 'system':

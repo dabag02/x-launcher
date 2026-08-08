@@ -42,7 +42,7 @@ import { prepareWinePrefix } from './winePrefixManager';
 import { ALL_KNOWN_WINE_VERBS } from '../wineVerbs';
 import { resolveProtonBin } from './runners/implementations';
 import { getSharedPrefixBasePath, resolveSharedPrefixExecutionPath } from './sharedLauncherManager';
-import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
+import { getThirdPartyLauncherDefinition, getThirdPartyLauncherByStoreId, ThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { browseForFile } from './filePicker';
 
 // v0.99.35 — versione asincrona di execFile, usata per "sync" tra
@@ -546,19 +546,87 @@ export function findInstalledLauncherExe(driveCPath: string, hintRelPath?: strin
   return null;
 }
 
-// Step 19d — cerca un installer Ubisoft Connect già scaricato in
-// ~/Downloads. Pattern euristico (nome file contiene "ubisoft" o "uplay",
-// case-insensitive) — NON verificato contro un download reale del vero
-// installer, da confermare/correggere al primo test su hardware reale.
-// Ordina per data di modifica decrescente: se l'utente ha scaricato più
-// volte, prendiamo il file più recente.
-function findInstallerInDownloads(): string | null {
-  const downloadsDir = path.join(homedir(), 'Downloads');
-  if (!existsSync(downloadsDir)) return null;
+/**
+ * v1.5.20-dev.10 — richiesta utente: la cartella Download può chiamarsi
+ * diversamente a seconda della lingua di sistema (es. "Scaricati" su
+ * locale italiano) — homedir()+'Downloads' scritto alla lettera (come
+ * era prima qui sotto) non la trova affatto su quei sistemi, un limite
+ * reale già presente prima di questa modifica, non solo teorico per il
+ * futuro file manager.
+ *
+ * Ordine di risoluzione (verificato: xdg-user-dirs è lo standard
+ * desktop Linux per la localizzazione di queste cartelle):
+ *   1. `xdg-user-dir DOWNLOAD` — il comando ufficiale del pacchetto
+ *      xdg-user-dirs, restituisce già il path risolto in una riga
+ *   2. lettura diretta di ~/.config/user-dirs.dirs (stesso file che
+ *      xdg-user-dir legge, per chi non ha il comando installato ma ha
+ *      comunque la configurazione, es. scritta da un altro DE)
+ *   3. ~/Downloads letterale
+ *   4. ~/Scaricati letterale (il caso specifico segnalato dall'utente,
+ *      ultima rete di sicurezza se anche la configurazione XDG manca)
+ * Restituisce null solo se NESSUNA delle quattro esiste davvero su disco.
+ */
+/**
+ * v1.5.20-dev.12 — esportata: riusata anche dal file manager nativo
+ * (fileManager.ts/server.ts, quick-link "Downloads") oltre che qui.
+ */
+export function resolveDownloadsDir(): string | null {
+  if (binaryExists('xdg-user-dir')) {
+    try {
+      const result = execSync('xdg-user-dir DOWNLOAD', { encoding: 'utf-8', timeout: 3000 }).trim();
+      if (result && existsSync(result)) return result;
+    } catch {
+      // ripiega sui metodi sotto
+    }
+  }
+  try {
+    const configPath = path.join(homedir(), '.config', 'user-dirs.dirs');
+    if (existsSync(configPath)) {
+      const content = readFileSync(configPath, 'utf-8');
+      const match = content.match(/XDG_DOWNLOAD_DIR\s*=\s*"([^"]+)"/);
+      if (match) {
+        // Formato dichiarato dallo standard: $HOME/relativo, o un
+        // percorso assoluto — mai altro (vedi doc ufficiale letta prima
+        // di scrivere questo parser).
+        const resolved = match[1].replace(/^\$HOME/, homedir());
+        if (existsSync(resolved)) return resolved;
+      }
+    }
+  } catch {
+    // ripiega sui letterali sotto
+  }
+  for (const name of ['Downloads', 'Scaricati']) {
+    const candidate = path.join(homedir(), name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * v1.5.20-dev.10 — generalizzata da "cerca un installer Ubisoft Connect"
+ * a "cerca l'installer di un QUALUNQUE launcher terzo": il pattern nome
+ * file (prima hardcoded `*ubisoft*`/`*uplay*`) è ora un parametro,
+ * letto da `installerFilenameHints` nel registro (thirdPartyLaunchers.ts)
+ * — decisione esplicita con l'utente: ogni plugin gestisce le proprie
+ * particolarità, questa resta la sola parte davvero comune (creazione
+ * prefix + ricerca installer), non un plugin unico. Pattern euristico,
+ * NON verificato contro un download reale per i launcher non ancora
+ * affrontati — da confermare/correggere al primo test su hardware reale
+ * di ciascuno (stesso principio già seguito per Ubisoft Connect).
+ * Ordina per data di modifica decrescente: se l'utente ha scaricato più
+ * volte, prendiamo il file più recente. `filenameHints` vuoto o assente
+ * → nessun filtro sul nome, solo *.exe (utile finché un launcher non ha
+ * ancora pattern verificati).
+ */
+function findInstallerInDownloads(filenameHints: string[] = []): string | null {
+  const downloadsDir = resolveDownloadsDir();
+  if (!downloadsDir) return null;
+  const nameFilter = filenameHints.length > 0
+    ? ` \\( ${filenameHints.map(h => `-iname "${h}"`).join(' -o ')} \\) `
+    : ' ';
   try {
     const result = execSync(
-      `find "${downloadsDir}" -maxdepth 1 -iname "*.exe" ` +
-      `\\( -iname "*ubisoft*" -o -iname "*uplay*" \\) ` +
+      `find "${downloadsDir}" -maxdepth 1 -iname "*.exe" ${nameFilter}` +
       `-printf "%T@ %p\\n" | sort -rn | head -1 | cut -d' ' -f2-`,
       { encoding: 'utf-8', timeout: 5000 }
     ).trim();
@@ -567,6 +635,8 @@ function findInstallerInDownloads(): string | null {
     return null;
   }
 }
+
+
 
 // ---------------------------------------------------------------------------
 // Parser progresso lgogdownloader
@@ -748,7 +818,7 @@ class DownloadManager {
   private procs     = new Map<string, ChildProcess>();
   private listeners: Listener[] = [];
   private completeCallbacks: Array<(gameId: string, gameTitle: string) => void> = [];
-  private errorCallbacks:    Array<(gameId: string, gameTitle: string, error: string) => void> = [];
+  private errorCallbacks:    Array<(gameId: string, gameTitle: string, error: string, recentOutput?: string) => void> = [];
   // v0.99.35 — notifica esito lookup Heroic known-fixes (trovato/non
   // trovato), per il toggle overlay "Usa Known Fixes (Heroic)".
   private knownFixesCallbacks: Array<(gameId: string, gameTitle: string, found: boolean, verbs?: string[]) => void> = [];
@@ -762,7 +832,7 @@ class DownloadManager {
   private runningGameChecker: ((gameId: string) => boolean) | null = null;
 
   onComplete(cb: (gameId: string, gameTitle: string) => void)                { this.completeCallbacks.push(cb); }
-  onError(cb:    (gameId: string, gameTitle: string, error: string) => void) { this.errorCallbacks.push(cb); }
+  onError(cb:    (gameId: string, gameTitle: string, error: string, recentOutput?: string) => void) { this.errorCallbacks.push(cb); }
   onKnownFixesResult(cb: (gameId: string, gameTitle: string, found: boolean, verbs?: string[]) => void) { this.knownFixesCallbacks.push(cb); }
   setRunningGameChecker(fn: (gameId: string) => boolean) { this.runningGameChecker = fn; }
 
@@ -856,8 +926,14 @@ class DownloadManager {
     // Ubisoft Connect stesso.
     const gameRow = db.getGameById(gameId);
     const requiresLauncher = gameRow?.requiresLauncher;
-    const prefixPath    = store === 'Ubisoft'
-      ? getSharedPrefixBasePath('ubisoft-connect')
+    // v1.5.20-dev.10 — generalizzato: prima riconosceva SOLO Ubisoft
+    // Connect stesso (store === 'Ubisoft' hardcoded), ora qualunque
+    // launcher terzo presente nel registro (thirdPartyLaunchers.ts) —
+    // installare EA App/Battle.net/Rockstar in futuro userà la stessa
+    // scatola condivisa senza toccare questa riga.
+    const selfLauncherDef = getThirdPartyLauncherByStoreId(store);
+    const prefixPath    = selfLauncherDef
+      ? getSharedPrefixBasePath(selfLauncherDef.id)
       : requiresLauncher
         ? getSharedPrefixBasePath(requiresLauncher)
         : path.join(base, 'prefix');
@@ -958,7 +1034,15 @@ class DownloadManager {
       if (task.store === 'GOG Galaxy')  await this.runGOG(task);
       else if (task.store === 'Epic Games') await this.runEpic(task);
       else if (task.store === 'Amazon Games') await this.runAmazon(task);
-      else if (task.store === 'Ubisoft') await this.runUbisoftConnect(task);
+      else {
+        // v1.5.20-dev.10 — generalizzato da "solo Ubisoft" a "qualunque
+        // launcher terzo condiviso presente nel registro" — un nuovo
+        // plugin (EA App, Battle.net, Rockstar) non richiede più
+        // toccare questo dispatch, basta comparire in
+        // thirdPartyLaunchers.ts con lo storeId giusto.
+        const thirdPartyDef = getThirdPartyLauncherByStoreId(task.store);
+        if (thirdPartyDef) await this.runThirdPartyLauncherInstall(task, thirdPartyDef);
+      }
     } catch (err: any) {
       const msg = err?.stack ?? String(err);
       writeLog('error', `[DOWNLOAD ERROR] ${task.gameTitle}:\n${msg}`);
@@ -968,7 +1052,7 @@ class DownloadManager {
         type: 'error',
       });
       this.update(task, { status: 'error', error: String(err), speed: '0 MB/s' });
-      for (const cb of this.errorCallbacks) { try { cb(task.gameId, task.gameTitle, String(err)); } catch {} }
+      for (const cb of this.errorCallbacks) { try { cb(task.gameId, task.gameTitle, String(err), err?.recentOutput); } catch {} }
     }
   }
 
@@ -1541,31 +1625,37 @@ class DownloadManager {
   }
 
   // -------------------------------------------------------------------------
-  // Step 19d — Ubisoft Connect: nessun tool CLI scriptabile come
+  // Step 19d/dev.10 — Launcher terzi condivisi (Ubisoft Connect, e in
+  // futuro EA App/Battle.net/Rockstar): nessun tool CLI scriptabile come
   // legendary/lgogdownloader/nile, l'utente scarica l'installer a mano dal
   // sito ufficiale. "Download" per questo task finisce non appena
   // sappiamo dove si trova quel file — non lo eseguiamo qui dentro:
   // l'installer diventa l'executablePath di questo "gioco", il primo
   // lancio (pipeline Play già esistente) lo esegue, e alla chiusura
-  // scatta la verifica post-lancio già costruita (v0.99.35/36) — dove
-  // gameManager.ts ri-risolve l'eseguibile reale e registra il bootstrap
-  // del prefix condiviso. Nessuna fase installing_deps/creating_prefix
-  // qui: quelle risorse le prepara il flusso di lancio dei giochi Proton
-  // esistente, non serve duplicarle in questo task.
+  // scatta la verifica post-lancio (v0.99.35/36, ora delegata al plugin
+  // via onLauncherProcessClosed — vedi gameManager.ts) — dove il vero
+  // eseguibile viene ri-risolto e il bootstrap del prefix condiviso
+  // registrato. Nessuna fase installing_deps/creating_prefix qui: quelle
+  // risorse le prepara il flusso di lancio dei giochi Proton esistente,
+  // non serve duplicarle in questo task.
+  //
+  // v1.5.20-dev.10 — generalizzata da runUbisoftConnect(task) a
+  // runThirdPartyLauncherInstall(task, def): decisione esplicita con
+  // l'utente, NON un plugin unico — questa resta la sola parte
+  // davvero comune a qualunque launcher terzo (creazione prefix +
+  // ricerca installer), ogni plugin mantiene le proprie particolarità
+  // altrove (card, switch, libreria interna, rilevamento bootstrap).
   // -------------------------------------------------------------------------
 
-  private async runUbisoftConnect(task: DownloadTask) {
-    const def = getThirdPartyLauncherDefinition('ubisoft-connect');
+  private async runThirdPartyLauncherInstall(task: DownloadTask, def: ThirdPartyLauncherDefinition) {
+    const logTag = `[${def.displayName.toUpperCase()}]`;
 
     // Step 1 — prefix condivisa: stesso identico schema di runGOG/runEpic
     // (prepareWinePrefix condiviso), ma sul prefix CONDIVISO tra tutti i
     // giochi che dichiarano questa dipendenza (task.prefixPath è già
-    // risolto a getSharedPrefixBasePath('ubisoft-connect') in addTask),
-    // non uno isolato per-gioco. BUG TROVATO E CORRETTO: la prima
-    // versione di questa funzione saltava del tutto prefix+verb,
-    // andando dritta alla ricerca dell'installer — i verb scelti
-    // nell'overlay non venivano mai applicati davvero.
-    this.log(task, 'system', `[UBISOFT] Step 1 — Creazione/verifica prefix condivisa in: ${task.prefixPath}`);
+    // risolto a getSharedPrefixBasePath(def.id) in addTask), non uno
+    // isolato per-gioco.
+    this.log(task, 'system', `${logTag} Step 1 — Creazione/verifica prefix condivisa in: ${task.prefixPath}`);
     this.update(task, { status: 'creating_prefix', progress: 0, speed: '' });
     ensureDir(task.prefixPath);
     const wineEnv = resolveRunnerWineEnv(task.runner, task.prefixPath);
@@ -1575,12 +1665,9 @@ class DownloadManager {
     // trovato/non reale, es. un valore segnaposto mai sostituito con una
     // build Proton davvero installata), NON procediamo silenziosamente
     // creando un prefix Wine per una "scatola" che deve restare Proton.
-    // Bug reale trovato: il default 'Proton 8.0-4' della riga seedata è
-    // un segnaposto, non corrisponde a nessuna build davvero installata
-    // finché l'utente non ne sceglie una vera in Game Options.
     if (wineEnv.wineBin === 'wine') {
       throw new Error(
-        `[UBISOFT] Nessuna build Proton/GE-Proton risolta per il runner "${task.runner}" — ` +
+        `${logTag} Nessuna build Proton/GE-Proton risolta per il runner "${task.runner}" — ` +
         `seleziona una build Proton realmente installata in Game Options > Runner Bridge prima di installare.`
       );
     }
@@ -1598,20 +1685,18 @@ class DownloadManager {
       (t, level, msg) => this.log(t, level, msg),
     );
     if (!prefixResult.success) {
-      throw new Error(prefixResult.error ?? '[UBISOFT] Preparazione prefix fallita');
+      throw new Error(prefixResult.error ?? `${logTag} Preparazione prefix fallita`);
     }
-    this.log(task, 'system', `[UBISOFT] Step 1 OK — prefix pronta.`);
+    this.log(task, 'system', `${logTag} Step 1 OK — prefix pronta.`);
 
-    // Step 2 — dipendenze winetricks: indispensabili per un'installazione
-    // corretta di Ubisoft Connect (segnalato dall'utente), stesso
-    // meccanismo di runGOG/runEpic.
+    // Step 2 — dipendenze winetricks: stesso meccanismo di runGOG/runEpic.
     const verbs = filterVerbsForEnv(task.winetricksVerbs);
     if (verbs.length > 0 && binaryExists('winetricks')) {
-      this.log(task, 'system', `[UBISOFT] Step 2 — Verbs: ${verbs.join(', ')}`);
+      this.log(task, 'system', `${logTag} Step 2 — Verbs: ${verbs.join(', ')}`);
       this.update(task, { status: 'installing_deps', progress: 0 });
       for (let i = 0; i < verbs.length; i++) {
         const verb = verbs[i];
-        this.log(task, 'system', `[UBISOFT] Step 2 — ${verb} (${i + 1}/${verbs.length})`);
+        this.log(task, 'system', `${logTag} Step 2 — ${verb} (${i + 1}/${verbs.length})`);
         this.update(task, {
           progress:   Math.round((i / verbs.length) * 100),
           phaseLabel: `Dipendenze: ${verb}...`,
@@ -1622,24 +1707,24 @@ class DownloadManager {
           WINETRICKS_GUI: 'none',
           ...wineEnv.extraEnv,
         }, winetrickTimeoutFor(verb));
-        this.log(task, 'system', `[UBISOFT] Step 2 — ${verb}: OK`);
+        this.log(task, 'system', `${logTag} Step 2 — ${verb}: OK`);
       }
     } else if (task.winetricksVerbs.length > 0) {
-      this.log(task, 'error', `[UBISOFT] winetricks non trovato — dipendenze saltate`);
+      this.log(task, 'error', `${logTag} winetricks non trovato — dipendenze saltate`);
     }
     persistWinetricksVerbs(task.gameId, task.winetricksVerbs);
 
     // Step 3 — individua l'installer scaricato: nessun tool CLI
     // scriptabile come legendary/lgogdownloader/nile, l'utente lo scarica
     // a mano dal sito ufficiale (vedi installerUrl in thirdPartyLaunchers.ts).
-    const found = findInstallerInDownloads();
+    const found = findInstallerInDownloads(def.installerFilenameHints);
     if (!found) {
-      this.log(task, 'system', `[UBISOFT] Step 3 — Installer non trovato in ~/Downloads.`);
+      this.log(task, 'system', `${logTag} Step 3 — Installer non trovato in ${resolveDownloadsDir() ?? '~/Downloads'}.`);
       this.update(task, {
         status: 'awaiting_installer',
         progress: 0,
         phaseLabel: PHASE_LABELS.awaiting_installer,
-        downloadUrl: def?.installerUrl,
+        downloadUrl: def.installerUrl,
       });
       return; // nessun errore — il task resta in attesa, vedi continueInstaller/browseInstaller
     }
@@ -1650,7 +1735,7 @@ class DownloadManager {
   /** Segna il task completato con l'installer trovato come executablePath
    *  temporaneo — vedi commento esteso sopra su perché non lo eseguiamo qui. */
   private completeWithInstaller(task: DownloadTask, installerPath: string) {
-    this.log(task, 'system', `[UBISOFT] Installer: ${installerPath}`);
+    this.log(task, 'system', `[INSTALLER] ${installerPath}`);
     this.update(task, {
       status: 'completed',
       progress: 100,
@@ -1664,15 +1749,16 @@ class DownloadManager {
   }
 
   /** Chiamato dall'endpoint installer-continue: l'utente dice di aver
-   *  scaricato l'installer, ricontrolla ~/Downloads. */
+   *  scaricato l'installer, ricontrolla la cartella Download reale. */
   continueInstaller(gameId: string): { success: boolean; message: string } {
     const task = this.tasks.get(gameId);
     if (!task || task.status !== 'awaiting_installer') {
       return { success: false, message: 'Nessuna installazione in attesa per questo gioco.' };
     }
-    const found = findInstallerInDownloads();
+    const def = getThirdPartyLauncherByStoreId(task.store);
+    const found = findInstallerInDownloads(def?.installerFilenameHints);
     if (!found) {
-      return { success: false, message: 'Installer ancora non trovato in ~/Downloads.' };
+      return { success: false, message: `Installer ancora non trovato in ${resolveDownloadsDir() ?? '~/Downloads'}.` };
     }
     this.completeWithInstaller(task, found);
     return { success: true, message: 'Installer trovato, installazione avviata.' };
@@ -1680,16 +1766,19 @@ class DownloadManager {
 
   /** Chiamato dall'endpoint installer-browse: apre il file picker nativo
    *  (zenity/kdialog) — vedi filePicker.ts, unico punto da sostituire in
-   *  futuro con un file browser interno. */
+   *  futuro con un file browser interno (in arrivo — Fase A.4). */
   async browseInstaller(gameId: string): Promise<{ success: boolean; message: string }> {
     const task = this.tasks.get(gameId);
     if (!task || task.status !== 'awaiting_installer') {
       return { success: false, message: 'Nessuna installazione in attesa per questo gioco.' };
     }
+    const def = getThirdPartyLauncherByStoreId(task.store);
     const result = await browseForFile({
-      title: 'Seleziona l\'installer di Ubisoft Connect',
-      startDir: path.join(homedir(), 'Downloads'),
-      filter: { name: 'Installer Windows', extensions: ['exe'] },
+      title: `Seleziona l'installer di ${def?.displayName ?? task.gameTitle}`,
+      startDir: resolveDownloadsDir() ?? undefined,
+      // v1.5.20-dev.10 — richiesta utente: estesa a .msi/.cab, gli altri
+      // formati comuni per un installer Windows oltre al semplice .exe.
+      filter: { name: 'Installer Windows', extensions: ['exe', 'msi', 'cab'] },
     });
     if (result.outcome !== 'selected' || !result.path) {
       return { success: false, message: 'Nessun file selezionato.' };
@@ -1697,6 +1786,27 @@ class DownloadManager {
     this.completeWithInstaller(task, result.path);
     return { success: true, message: 'Installer selezionato, installazione avviata.' };
   }
+
+  /**
+   * v1.5.20-dev.12 — chiamato dall'endpoint installer-select: l'utente
+   * ha scelto il file tramite il file manager nativo controller-
+   * navigabile (Fase A.4), il path arriva già risolto dal client — a
+   * differenza di browseInstaller() sopra, qui NON si invoca alcun
+   * dialog nativo (zenity/kdialog), la selezione è già avvenuta
+   * nell'overlay in-app. Stessa identica validazione/completamento.
+   */
+  confirmInstallerPath(gameId: string, filePath: string): { success: boolean; message: string } {
+    const task = this.tasks.get(gameId);
+    if (!task || task.status !== 'awaiting_installer') {
+      return { success: false, message: 'Nessuna installazione in attesa per questo gioco.' };
+    }
+    if (!existsSync(filePath)) {
+      return { success: false, message: 'Il file selezionato non esiste più.' };
+    }
+    this.completeWithInstaller(task, filePath);
+    return { success: true, message: 'Installer selezionato, installazione avviata.' };
+  }
+
 
 
   //
@@ -1717,7 +1827,23 @@ class DownloadManager {
       });
       this.procs.set(task.gameId, proc);
 
+      // v1.5.20-dev.13 — bug reale trovato investigando un errore utente:
+      // stdout/stderr venivano letti SOLO per alimentare il parser di
+      // progresso, mai scritti nel log — un fallimento (exit != 0)
+      // produceva solo "legendary exited with code 1" senza alcuna
+      // indicazione del perché, scartando in silenzio il messaggio
+      // d'errore vero (spesso l'unica cosa utile per capire cosa è
+      // successo: auth scaduta, gioco non posseduto/non scaricabile,
+      // spazio esaurito, ecc.). Anello circolare delle ultime righe
+      // (non l'intero output, alcuni tool sono verbosi) — scritto nel
+      // log SOLO se il processo fallisce, altrimenti scartato come
+      // prima per non gonfiare il log di ogni download riuscito.
+      const RECENT_LINES_CAP = 40;
+      const recentLines: string[] = [];
+
       const onLine = (line: string) => {
+        recentLines.push(line);
+        if (recentLines.length > RECENT_LINES_CAP) recentLines.shift();
         const parsed = parser(line.trim());
         if (parsed && task.status === 'downloading') {
           // v0.99.35 — Math.max() qui è ora solo una rete di sicurezza
@@ -1752,8 +1878,25 @@ class DownloadManager {
 
       proc.on('close', (code: number | null) => {
         this.procs.delete(task.gameId);
-        if (code === 0 || code === null) resolve();
-        else reject(new Error(`${bin} exited with code ${code}`));
+        if (code === 0 || code === null) {
+          resolve();
+        } else {
+          // v1.5.20-dev.13 — le ultime righe reali di stdout/stderr,
+          // prima scartate — quasi sempre contengono il motivo vero del
+          // fallimento (es. "Game exited: ..." di legendary), non solo
+          // il codice di uscita nudo.
+          if (recentLines.length > 0) {
+            this.log(task, 'error', `[${bin.toUpperCase()}] Ultime righe prima del fallimento:\n${recentLines.join('\n')}`);
+          }
+          const err = new Error(`${bin} exited with code ${code}`);
+          // v1.5.20-dev.14 — l'output reale viaggia insieme all'errore
+          // (non solo loggato) cosi chi lo riceve più a valle (vedi
+          // errorCallbacks/onError in startTask) può riconoscere un
+          // fallimento definitivo specifico del proprio store, senza
+          // dover riparsare il log testuale.
+          (err as any).recentOutput = recentLines.join('\n');
+          reject(err);
+        }
       });
 
       proc.on('error', (err: Error) => reject(err));

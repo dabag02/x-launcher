@@ -1,4 +1,4 @@
-export type StoreType = 'Steam' | 'Epic Games' | 'GOG Galaxy' | 'Ubisoft' | 'EA App' | 'Amazon Games' | 'Battle.net' | 'Classic Console' | 'Plugin';
+export type StoreType = 'Steam' | 'Epic Games' | 'GOG Galaxy' | 'Ubisoft' | 'EA App' | 'Amazon Games' | 'Battle.net' | 'Rockstar Games Launcher' | 'Classic Console' | 'Plugin';
 
 export type RunnerType = 'Proton 8.0-4' | 'Proton-GE-8.25' | 'Wine-Lutris' | 'Native' | 'Proton Experimental' | 'DOSBox' | 'RetroArch' | 'ScummVM' | 'Steam Native';
 
@@ -181,6 +181,19 @@ export interface Game {
    * vincolato a sole build Proton/GE-Proton, mai Wine.
    */
   requiresLauncher?: string;
+
+  /**
+   * v1.5.20-dev.14 — alcuni giochi non hanno MAI file scaricabili tramite
+   * il proprio store d'origine (es. titoli Ubisoft riscattati su Epic —
+   * legendary lo scopre solo durante il tentativo stesso, "does not ship
+   * executable game files", non prima — vedi CHANGELOG.md). Una volta
+   * riconosciuto (StorePlugin.detectUnrecoverableInstallFailure), evita
+   * di lasciare che l'utente riprovi un'installazione destinata a
+   * fallire sempre — la card mostra un invito ad installare dal
+   * launcher condiviso invece del normale pulsante "Installa". false di
+   * default per qualunque store che non ha questo concetto.
+   */
+  storeInstallUnavailable?: boolean;
 
   /**
    * Step 19d, Fase 1 — marca la card virtuale "installer/launcher" di un

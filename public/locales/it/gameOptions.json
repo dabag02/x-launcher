@@ -3,6 +3,7 @@
   "notInstalled": "⬇ non installato",
   "runnerBridge": "Runner Bridge",
   "active": "Attivo",
+  "runnerInheritedFromLauncher": "Ereditato dal launcher condiviso — modificalo dalla sua card",
   "retroarchCore": "RetroArch Core",
   "notInstalledStatus": "Non installato",
   "available": "Disponibile",

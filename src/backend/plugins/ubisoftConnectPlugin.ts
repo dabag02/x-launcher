@@ -16,11 +16,28 @@
  * reale prima di scrivere questo file).
  */
 import { StorePlugin } from './base';
-import { Game } from '../../types';
+import { Game, LogEntry } from '../../types';
+import path from 'path';
 import * as db from '../db';
 import { getThirdPartyLauncherDefinition } from './thirdPartyLaunchers';
 import { compatibilityManager } from '../compatibilityManager';
-import { isLauncherBootstrapped } from '../sharedLauncherManager';
+import { isLauncherBootstrapped, markLauncherBootstrapped, resolveSharedPrefixExecutionPath } from '../sharedLauncherManager';
+import { findInstalledLauncherExe } from '../downloadManager';
+import { writeLog } from '../logger';
+
+/**
+ * v1.5.20-dev.10 — replica minima di GameManager.addLog(): i plugin non
+ * hanno un riferimento a GameManager, ma onLauncherProcessClosed
+ * (sotto) deve restare visibile nel Debug Console UI esattamente come
+ * prima (era `this.addLog(...)` in gameManager.ts, non solo un log su
+ * file) — stessa formattazione timestamp, stesso doppio scritto
+ * (file + DB persistito).
+ */
+function pluginLog(message: string, type: LogEntry['type'] = 'system') {
+  const timestamp = new Date().toLocaleTimeString([], { hour12: false });
+  db.insertLog({ timestamp, message, type });
+  writeLog(type, message);
+}
 
 // Id stabile — mai generato dinamicamente, un solo launcher Ubisoft
 // Connect possibile nel sistema.
@@ -118,5 +135,37 @@ export class UbisoftConnectPlugin extends StorePlugin {
 
   async uninstallGame(_id: string) {
     return { success: true };
+  }
+
+  /**
+   * v1.5.20-dev.10 — spostato qui da gameManager.ts (era un `if
+   * (game.store === 'Ubisoft' && ...)` centrale hardcoded) — vedi
+   * StorePlugin.onLauncherProcessClosed per il perché. Se il "gioco"
+   * appena chiuso è Ubisoft Connect stesso e non è ancora bootstrappato,
+   * il processo appena chiuso era l'INSTALLER (executablePath punta
+   * ancora al file scaricato in Downloads, vedi
+   * downloadManager.runThirdPartyLauncherInstall) — ora che l'utente lo
+   * ha eseguito, cerchiamo il vero UbisoftConnect.exe dentro il prefix
+   * condiviso e lo registriamo come bootstrappato.
+   * BUG REALE TROVATO su hardware utente (invariato dalla versione
+   * precedente): findMainExe() sull'intero drive_c prendeva un'utility
+   * di sistema Wine (Explorer) invece del vero eseguibile —
+   * findInstalledLauncherExe() restringe la ricerca a Program Files* e
+   * prova prima l'hint dichiarato nel registro (thirdPartyLaunchers.ts).
+   */
+  async onLauncherProcessClosed(game: Game): Promise<void> {
+    if (game.id !== UBISOFT_CONNECT_GAME_ID || isLauncherBootstrapped('ubisoft-connect')) return;
+    const realPrefixRoot = resolveSharedPrefixExecutionPath('ubisoft-connect');
+    const driveC = path.join(realPrefixRoot, 'drive_c');
+    const def = getThirdPartyLauncherDefinition('ubisoft-connect');
+    const realExe = findInstalledLauncherExe(driveC, def?.executableRelPathHint);
+    if (realExe) {
+      db.updateGameConfig(game.id, { executablePath: realExe });
+      const relExe = path.relative(driveC, realExe);
+      markLauncherBootstrapped('ubisoft-connect', game.runner ?? 'Proton 8.0-4', relExe);
+      pluginLog(`[UBISOFT] Bootstrap completato — eseguibile reale: ${realExe}`, 'system');
+    } else {
+      pluginLog(`[UBISOFT] Eseguibile reale non trovato dopo la chiusura dell'installer — l'utente dovrà riprovare il lancio.`, 'warning');
+    }
   }
 }

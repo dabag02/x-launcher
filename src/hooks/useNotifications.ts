@@ -38,6 +38,9 @@ export function useNotifications() {
           rawLog:         n.raw_log,
           primaryAction:  n.primary_action   ? JSON.parse(n.primary_action)   : undefined,
           secondaryAction:n.secondary_action ? JSON.parse(n.secondary_action) : undefined,
+          tertiaryAction: n.tertiary_action  ? JSON.parse(n.tertiary_action)  : undefined,
+          linkUrl:        n.link_url ?? undefined,
+          linkLabel:      n.link_label ?? undefined,
           source:         n.source,
           aiProvider:     n.ai_provider,
           confidence:     n.confidence,
@@ -79,7 +82,15 @@ export function useNotifications() {
     // a chi apre il pannello notifiche anche solo un po' più tardi.
     // 'info' resta con auto-dismiss: quello copre avvisi genuinamente
     // transitori (toggle modalità, passaggio a desktop, ecc.).
-    if (n.type === 'info') {
+    //
+    // v1.5.20-dev.27 — stessa correzione applicata al gemello via
+    // EventSource in App.tsx (bug reale confermato dall'utente lì):
+    // una notifica con un'azione da compiere (primaryAction/
+    // secondaryAction/tertiaryAction) non è mai "genuinamente
+    // transitoria" anche se di type='info' — deve restare finché
+    // l'utente non decide davvero.
+    const isActionable = !!(n.primaryAction || n.secondaryAction || n.tertiaryAction);
+    if (n.type === 'info' && !isActionable) {
       setTimeout(() => {
         setNotifications(prev =>
           prev.map(p => p.id === notif.id && p.status === 'pending' ? { ...p, status: 'dismissed' } : p)

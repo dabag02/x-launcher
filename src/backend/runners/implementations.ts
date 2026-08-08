@@ -22,7 +22,7 @@ import { DATA_DIR } from '../paths';
 // Utility helpers
 // ---------------------------------------------------------------------------
 
-function expandHome(p: string): string {
+export function expandHome(p: string): string {
   // Espande ~ e variabili d'ambiente tipo $HOME, $XDG_DATA_HOME, ecc.
   const withHome = p.startsWith('~') ? path.join(homedir(), p.slice(1)) : p;
   return withHome.replace(/\$([A-Z_][A-Z0-9_]*)/g, (_, name) =>

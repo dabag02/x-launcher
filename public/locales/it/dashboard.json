@@ -83,5 +83,17 @@
     "displayModeBody": "Preferenza salvata — sarà attiva al prossimo riavvio della Dashboard.",
     "switchToDesktopTitle": "Passaggio al Desktop",
     "switchToDesktopBody": "X-Launcher resta in esecuzione in background — torna qui dal menu utente di XFCE."
+  },
+  "fileBrowser": {
+    "title": "Scegli file",
+    "up": "Risali",
+    "home": "Home",
+    "downloads": "Downloads",
+    "removableMedia": "Supporti rimovibili",
+    "filterOn": "Solo file installer",
+    "filterOff": "Tutti i file",
+    "emptyFolder": "Cartella vuota",
+    "noRemovableMedia": "Nessun supporto rimovibile inserito",
+    "communicationError": "Errore di comunicazione col demone."
   }
 }

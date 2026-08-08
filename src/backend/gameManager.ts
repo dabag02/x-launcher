@@ -1,4 +1,4 @@
-import { Game, Store, LogEntry, StoreType, DownloadTask } from '../types';
+import { Game, Store, LogEntry, StoreType, DownloadTask, CompatibilityProfile } from '../types';
 import { readFileSync } from 'fs';
 import { execFileSync, spawn } from 'child_process';
 import path from 'path';
@@ -10,13 +10,12 @@ import { SteamPlugin } from './plugins/steamPlugin';
 import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
-import { UbisoftConnectPlugin, UBISOFT_CONNECT_GAME_ID } from './plugins/ubisoftConnectPlugin';
-import { resolveSharedPrefixExecutionPath, markLauncherBootstrapped, isLauncherBootstrapped } from './sharedLauncherManager';
-import { findInstalledLauncherExe } from './downloadManager';
-import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
+import { UbisoftConnectPlugin } from './plugins/ubisoftConnectPlugin';
+import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath } from './sharedLauncherManager';
+import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
-import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary } from './runners/implementations';
+import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary, expandHome } from './runners/implementations';
 import { downloadManager, resolveGogExe, resolveRunnerWineEnv, storeDir, slugFromId } from './downloadManager';
 import { metadataManager } from './metadataManager';
 import { compatibilityManager } from './compatibilityManager';
@@ -287,7 +286,7 @@ class GameManager {
 
   private startGameExitPolling() {
     if (this.gameExitPollTimer) return;
-    this.gameExitPollTimer = setInterval(() => {
+    this.gameExitPollTimer = setInterval(async () => {
       // v0.99.38 — try/catch strutturale: un'eccezione non gestita
       // dentro un setInterval fa crashare l'intero processo Node (visto
       // in pratica: un bug nella scrittura SQLite qui dentro ha buttato
@@ -415,30 +414,33 @@ class GameManager {
           this.addLog(`[LAUNCH] ${before.gameTitle}: processo tracciato chiuso dopo ${Math.round(elapsedMs / 1000)}s, ma processi reali ancora attivi in "${installDirName}" — trattato come lancio riuscito, non fallimento.`, 'system');
         }
 
-        // Step 19d — se il "gioco" appena chiuso è Ubisoft Connect stesso
-        // e non è ancora bootstrappato, il processo appena chiuso era
-        // l'INSTALLER (executablePath punta ancora al file scaricato in
-        // ~/Downloads, vedi downloadManager.runUbisoftConnect) — ora che
-        // l'utente lo ha eseguito, cerchiamo il vero UbisoftConnect.exe
-        // dentro il prefix condiviso e lo registriamo come bootstrappato.
-        // BUG REALE TROVATO su hardware utente: findMainExe() sull'intero
-        // drive_c prendeva un'utility di sistema Wine (Explorer) invece
-        // del vero eseguibile — findInstalledLauncherExe() restringe la
-        // ricerca a Program Files* e prova prima l'hint dichiarato nel
-        // registro (thirdPartyLaunchers.ts).
-        if (game.store === 'Ubisoft' && game.id === UBISOFT_CONNECT_GAME_ID && !isLauncherBootstrapped('ubisoft-connect')) {
-          const realPrefixRoot = resolveSharedPrefixExecutionPath('ubisoft-connect');
-          const driveC = path.join(realPrefixRoot, 'drive_c');
-          const def = getThirdPartyLauncherDefinition('ubisoft-connect');
-          const realExe = findInstalledLauncherExe(driveC, def?.executableRelPathHint);
-          if (realExe) {
-            db.updateGameConfig(game.id, { executablePath: realExe });
-            const relExe = path.relative(driveC, realExe);
-            markLauncherBootstrapped('ubisoft-connect', game.runner ?? 'Proton 8.0-4', relExe);
-            this.addLog(`[UBISOFT] Bootstrap completato — eseguibile reale: ${realExe}`, 'system');
-          } else {
-            this.addLog(`[UBISOFT] Eseguibile reale non trovato dopo la chiusura dell'installer — l'utente dovrà riprovare il lancio.`, 'warning');
-          }
+        // v1.5.20-dev.10 — generalizzato: prima un `if (game.store ===
+        // 'Ubisoft' && game.id === UBISOFT_CONNECT_GAME_ID && ...)`
+        // hardcoded qui — vedi StorePlugin.onLauncherProcessClosed per
+        // il perché del cambio. gameManager.ts resta il coordinatore
+        // (tempo di gioco già calcolato sopra), delega la parte
+        // specifica del launcher al plugin giusto — un plugin che non
+        // rappresenta un launcher condiviso (Steam, GOG, Epic...) eredita
+        // il no-op di default, nessun comportamento cambiato per loro.
+        const ownerPlugin = this.plugins.find(p => p.id === game.store);
+        if (ownerPlugin) await ownerPlugin.onLauncherProcessClosed(game);
+
+        // v1.5.20-dev.22 — richiesta utente: il gioco appena chiuso
+        // usava un launcher condiviso — se quel launcher risulta ANCORA
+        // in esecuzione (non l'ha chiuso lui stesso, né l'utente a
+        // mano), chiediamo esplicitamente cosa fare invece di deciderlo
+        // noi. Filosofia della Dashboard: mai un'automazione silenziosa
+        // su una scelta che ha un impatto reale (RAM/CPU occupate vs.
+        // sessione pronta per il prossimo gioco che ne dipende).
+        if (game.requiresLauncher && isSharedLauncherRunning(game.requiresLauncher)) {
+          const launcherDef = getThirdPartyLauncherDefinition(game.requiresLauncher);
+          notificationEngine.emit({
+            type: 'shared-launcher-idle',
+            gameId: before.gameId,
+            gameTitle: before.gameTitle,
+            launcherId: game.requiresLauncher,
+            launcherName: launcherDef?.displayName ?? game.requiresLauncher,
+          });
         }
 
         if (game.verified) {
@@ -527,7 +529,11 @@ class GameManager {
         if (Object.keys(configUpdate).length > 0) {
           db.updateGameConfig(task.gameId, configUpdate);
         }
-        if (task.store === 'Ubisoft' && !isLauncherBootstrapped('ubisoft-connect')) {
+        // v1.5.20-dev.10 — generalizzato da "solo Ubisoft" a "qualunque
+        // launcher terzo condiviso presente nel registro, non ancora
+        // bootstrappato" — stesso ponte store→launcher usato altrove.
+        const thirdPartyDef = getThirdPartyLauncherByStoreId(task.store);
+        if (thirdPartyDef && !isLauncherBootstrapped(thirdPartyDef.id)) {
           this.addLog(`[DOWNLOAD] ${task.gameTitle}: installer individuato (${task.executablePath}) — clicca di nuovo la card per eseguirlo e completare l'installazione.`, 'system');
         } else if (task.executablePath) {
           this.addLog(`[DOWNLOAD] ${task.gameTitle} completato. Exe: ${task.executablePath}`, 'system');
@@ -712,6 +718,41 @@ class GameManager {
         }
       } catch (e) {
         this.addLog(`[SYNC] legendary sync failed: ${e}`, 'warning');
+      }
+
+      // -----------------------------------------------------------------------
+      // v1.5.20-dev.14 — richiesta utente: giochi con requiresLauncher che
+      // non risultano ancora installati — es. titoli Ubisoft riscattati su
+      // Epic (nessun file scaricabile dal proprio store, vedi
+      // CHANGELOG.md), ma vale anche per qualunque gioco che semplicemente
+      // è stato installato dall'utente DIRETTAMENTE dal launcher condiviso
+      // senza passare da qui. Cerca l'eseguibile dentro il prefix
+      // condiviso già noto (findGameExeInSharedPrefix, sharedLauncherManager.ts)
+      // — mai un'intera libreria scansionata, solo la dipendenza già
+      // dichiarata per QUESTO gioco specifico, quindi nessuna riga
+      // duplicata nella collezione totale.
+      // -----------------------------------------------------------------------
+      try {
+        for (const game of db.getAllGames()) {
+          if (!game.requiresLauncher || game.isInstalled) continue;
+          if (!isLauncherBootstrapped(game.requiresLauncher)) continue; // il launcher stesso non è ancora pronto
+          const exe = findGameExeInSharedPrefix(game.requiresLauncher, game.title);
+          if (exe) {
+            // v1.5.20-dev.23 — scrive anche prefixPath, non solo
+            // executablePath: prima restava vuoto per sempre per questa
+            // categoria di gioco (l'installazione tramite lo store
+            // d'origine non completa mai), un dato incoerente sul DB
+            // anche se il lancio ora lo risolve dinamicamente a monte
+            // (launchGame) e non dipende più da questo campo per
+            // funzionare — corretto comunque per chiunque altro lo
+            // legga in futuro.
+            db.updateGameConfig(game.id, { executablePath: exe, prefixPath: getSharedPrefixBasePath(game.requiresLauncher) });
+            db.updateGameStatus(game.id, true, 'Ready to Launch');
+            this.addLog(`[SYNC] ${game.title} trovato installato nel prefix condiviso di "${game.requiresLauncher}" — eseguibile: ${exe}`, 'system');
+          }
+        }
+      } catch (e) {
+        this.addLog(`[SYNC] shared-launcher reconciliation failed: ${e}`, 'warning');
       }
     } catch (e) {
       this.addLog(`[SYNC] external sync failed: ${e}`, 'warning');
@@ -917,6 +958,17 @@ class GameManager {
     this.addLog(`[DAEMON] ${allGames.length} titoli persistiti su DB.`, 'system');
     this.notifyLibraryRefreshed();
 
+    // v1.5.20-dev.15 — bug reale segnalato dall'utente: la riconciliazione
+    // requiresLauncher (dev.14) non si attivava mai dopo un'installazione
+    // fatta dal launcher condiviso, perché syncExternalInstallStates()
+    // veniva chiamata SOLO da init() — una volta sola, all'avvio del
+    // demone — mai dal refresh periodico (startPeriodicRefresh, ogni 5
+    // minuti). Senza un riavvio esplicito del demone, la card Epic non
+    // aveva alcuna occasione di rilevare l'installazione avvenuta altrove.
+    // Chiamata qui: gira ad ogni refreshLibrary(), sia periodico sia al
+    // boot — nessun riavvio richiesto perché la riconciliazione si attivi.
+    await this.syncExternalInstallStates();
+
     // FASE 2: arricchisce i metadati in background (non blocca l'avvio)
     setImmediate(async () => {
       // Carica i dati già presenti nel DB per evitare re-fetch inutili
@@ -961,6 +1013,17 @@ class GameManager {
       this.notifyLibraryRefreshed();
       this.addLog(`[DAEMON] Metadati aggiornati per ${enriched.length} titoli.`, 'system');
     });
+  }
+
+  /**
+   * v1.5.20-dev.14 — lookup pubblico dello StorePlugin proprietario di
+   * uno store — prima solo interno (`this.plugins.find`, usato altrove
+   * in questo stesso file), serve ora anche a server.ts per delegare
+   * detectUnrecoverableInstallFailure() al plugin giusto senza dover
+   * esporre l'intero array `plugins` (resta privato).
+   */
+  getPluginForStore(storeId: string): StorePlugin | undefined {
+    return this.plugins.find(p => p.id === storeId);
   }
 
   getGames(query?: {
@@ -1076,12 +1139,73 @@ class GameManager {
       return { success: false, message: `Plugin "${storePlugin.name}" disabilitato` };
     }
 
+    // v1.5.20-dev.14 — richiesta utente: requiresLauncher non veniva mai
+    // letto al momento del LANCIO (solo all'installazione, per condividere
+    // il prefix) — un buco reale trovato discutendo il caso Watch Dogs 2:
+    // molti giochi Ubisoft/EA verificano che il proprio launcher sia in
+    // esecuzione per DRM/funzioni online, ma nulla lo avviava mai in
+    // automatico. Solo se non già in esecuzione (isSharedLauncherRunning,
+    // stesso pattern pgrep -f già usato altrove in questo file).
+    if (game.requiresLauncher && !isSharedLauncherRunning(game.requiresLauncher)) {
+      this.addLog(`[LAUNCH] Avvio launcher condiviso "${game.requiresLauncher}" insieme a ${game.title}...`, 'system');
+      const launcherResult = await launchSharedLauncher(game.requiresLauncher).catch(err => {
+        this.addLog(`[LAUNCH] Avvio launcher condiviso fallito (non blocca ${game.title}): ${err}`, 'warning');
+        return null;
+      });
+      // v1.5.20-dev.17 — BUG REALE segnalato dall'utente: il gioco veniva
+      // lanciato subito dopo (fire-and-forget, nessuna attesa) — il
+      // launcher condiviso appena avviato impiega qualche secondo per
+      // completare login/sincronizzazione libreria, e molti giochi
+      // Ubisoft verificano la sua presenza/API al proprio avvio,
+      // fallendo silenziosamente se lanciati troppo presto (sintomo
+      // osservato: il gioco si chiude subito, Wine apre il proprio file
+      // manager). Nessuna API per sapere "è davvero pronto" — margine
+      // fisso, stesso principio già usato altrove nel progetto
+      // (WINEBOOT_TIMEOUT_MS ecc.). NON verificato quanto sia sufficiente
+      // su hardware reale — un valore di partenza, non una garanzia.
+      if (launcherResult?.success) {
+        this.addLog(`[LAUNCH] Attesa qualche secondo perché il launcher condiviso completi l'avvio...`, 'system');
+        await new Promise(resolve => setTimeout(resolve, 8000));
+      }
+    }
+
     // Carica il profilo compat dal DB se esiste
     const profile = db.getCompatProfile(id);
-    const runner = this.allRunners.get(game.runner);
+
+    // v1.5.20-dev.23 — richiesta utente: un gioco con requiresLauncher
+    // non deve MAI usare un proprio runner/prefix indipendenti — deve
+    // sempre ereditare quelli del launcher condiviso. Motivo verificato
+    // dal vivo, non teorico: un secondo `proton run`/`umu-run` con una
+    // build DIVERSA sulla STESSA prefix riproduce esattamente il
+    // mismatch di versione wine/wineserver (931/957) diagnosticato
+    // durante il debug di winebrowser in questa stessa sessione — un
+    // solo wineserver per prefix significa anche una sola versione
+    // ammessa alla volta. Il percorso leggero (dev.21,
+    // launchGameInSharedPrefix) era già corretto per costruzione — legge
+    // il runner dal launcher, mai da game.runner. Questo fix allinea
+    // anche il percorso di riserva sotto, che prima leggeva ancora
+    // game.runner/game.prefixPath — sbagliati per questa categoria di
+    // gioco: l'installazione tramite lo store d'origine non completa mai
+    // (vedi CHANGELOG.md, saga Watch Dogs 2), quindi quei due campi
+    // restano vuoti o stantii sul DB.
+    let effectiveRunnerId  = game.runner;
+    let effectivePrefixPath = game.prefixPath;
+    if (game.requiresLauncher) {
+      const launcherGame = db.getGameById(`${game.requiresLauncher}-launcher`);
+      if (launcherGame?.runner && launcherGame.runner !== game.runner) {
+        this.addLog(
+          `[LAUNCH] ${game.title}: runner "${game.runner}" ignorato, ereditato "${launcherGame.runner}" dal launcher condiviso "${game.requiresLauncher}" — una prefix condivisa richiede la stessa build Proton per ogni gioco che la usa.`,
+          'system'
+        );
+      }
+      effectiveRunnerId   = launcherGame?.runner ?? game.runner;
+      effectivePrefixPath = getSharedPrefixBasePath(game.requiresLauncher);
+    }
+
+    const runner = this.allRunners.get(effectiveRunnerId);
     if (!runner) {
-      this.addLog(`[DAEMON] Runner "${game.runner}" non disponibile per ${game.title}`, 'error');
-      return { success: false, message: `Runner "${game.runner}" non trovato` };
+      this.addLog(`[DAEMON] Runner "${effectiveRunnerId}" non disponibile per ${game.title}`, 'error');
+      return { success: false, message: `Runner "${effectiveRunnerId}" non trovato` };
     }
 
     this.addLog(`[DAEMON] Avvio ${game.title} via ${runner.name}`, 'system');
@@ -1092,23 +1216,205 @@ class GameManager {
     // nella cronologia della tray.
     db.recordGameLaunch(id);
 
-    // Se il gioco ha una prefix e ci sono verbs nel profilo compat,
-    // installa quelli eventualmente aggiunti post-installazione prima di avviare.
-    // v1.1.117-dev.1 — bug reale corretto: prima usava sempre
-    // `WINEPREFIX: game.prefixPath` con wine di sistema, indipendentemente
-    // dal runner selezionato — per un runner Proton la prefix vera vive
-    // in `<prefixPath>/pfx` (non nella cartella "contenitore" stessa) e
-    // serve il binario wine INCLUSO in quella build di Proton, non quello
-    // di sistema (stesso identico calcolo già usato per l'installazione,
-    // resolveRunnerWineEnv — ora condiviso invece di duplicato/sbagliato
-    // qui). Prima di questo fix, il "ricontrollo dipendenze ad ogni
-    // lancio" veniva silenziosamente eseguito nel posto sbagliato per
-    // qualunque gioco lanciato con un runner Proton/Proton-GE.
-    if (game.prefixPath && profile?.winetricksVerbs && profile.winetricksVerbs.length > 0) {
-      const wineEnv = resolveRunnerWineEnv(game.runner, game.prefixPath);
+    // v1.5.20-dev.20 — BUG REALE CONFERMATO CON LOG DELL'UTENTE (secondo
+    // giro): dev.18/19 avevano spostato la riconciliazione verb per
+    // girare DOPO il lancio, in parallelo al gioco già in esecuzione —
+    // ma alcuni di quei verb (dxvk, vkd3d, d3dcompiler...) SOSTITUISCONO
+    // DLL dentro la STESSA prefix Wine che il gioco sta usando in quel
+    // momento. Per Ubisoft Connect (dev.18/19) è passato inosservato,
+    // ma per LEGO Indiana Jones (Amazon/nile) la riconciliazione
+    // concorrente ha impedito al gioco di restare in esecuzione — stessa
+    // classe di problema per cui le guide DXVK raccomandano sempre di
+    // chiudere il gioco prima di reinstallarlo: sostituire DLL mentre
+    // sono già caricate in memoria da un processo attivo è una causa
+    // nota di instabilità. Riportata PRIMA del lancio (sequenziale, come
+    // in origine — mai più in parallelo con un gioco già avviato), ma
+    // stavolta `await`-ata invece che fire-and-forget: la conversione a
+    // execFileAsync (dev.19) resta comunque necessaria e sufficiente per
+    // il problema originale (demone/Dashboard che restavano sordi ad
+    // ogni altra richiesta, incluso il polling di tray.py) — il demone
+    // resta reattivo per TUTTA la riconciliazione, il gioco parte solo
+    // dopo che la prefix è stabile, esattamente come prima di dev.18 ma
+    // senza più bloccare il resto del sistema nel frattempo.
+    //
+    // v1.5.20-dev.25 — BUG REALE CONFERMATO DALL'UTENTE, stessa classe
+    // di dev.20 ma con un "già attivo" diverso: quando game.requiresLauncher
+    // è impostato, dev.23 ha reso effectivePrefixPath sempre corretto
+    // (la prefix condivisa vera) — ma questo significa che, se il
+    // launcher condiviso è GIÀ in esecuzione al momento del lancio (il
+    // caso comune: l'utente lancia un secondo gioco Ubisoft mentre
+    // Ubisoft Connect è ancora aperto), questa riconciliazione ora
+    // interroga davvero quella prefix (prima, con prefixPath sbagliato,
+    // era di fatto un no-op per questa categoria di gioco) PROPRIO
+    // MENTRE il launcher la sta attivamente usando — `winetricks
+    // list-installed` (il secondo blocco, che gira SEMPRE se prefixPath
+    // è valorizzato, indipendentemente dai verb dichiarati sul gioco
+    // stesso) può disturbare un processo GUI già attivo sulla stessa
+    // prefix. Sintomo osservato: Ubisoft Connect torna in primo piano
+    // dopo la chiusura del gioco con la finestra completamente nera,
+    // seguito da una notifica di errore "rundll32" e l'apertura del
+    // file manager di Wine — lo script diagnostico non lo riproduce mai
+    // perché non fa ALCUNA riconciliazione verb. La riconciliazione
+    // della prefix condivisa resta comunque coperta: avviene già,
+    // sequenziale e sicura, quando è IL LAUNCHER STESSO a essere
+    // lanciato dalla sua card — un gioco dipendente non deve rifarla.
+    if (game.requiresLauncher) {
+      this.addLog(`[LAUNCH] ${game.title}: riconciliazione verb saltata — usa il launcher condiviso "${game.requiresLauncher}", la cui prefix viene riconciliata quando è lui stesso a essere lanciato, mai da un gioco dipendente (evita di disturbare una sessione già attiva).`, 'system');
+    } else {
+      await this.reconcileWinetricksVerbs(id, game, profile, effectiveRunnerId, effectivePrefixPath).catch(err => {
+        this.addLog(`[LAUNCH] Riconciliazione verb fallita (si procede comunque col lancio): ${err}`, 'warning');
+      });
+    }
+
+    try {
+      // Log dettagliato pre-lancio: runner version + exe
+      const runnerVersion = await runner.version().catch(() => 'n/a');
+      this.addLog(`[LAUNCH] Runner: ${runner.name} — versione: ${runnerVersion}`, 'info');
+      if (game.executablePath) {
+        const displayPath = game.executablePath.replace(
+          /\$([A-Z_][A-Z0-9_]*)/g,
+          (_, name) => process.env[name] ?? `$${name}`
+        ).replace(/^~/, process.env.HOME ?? '~');
+        this.addLog(`[LAUNCH] Exe: ${displayPath}`, 'info');
+      } else if (!game.steamAppId && !game.scummvmId) {
+        this.addLog(`[LAUNCH] ⚠ Nessun executablePath configurato per ${game.title}`, 'error');
+      }
+      if (overrideLaunchArgs !== undefined) {
+        this.addLog(`[LAUNCH] ⚠ Argomenti di lancio TEMPORANEI in test (non salvati nel DB): "${overrideLaunchArgs}"`, 'system');
+      }
+
+      const effectiveLaunchArgs = overrideLaunchArgs !== undefined ? overrideLaunchArgs : game.launchArgs;
+
+      const runnerConfig = {
+        env:      profile?.customEnv,
+        prefix:   effectivePrefixPath,
+        args:     effectiveLaunchArgs ? shellSplitArgs(effectiveLaunchArgs) : undefined,
+        cwd:      game.launchCwd,
+        fsr:      profile?.fsr      ?? false,
+        gameMode: profile?.gameMode ?? false,
+        mangohud: profile?.mangohud ?? 0,
+        eac:      profile?.eac      ?? false,
+        battleye: profile?.battleye ?? false,
+        umuRun:   profile?.umuRun   ?? false,
+      };
+      // v1.5.20-dev.21 — richiesta utente, disegno esplicitamente discusso
+      // e verificato a mano prima di scrivere codice: quando il gioco
+      // dichiara requiresLauncher, il launcher condiviso è già stato
+      // avviato (o lo si è appena atteso, vedi sopra prima di
+      // db.recordGameLaunch) — invece di far ripartire da capo l'intero
+      // `proton run`/`umu-run` (un secondo container Steam Linux Runtime
+      // sulla STESSA prefix), il gioco può caricarsi DIRETTAMENTE nella
+      // sessione Wine già attiva (launchGameInSharedPrefix — vedi il
+      // commento esteso lì per il perché funziona e i limiti noti).
+      // Condizioni per usarlo, tutte necessarie: (a) requiresLauncher
+      // impostato, (b) executablePath già risolto (la riconciliazione di
+      // syncExternalInstallStates lo trova), (c) il launcher condiviso
+      // risulta DAVVERO in esecuzione a questo punto (non solo "abbiamo
+      // provato ad avviarlo" — se il tentativo sopra è fallito, niente
+      // sessione da riusare), (d) NESSUN anticheat richiesto per QUESTO
+      // gioco — EAC/BattlEye sono letti solo dallo script di Proton,
+      // bypassato qui, quindi un gioco che ne ha bisogno resta sul
+      // lancio pieno sotto, mai su questo percorso più veloce.
+      const useSharedPrefixLightLaunch =
+        !!game.requiresLauncher &&
+        !!game.executablePath &&
+        !runnerConfig.eac &&
+        !runnerConfig.battleye &&
+        isSharedLauncherRunning(game.requiresLauncher);
+
+      // v1.1.30 — giochi Epic: sempre via legendary launch, non l'exe
+      // diretto. Vedi launchEpicViaLegendary per il motivo esatto (alcuni
+      // titoli con verifica EOS severa, es. SIFU, rifiutano il lancio
+      // senza gli argomenti di autenticazione che solo legendary sa
+      // costruire). Continua a usare il runner Wine/Proton già
+      // configurato per questo gioco — non cambia nulla per i giochi che
+      // non hanno bisogno di quella verifica, legendary li lancia allo
+      // stesso modo di sempre con lo stesso wine/proton.
+      const result = useSharedPrefixLightLaunch
+        ? await launchGameInSharedPrefix(
+            game.requiresLauncher!,
+            expandHome(game.executablePath!),
+            runnerConfig.args ?? [],
+            runnerConfig.cwd,
+          )
+        : game.store === 'Epic Games'
+          ? await launchEpicViaLegendary(game, runner, runnerConfig)
+          : await runner.launch(game, runnerConfig);
+      if (result.success) {
+        this.addLog(`[LAUNCH] Sessione attiva — PID: ${result.pid} — ${result.message}`, 'system');
+        if (result.pid) {
+          // v1.1.31 — processNameHint solo per Epic: è l'unico store
+          // dove il PID tracciato (legendary/wrapper Proton) non è
+          // affidabile per sapere se il gioco vero è ancora in
+          // esecuzione. Basename dell'eseguibile già risolto
+          // (game.executablePath), non l'intero percorso — pgrep -f
+          // cerca per substring nella riga di comando completa, un
+          // basename è già sufficientemente specifico ed evita falsi
+          // negativi se il percorso assoluto cambiasse fra una sessione
+          // e l'altra.
+          const processNameHint = game.store === 'Epic Games' && game.executablePath
+            ? path.basename(game.executablePath)
+            : undefined;
+          this.lastLaunchedGame = { gameId: id, gameTitle: game.title, pid: result.pid, launchedAt: Date.now(), logPath: result.logPath, processNameHint };
+          this.startScreensaverInhibit(game.title);
+        }
+      } else {
+        this.addLog(`[LAUNCH] Fallito: ${result.message}`, 'error');
+        // Log suggerimento se manca l'exe
+        if (result.message?.includes('percorso eseguibile') || result.message?.includes('executablePath')) {
+          this.addLog(`[LAUNCH] → Apri l'overlay del gioco e imposta "Executable Path" nella sezione Game Config`, 'error');
+        }
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.addLog(`[LAUNCH] Eccezione runner: ${msg}`, 'error');
+      return { success: false, message: msg };
+    }
+  }
+
+  /**
+   * v1.5.20-dev.18/19/20 — estratta da dentro launchGame(). Stessa
+   * identica logica di sempre (v1.1.117/118/119-dev.1): (1) reinstalla
+   * eventuali verb aggiunti al profilo dopo l'installazione originale —
+   * salta se la prefix del runner corrente non esiste ancora; (2)
+   * `winetricks list-installed` per rilevare verb installati a mano da
+   * terminale e sincronizzarli col profilo salvato.
+   *
+   * Storia dei due bug reali attraversati per arrivare qui, entrambi
+   * confermati con diagnostica diretta dell'utente (non ipotizzati):
+   * dev.18 l'aveva spostata a girare DOPO il lancio (fire-and-forget)
+   * per risolvere un blocco di 16 minuti — ma dev.20 ha scoperto che
+   * farla girare IN PARALLELO al gioco già avviato può corrompere la
+   * sessione: alcuni verb (dxvk, vkd3d, d3dcompiler...) sostituiscono
+   * DLL nella STESSA prefix che il gioco ha già in uso (stessa ragione
+   * per cui le guide DXVK dicono sempre di chiudere il gioco prima di
+   * reinstallarlo) — per Ubisoft Connect è passato inosservato, per LEGO
+   * Indiana Jones (Amazon/nile) ha impedito al gioco di restare in
+   * esecuzione. Riportata PRIMA del lancio (sequenziale, mai più in
+   * parallela con un gioco già avviato) — il fix reale di dev.19
+   * (execFileAsync invece di execSync, cosi il demone resta reattivo
+   * durante l'attesa) resta comunque valido e necessario, il problema
+   * originale non era la POSIZIONE ma la natura bloccante delle
+   * chiamate.
+   *
+   * v1.5.20-dev.23 — `runnerId`/`prefixPath` ora parametri espliciti
+   * invece di leggerli da `game.runner`/`game.prefixPath`: per un gioco
+   * con `requiresLauncher`, quei due campi sul gioco stesso possono
+   * restare vuoti o stantii per sempre (l'installazione tramite lo
+   * store d'origine non completa mai per questa categoria — vedi
+   * CHANGELOG.md, saga Watch Dogs 2) — il chiamante passa i valori
+   * EFFETTIVI già risolti (quelli del launcher condiviso quando
+   * applicabile), mai quelli grezzi del gioco.
+   */
+  private async reconcileWinetricksVerbs(id: string, game: Game, profile: CompatibilityProfile | undefined, runnerId: string, prefixPath: string | undefined): Promise<void> {
+    if (prefixPath && profile?.winetricksVerbs && profile.winetricksVerbs.length > 0) {
+      const wineEnv = resolveRunnerWineEnv(runnerId, prefixPath);
       try {
-        const { execSync } = require('child_process');
         const { existsSync } = require('fs');
+        const { execFile } = require('child_process');
+        const { promisify } = require('util');
+        const execFileAsync = promisify(execFile);
         const prefixAlreadyExists = existsSync(wineEnv.winePrefixPath);
         if (!prefixAlreadyExists) {
           // v1.1.117-dev.1 — richiesta utente: quando si cambia runner
@@ -1117,28 +1423,24 @@ class GameManager {
           // pregressa. Deliberatamente NON copiamo alcuna cartella
           // (rischio di corruzione fra generazioni Wine/Proton diverse,
           // vedi discussione) — solo un avviso esplicito, l'utente
-          // ripristina a mano se lo desidera. Il ricontrollo dipendenze
-          // sotto viene comunque saltato qui (la prefix non è ancora
-          // stata inizializzata da wineboot — lo farà runner.launch()
-          // subito dopo): riapplicare i verb su un secondo lancio con lo
-          // stesso runner funzionerà normalmente una volta che la
-          // prefix esiste.
-          this.addLog(`[LAUNCH] Prefix nuova per il runner "${game.runner}" — salvataggi/impostazioni di un runner precedente non saranno presenti qui. Ripristinali a mano se necessario.`, 'system');
+          // ripristina a mano se lo desidera.
+          this.addLog(`[LAUNCH] Prefix nuova per il runner "${runnerId}" — salvataggi/impostazioni di un runner precedente non saranno presenti qui. Ripristinali a mano se necessario.`, 'system');
           try {
             const { notificationEngine } = require('./notificationEngine');
             notificationEngine.emit({
               type: 'system',
               level: 'warning',
-              message: `${game.title}: stai usando il runner "${game.runner}" per la prima volta — è una prefix nuova, senza i salvataggi/impostazioni di un runner precedente eventualmente usato per questo gioco. Puoi ripristinarli a mano se li avevi.`,
+              message: `${game.title}: stai usando il runner "${runnerId}" per la prima volta — è una prefix nuova, senza i salvataggi/impostazioni di un runner precedente eventualmente usato per questo gioco. Puoi ripristinarli a mano se li avevi.`,
             });
           } catch (e) {
             this.addLog(`[LAUNCH] Notifica prefix nuova non inviata: ${e}`, 'system');
           }
-        } else if (execSync('which winetricks', { encoding: 'utf-8' }).trim()) {
+        } else {
+          await execFileAsync('which', ['winetricks']);
           for (const verb of profile.winetricksVerbs) {
             this.addLog(`[LAUNCH] Verifica dipendenza: ${verb}`, 'system');
             try {
-              execSync(`winetricks --unattended ${verb}`, {
+              await execFileAsync('winetricks', ['--unattended', verb], {
                 env: {
                   ...process.env,
                   WINEPREFIX:     wineEnv.winePrefixPath,
@@ -1172,14 +1474,16 @@ class GameManager {
     // (e da questo stesso, per i lanci successivi), senza dover toccare
     // le checkbox a mano nell'overlay. Indipendente dal blocco sopra:
     // gira anche se il profilo non aveva ancora nessun verb tracciato.
-    if (game.prefixPath) {
+    if (prefixPath) {
       try {
-        const { execSync } = require('child_process');
         const { existsSync } = require('fs');
-        const wineEnv = resolveRunnerWineEnv(game.runner, game.prefixPath);
-        if (existsSync(wineEnv.winePrefixPath) && execSync('which winetricks', { encoding: 'utf-8' }).trim()) {
-          const listOutput = execSync('winetricks list-installed', {
-            encoding: 'utf-8',
+        const { execFile } = require('child_process');
+        const { promisify } = require('util');
+        const execFileAsync = promisify(execFile);
+        const wineEnv = resolveRunnerWineEnv(runnerId, prefixPath);
+        if (existsSync(wineEnv.winePrefixPath)) {
+          await execFileAsync('which', ['winetricks']);
+          const { stdout: listOutput } = await execFileAsync('winetricks', ['list-installed'], {
             env: {
               ...process.env,
               WINEPREFIX: wineEnv.winePrefixPath,
@@ -1245,80 +1549,6 @@ class GameManager {
       } catch (e) {
         this.addLog(`[LAUNCH] Rilevamento verb installati manualmente non riuscito (winetricks list-installed): ${e}`, 'system');
       }
-    }
-
-    try {
-      // Log dettagliato pre-lancio: runner version + exe
-      const runnerVersion = await runner.version().catch(() => 'n/a');
-      this.addLog(`[LAUNCH] Runner: ${runner.name} — versione: ${runnerVersion}`, 'info');
-      if (game.executablePath) {
-        const displayPath = game.executablePath.replace(
-          /\$([A-Z_][A-Z0-9_]*)/g,
-          (_, name) => process.env[name] ?? `$${name}`
-        ).replace(/^~/, process.env.HOME ?? '~');
-        this.addLog(`[LAUNCH] Exe: ${displayPath}`, 'info');
-      } else if (!game.steamAppId && !game.scummvmId) {
-        this.addLog(`[LAUNCH] ⚠ Nessun executablePath configurato per ${game.title}`, 'error');
-      }
-      if (overrideLaunchArgs !== undefined) {
-        this.addLog(`[LAUNCH] ⚠ Argomenti di lancio TEMPORANEI in test (non salvati nel DB): "${overrideLaunchArgs}"`, 'system');
-      }
-
-      const effectiveLaunchArgs = overrideLaunchArgs !== undefined ? overrideLaunchArgs : game.launchArgs;
-
-      const runnerConfig = {
-        env:      profile?.customEnv,
-        prefix:   game.prefixPath,
-        args:     effectiveLaunchArgs ? shellSplitArgs(effectiveLaunchArgs) : undefined,
-        cwd:      game.launchCwd,
-        fsr:      profile?.fsr      ?? false,
-        gameMode: profile?.gameMode ?? false,
-        mangohud: profile?.mangohud ?? 0,
-        eac:      profile?.eac      ?? false,
-        battleye: profile?.battleye ?? false,
-        umuRun:   profile?.umuRun   ?? false,
-      };
-      // v1.1.30 — giochi Epic: sempre via legendary launch, non l'exe
-      // diretto. Vedi launchEpicViaLegendary per il motivo esatto (alcuni
-      // titoli con verifica EOS severa, es. SIFU, rifiutano il lancio
-      // senza gli argomenti di autenticazione che solo legendary sa
-      // costruire). Continua a usare il runner Wine/Proton già
-      // configurato per questo gioco — non cambia nulla per i giochi che
-      // non hanno bisogno di quella verifica, legendary li lancia allo
-      // stesso modo di sempre con lo stesso wine/proton.
-      const result = game.store === 'Epic Games'
-        ? await launchEpicViaLegendary(game, runner, runnerConfig)
-        : await runner.launch(game, runnerConfig);
-      if (result.success) {
-        this.addLog(`[LAUNCH] Sessione attiva — PID: ${result.pid} — ${result.message}`, 'system');
-        if (result.pid) {
-          // v1.1.31 — processNameHint solo per Epic: è l'unico store
-          // dove il PID tracciato (legendary/wrapper Proton) non è
-          // affidabile per sapere se il gioco vero è ancora in
-          // esecuzione. Basename dell'eseguibile già risolto
-          // (game.executablePath), non l'intero percorso — pgrep -f
-          // cerca per substring nella riga di comando completa, un
-          // basename è già sufficientemente specifico ed evita falsi
-          // negativi se il percorso assoluto cambiasse fra una sessione
-          // e l'altra.
-          const processNameHint = game.store === 'Epic Games' && game.executablePath
-            ? path.basename(game.executablePath)
-            : undefined;
-          this.lastLaunchedGame = { gameId: id, gameTitle: game.title, pid: result.pid, launchedAt: Date.now(), logPath: result.logPath, processNameHint };
-          this.startScreensaverInhibit(game.title);
-        }
-      } else {
-        this.addLog(`[LAUNCH] Fallito: ${result.message}`, 'error');
-        // Log suggerimento se manca l'exe
-        if (result.message?.includes('percorso eseguibile') || result.message?.includes('executablePath')) {
-          this.addLog(`[LAUNCH] → Apri l'overlay del gioco e imposta "Executable Path" nella sezione Game Config`, 'error');
-        }
-      }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.addLog(`[LAUNCH] Eccezione runner: ${msg}`, 'error');
-      return { success: false, message: msg };
     }
   }
 

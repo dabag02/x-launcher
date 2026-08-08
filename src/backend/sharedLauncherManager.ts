@@ -13,9 +13,9 @@
  * gestire qui, a differenza dei prefix per-gioco esistenti.
  */
 
-import { mkdirSync } from 'fs';
+import { mkdirSync, existsSync } from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { spawn } from 'child_process';
 import { DATA_DIR } from './paths';
 import { writeLog } from './logger';
@@ -26,8 +26,9 @@ import {
   SharedLauncherPrefixRow,
 } from './db';
 import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
-import { ProtonRunner } from './runners/implementations';
+import { ProtonRunner, resolveProtonBin } from './runners/implementations';
 import { Game } from '../types';
+import * as db from './db';
 
 export const SHARED_LAUNCHERS_DIR = path.join(DATA_DIR, 'shared-launchers');
 
@@ -174,6 +175,85 @@ export function canRemoveSharedPrefix(launcherId: string, excludeGameId?: string
  * config.prefix = getSharedPrefixBasePath() (il path BASE, mai quello già
  * risolto con /pfx) — vedi nota su resolveSharedPrefixExecutionPath sopra.
  */
+/**
+ * v1.5.20-dev.14 — richiesta utente: al lancio di un gioco che dichiara
+ * requiresLauncher, il launcher condiviso deve partire insieme (molti
+ * titoli Ubisoft/EA verificano che il proprio launcher sia in esecuzione
+ * per DRM/funzioni online) — ma solo se non è già aperto, altrimenti
+ * lo si duplicherebbe inutilmente. Stesso pattern `pgrep -f` già usato
+ * altrove in gameManager.ts per verificare processi in corso — qui sul
+ * nome file dell'eseguibile del launcher (già noto, salvato al
+ * bootstrap), non sull'intero percorso.
+ */
+export function isSharedLauncherRunning(launcherId: string): boolean {
+  // v1.5.20-dev.27 — BUG REALE CONFERMATO DALL'UTENTE CON QUERY DIRETTA
+  // AL DB: `state.launcherExe` (tabella shared_launcher_prefixes) è
+  // scritto UNA SOLA VOLTA al bootstrap iniziale e può restare sbagliato
+  // per sempre (esattamente come `state.runner`, vedi dev.26) — nel caso
+  // reale dell'utente valeva "windows/explorer.exe" invece del vero
+  // percorso di UbisoftConnect.exe, quindi questa funzione cercava da
+  // settimane un processo chiamato "explorer.exe" con `pgrep -f`, non
+  // il vero launcher. `games.executablePath` (riga `${launcherId}-launcher`)
+  // è invece il campo che l'utente vede/la Dashboard mantiene aggiornato
+  // ad ogni lancio riuscito — unica fonte di verità, stesso principio
+  // già applicato al runner in dev.26.
+  const launcherGame = db.getGameById(`${launcherId}-launcher`);
+  if (!launcherGame?.executablePath) return false;
+  const exeBasename = path.basename(launcherGame.executablePath);
+  try {
+    execFileSync('pgrep', ['-f', exeBasename], { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false; // pgrep esce con codice != 0 se non trova corrispondenze
+  }
+}
+
+/**
+ * v1.5.20-dev.22 — richiesta utente: chiusura ESPLICITA e mirata del
+ * launcher condiviso, su scelta dell'utente (notifica "tieni aperto /
+ * chiudi ora" alla chiusura di un gioco dipendente — mai automatica).
+ * `wineserver -k` (comando ufficiale, documentato nel man di
+ * wineserver — stesso identificato durante il debug di winebrowser in
+ * questa stessa sessione) termina l'INTERA sessione Wine per quella
+ * prefix: manda SIGINT poi SIGKILL a tutti i processi client, non solo
+ * al launcher stesso — pulisce anche eventuali processi figli residui
+ * (aggiornatori, servizi in background) invece di lasciarli orfani.
+ * Il wineserver da terminare è quello DELLA STESSA build Proton che il
+ * launcher sta usando (mai un `wineserver` di sistema diverso — stessa
+ * causa di mismatch di versione già diagnosticata per winebrowser).
+ */
+export async function closeSharedLauncher(launcherId: string): Promise<{ success: boolean; message: string }> {
+  const launcherGame = db.getGameById(`${launcherId}-launcher`);
+  const runnerId = launcherGame?.runner;
+  if (!runnerId) {
+    return { success: false, message: `Runner del launcher condiviso "${launcherId}" sconosciuto.` };
+  }
+  const protonBin = resolveProtonBin(runnerId);
+  if (!protonBin) {
+    return { success: false, message: `Build Proton "${runnerId}" non trovata.` };
+  }
+  const protonDir = path.dirname(protonBin);
+  const wineserverBin = [
+    path.join(protonDir, 'files', 'bin', 'wineserver'),
+    path.join(protonDir, 'dist', 'bin', 'wineserver'),
+  ].find(p => existsSync(p));
+  if (!wineserverBin) {
+    return { success: false, message: `Binario wineserver non trovato dentro la build Proton "${runnerId}".` };
+  }
+
+  const winePrefix = resolveSharedPrefixExecutionPath(launcherId);
+  try {
+    execFileSync(wineserverBin, ['-k'], {
+      env: { ...process.env, WINEPREFIX: winePrefix },
+      stdio: 'ignore',
+    });
+    writeLog('launch', `[SharedLauncher] Chiuso su richiesta esplicita dell'utente: "${launcherId}" (wineserver -k).`);
+    return { success: true, message: `Launcher condiviso "${launcherId}" chiuso.` };
+  } catch (e) {
+    return { success: false, message: `Chiusura fallita: ${e}` };
+  }
+}
+
 export async function launchSharedLauncher(launcherId: string): Promise<{ success: boolean; message: string }> {
   const def = getThirdPartyLauncherDefinition(launcherId);
   if (!def) {
@@ -181,12 +261,32 @@ export async function launchSharedLauncher(launcherId: string): Promise<{ succes
   }
 
   const state = getSharedLauncherPrefix(launcherId);
-  if (!state?.bootstrappedAt || !state.launcherExe) {
+  if (!state?.bootstrappedAt) {
     return { success: false, message: `${def.displayName} non risulta ancora installato nel prefix condiviso.` };
   }
 
-  const runner = new ProtonRunner(state.runner, state.runner);
-  const executablePath = path.join(resolveSharedPrefixExecutionPath(launcherId), 'drive_c', state.launcherExe);
+  // v1.5.20-dev.27 — BUG REALE CONFERMATO DALL'UTENTE CON QUERY DIRETTA
+  // AL DB: `state.launcherExe` è scritto UNA SOLA VOLTA al bootstrap
+  // iniziale nella tabella shared_launcher_prefixes — nel caso reale
+  // dell'utente valeva "windows/explorer.exe" invece del vero percorso
+  // relativo di UbisoftConnect.exe, sbagliato fin dal bootstrap
+  // originale (29 luglio) e mai notato prima perché questa funzione
+  // (l'avvio AUTOMATICO del launcher condiviso) non esisteva ancora
+  // allora — l'utente ha sempre lanciato Ubisoft Connect a mano dalla
+  // sua card, che usa `games.executablePath` (corretto, mantenuto
+  // aggiornato dalla Dashboard) e non ha mai toccato questo campo.
+  // Stessa causa profonda di dev.26 (due tabelle diverse per lo stesso
+  // concetto, che driftano) — qui applicata anche all'eseguibile, non
+  // solo al runner: `games.executablePath` diventa l'UNICA fonte di
+  // verità, `state.launcherExe`/`state.runner` non più letti affatto.
+  const launcherGame = db.getGameById(`${launcherId}-launcher`);
+  if (!launcherGame?.runner || !launcherGame?.executablePath) {
+    return { success: false, message: `${def.displayName}: runner o eseguibile non ancora noti sulla card — aprila almeno una volta manualmente prima di fare affidamento sull'avvio automatico.` };
+  }
+  const runnerId = launcherGame.runner;
+  const executablePath = launcherGame.executablePath;
+
+  const runner = new ProtonRunner(runnerId, runnerId);
 
   // Oggetto Game minimale — vedi commento sopra: ProtonRunner.launch()
   // usa solo executablePath/steamAppId/title per un lancio non-Steam.
@@ -196,7 +296,205 @@ export async function launchSharedLauncher(launcherId: string): Promise<{ succes
     executablePath,
   } as Partial<Game> as Game;
 
-  const result = await runner.launch(syntheticGame, { prefix: getSharedPrefixBasePath(launcherId) });
+  const result = await runner.launch(syntheticGame, {
+    prefix: getSharedPrefixBasePath(launcherId),
+    // v1.5.20-dev.17 — BUG REALE trovato dall'utente: questa funzione non
+    // passava mai `umuRun`, quindi il lancio del launcher condiviso
+    // stesso riproduceva esattamente la finestra nera che avevamo già
+    // risolto in Step 19d (container Steam Linux Runtime mancante) — il
+    // fix umu-run era arrivato SOLO per il lancio manuale dalla card,
+    // mai qui. Il launcher condiviso ha una riga vera in `games`
+    // (convenzione id `${launcherId}-launcher`, vedi
+    // UBISOFT_CONNECT_GAME_ID in ubisoftConnectPlugin.ts) con un proprio
+    // CompatibilityProfile — leggiamo lì lo switch che l'utente ha già
+    // impostato (e verificato funzionante) per quella card.
+    umuRun: db.getCompatProfile(`${launcherId}-launcher`)?.umuRun ?? false,
+  });
   writeLog('launch', `[SharedLauncher] Avvio ${def.displayName}: ${result.message ?? '(nessun messaggio)'}`);
   return { success: result.success, message: result.message ?? '' };
+}
+
+/**
+ * v1.5.20-dev.14/16 — richiesta utente: quando un gioco richiede un
+ * launcher condiviso (requiresLauncher) ma non ha mai file scaricabili
+ * tramite il proprio store d'origine (es. titoli Ubisoft riscattati su
+ * Epic — vedi CHANGELOG.md), l'unico modo di sapere che è diventato
+ * giocabile è cercarlo DENTRO il prefix del launcher condiviso stesso —
+ * non l'intero disco, solo dove sappiamo già che deve trovarsi
+ * (resolveSharedPrefixExecutionPath, già esistente). Ricerca per nome
+ * di CARTELLA che assomiglia al titolo (normalizzato: minuscolo, solo
+ * alfanumerico) — mai il database interno del launcher, mai
+ * reverse-engineered, fuori scope — stesso principio euristico già
+ * usato da findInstalledLauncherExe/resolveGogExe altrove nel progetto.
+ *
+ * v1.5.20-dev.16 — BUG REALE corretto: la prima versione (dev.14)
+ * camminava livello per livello a mano in JS, assumendo una profondità
+ * fissa (verificata solo su una struttura di TEST locale, mai su dati
+ * reali) — sbagliata su hardware reale, dove Ubisoft Connect installa
+ * 4 livelli sotto Program Files, non 2
+ * (.../Ubisoft/Ubisoft Game Launcher/games/<TITOLO>/...). Qualunque
+ * profondità fissa scelta a mano rischiava di sbagliare di nuovo alla
+ * prossima struttura diversa — sostituito con `find -type d` per
+ * l'enumerazione ricorsiva (fino a una profondità generosa, gestisce
+ * qualunque struttura reale senza bisogno di indovinarne i livelli), il
+ * confronto fuzzy per nome resta in JS (necessario: "Watch Dogs 2" vs
+ * "WATCH_DOGS2" non è un confronto che un pattern shell -iname
+ * gestirebbe bene da solo).
+ */
+export function findGameExeInSharedPrefix(launcherId: string, gameTitle: string): string | null {
+  const driveC = path.join(resolveSharedPrefixExecutionPath(launcherId), 'drive_c');
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const normalizedTitle = normalize(gameTitle);
+  if (!normalizedTitle) return null;
+
+  for (const sub of ['Program Files (x86)', 'Program Files']) {
+    const base = path.join(driveC, sub);
+    if (!existsSync(base)) continue;
+
+    let allDirs: string[];
+    try {
+      const result = execSync(
+        `find "${base}" -maxdepth 6 -type d 2>/dev/null`,
+        { encoding: 'utf-8', timeout: 8000 }
+      );
+      allDirs = result.split('\n').filter(Boolean);
+    } catch {
+      continue;
+    }
+
+    for (const dir of allDirs) {
+      const normalizedDir = normalize(path.basename(dir));
+      if (!normalizedDir) continue;
+      if (!normalizedDir.includes(normalizedTitle) && !normalizedTitle.includes(normalizedDir)) continue;
+      try {
+        const exeResult = execSync(
+          `find "${dir}" -maxdepth 3 -iname "*.exe" ` +
+          `! -iname "unins*" ! -iname "*crashhandler*" ! -iname "*crashreporter*" ` +
+          `! -iname "vcredist*" ! -iname "vc_redist*" ! -iname "dxsetup*" ` +
+          `! -iname "*explorer*" ! -iname "*helper*" ! -iname "*updater*" ` +
+          `| head -1`,
+          { encoding: 'utf-8', timeout: 8000 }
+        ).trim();
+        if (exeResult) return exeResult;
+      } catch {
+        // continua col prossimo candidato
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * v1.5.20-dev.21 — richiesta utente, verificata A MANO prima di scrivere
+ * qualunque riga di questa funzione (non ipotizzata): lancio "leggero"
+ * di un gioco con requiresLauncher, quando il launcher condiviso
+ * risulta già in esecuzione. Invece di richiamare ProtonRunner.launch()
+ * (che rifarebbe l'intero `proton run`/`umu-run` da capo — un secondo
+ * container Steam Linux Runtime, una seconda inizializzazione), invoca
+ * DIRETTAMENTE il `wine` incluso nella STESSA build Proton che il
+ * launcher condiviso sta già usando, sulla STESSA prefix. Wine mantiene
+ * un solo wineserver per WINEPREFIX (documentato nel man ufficiale) — un
+ * secondo processo puntato alla stessa prefix si aggancia alla sessione
+ * già viva invece di avviarne una nuova. Confermato empiricamente
+ * dall'utente con Watch Dogs 2/Ubisoft Connect: il gioco è partito
+ * correttamente, Ubisoft Connect si è ridotto a icona riconoscendolo
+ * come proprio, ed è tornato in primo piano alla chiusura del gioco —
+ * l'intera catena di autorizzazione ha funzionato, non solo l'avvio.
+ *
+ * LIMITE NOTO E ACCETTATO, non nascosto: bypassa lo script di Proton
+ * stesso, quindi PROTON_EAC_RUNTIME/PROTON_BATTLEYE_RUNTIME (lette SOLO
+ * da quello script, mai da wine nudo) non hanno alcun effetto qui, e il
+ * processo non gira dentro il container Steam Linux Runtime (a
+ * differenza del launcher condiviso, che lo usa per intero se il suo
+ * switch Umu-launcher è attivo). Per questo il chiamante (gameManager.ts)
+ * usa questa funzione SOLO quando il profilo del gioco non ha EAC/
+ * BattlEye attivi — altrimenti resta sul lancio pieno.
+ *
+ * v1.5.20-dev.24 — BUG REALE CONFERMATO DALL'UTENTE: bypassare lo
+ * script di Proton significa anche perdere la sua auto-rilevazione del
+ * metodo di sincronizzazione (fsync/esync) — il wineserver già attivo
+ * (avviato dal launcher condiviso TRAMITE quello script) nasce con
+ * fsync attivo per design su un kernel moderno, ma un wine nudo lanciato
+ * qui non lo sa e prova ad agganciarsi diversamente: blocco silenzioso,
+ * nessuna finestra, nessun errore visibile. WINEFSYNC=1 esplicito sotto
+ * risolve — verificato funzionante dall'utente sul proprio sistema.
+ */
+export async function launchGameInSharedPrefix(
+  launcherId: string,
+  exePath: string,
+  args: string[] = [],
+  cwd?: string,
+): Promise<{ success: boolean; pid?: number; message: string; logPath?: string }> {
+  // Stessa build Proton che il launcher condiviso sta già usando — MAI
+  // una build diversa: è esattamente la causa di un mismatch di
+  // versione fra wine e wineserver scoperta investigando questa stessa
+  // funzionalità (build "Proton - Experimental", aggiornata di frequente
+  // da Steam anche senza richiesta esplicita — vedi diario di sessione).
+  const launcherGame = db.getGameById(`${launcherId}-launcher`);
+  const runnerId = launcherGame?.runner;
+  if (!runnerId) {
+    return { success: false, message: `Runner del launcher condiviso "${launcherId}" sconosciuto — impossibile risolvere la build Proton corretta.` };
+  }
+
+  const protonBin = resolveProtonBin(runnerId);
+  if (!protonBin) {
+    return { success: false, message: `Build Proton "${runnerId}" non trovata.` };
+  }
+  const protonDir = path.dirname(protonBin);
+  // "files/bin/wine" (Proton 7+/GE moderne) o "dist/bin/wine" (build più
+  // vecchie) — entrambe convenzioni reali viste su build diverse in
+  // questo stesso progetto, non un'invenzione.
+  const wineBin = [
+    path.join(protonDir, 'files', 'bin', 'wine'),
+    path.join(protonDir, 'dist', 'bin', 'wine'),
+  ].find(p => existsSync(p));
+  if (!wineBin) {
+    return { success: false, message: `Binario wine non trovato dentro la build Proton "${runnerId}".` };
+  }
+
+  const winePrefix = resolveSharedPrefixExecutionPath(launcherId);
+  if (!existsSync(winePrefix)) {
+    return { success: false, message: `Prefix condivisa di "${launcherId}" non trovata (${winePrefix}).` };
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    WINEPREFIX: winePrefix,
+    WINEDEBUG:  '-all',
+    // v1.5.20-dev.24 — BUG REALE CONFERMATO DALL'UTENTE: senza questa
+    // variabile il lancio leggero restava bloccato in silenzio (nessun
+    // errore visibile, semplicemente nessuna finestra) — impostando
+    // WINEFSYNC=1 a mano prima di invocare lo script il gioco partiva
+    // correttamente. Causa: quando Ubisoft Connect parte tramite
+    // umu-run/Proton (percorso pieno), lo script di Proton rileva da
+    // solo il supporto fsync del kernel e lo attiva internamente PRIMA
+    // di invocare wine — il wineserver nasce quindi già con fsync
+    // attivo. Il lancio leggero invoca wine nudo, bypassando del tutto
+    // quello script (è il punto stesso di questa funzione) — senza
+    // impostarla esplicitamente qui, il nuovo processo tenta di
+    // agganciarsi con un metodo di sincronizzazione diverso da quello
+    // con cui il wineserver è già stato avviato: un blocco silenzioso,
+    // non un errore esplicito come il mismatch di versione (931/957)
+    // già diagnosticato in precedenza — stessa causa profonda (due
+    // processi sulla stessa prefix devono davvero combaciare in tutto,
+    // non solo nella build Proton), diversa manifestazione.
+    // Assume supporto fsync del kernel — praticamente universale sui
+    // kernel Linux moderni (verificato funzionante sul sistema reale
+    // dell'utente), ma non garantito su un kernel molto datato.
+    WINEFSYNC:  '1',
+  };
+
+  try {
+    const child = spawn(wineBin, [exePath, ...args], {
+      env,
+      cwd: cwd ?? path.dirname(exePath),
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    writeLog('launch', `[SharedLauncher] Lancio leggero (sessione già attiva di "${launcherId}"): ${wineBin} "${exePath}"`);
+    return { success: true, pid: child.pid, message: `Avviato nella sessione condivisa già attiva di "${launcherId}"` };
+  } catch (e) {
+    return { success: false, message: `Lancio leggero fallito: ${e}` };
+  }
 }

@@ -145,6 +145,600 @@ Il più esteso dei quattro: prima non esisteva alcun concetto di posizione — o
 
 ---
 
+## v1.5.20-dev.6 — 3 richieste utente + tastiera fisica
+
+### 1) Soglia hold-to-clear abbassata da 4 a 3 secondi
+
+`VirtualKeyboard.tsx`: `CLEAR_HOLD_MS` 4000 → 3000, unica modifica.
+
+### 2) Dimensioni tasti riga barra spaziatrice
+
+Frecce cursore (◄►) ora dimensione di UN tasto, lingua/incolla dimensione di DUE, barra spaziatrice resta la più larga. Sostituite le frazioni fisse precedenti (`w-1/5` poi `w-1/6`) con pesi di crescita flex relativi (`flex-[2]`/`flex-1`/`flex-[6]`/`flex-1`/`flex-[2]`, rapporto 2:1:6:1:2) — proporzionati a qualunque larghezza di schermo, nessun valore in pixel da ricalibrare per breakpoint. **Nota — questo approccio si è rivelato insufficiente, vedi v1.5.20-dev.8 più sotto per la correzione definitiva.**
+
+### 3) e 4) Confermate funzionanti dall'utente, nessuna ulteriore modifica.
+
+### 6) Scrittura da tastiera fisica nella Virtual Keyboard
+
+Implementato: premendo un tasto fisico (lettera, cifra, simbolo, Backspace/Canc, frecce sinistra/destra) si scrive/cancella/sposta il cursore come col corrispondente tasto a schermo, che si illumina di conseguenza (nuovo `findOnScreenKeyId()`, case-insensitive per le lettere — bug reale trovato con un test isolato prima della consegna: le lettere sono salvate in un'unica forma canonica maiuscola nel layout, un confronto a case esatto non avrebbe mai trovato corrispondenza digitando in minuscolo, il caso comune).
+
+**Deliberatamente NON gestiti**: Invio e Barra spaziatrice. Motivo verificato nel codice reale: `Focusable` (FocusProvider.tsx) ha già un proprio listener globale che attiva `onEnter()` del tasto ATTUALMENTE a fuoco per un fisico Invio/Spazio (fallback di accessibilità preesistente). Gestirli anche qui avrebbe rischiato un doppio inserimento quando il fuoco a schermo non coincide con "Invio"/"Spazio" (nessuna garanzia sull'ordine fra due listener indipendenti sullo stesso `window`) — lasciarli al solo meccanismo esistente evita quella regressione. I tre esempi espliciti dell'utente (due lettere e Canc) restano comunque coperti senza alcun conflitto: `Focusable` ascolta solo Invio/Spazio, mai altri tasti. **Nota — questa scelta si è rivelata un bug reale per Invio, vedi v1.5.20-dev.8 più sotto per la correzione.**
+
+Verificato anche che i listener globali già esistenti in App.tsx (Escape, Ctrl+F, Alt+Invio, Ctrl+Alt+K, Ctrl+H) non si sovrappongono: tutti richiedono un modificatore (il nuovo listener esce subito su Ctrl/Alt/Meta) o un tasto (Escape) mai intercettato qui.
+
+**Test isolato** (node, logica pura estratta): corrispondenza lettera minuscola/maiuscola, simbolo con shift, carattere assente — tutti i casi confermati corretti dopo il fix case-insensitive.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 94 id, zero riferimenti rotti.
+
+---
+
+## v1.5.20-dev.7 — Tag da metadati sotto il campo di ricerca
+
+Confermato dall'utente: IGDB configurato, e la semantica voluta è quella già in uso lato mouse — filtro genere/categoria in AND col testo digitato (es. "Teen" → 30 titoli → tag "Arcade" → 3 titoli), non una sostituzione del testo. Verificato leggendo `gameManager.getGames()`: i filtri search/genre/category sono già applicati in sequenza sullo stesso risultato (AND reale, non un'alternativa) — nessuna modifica lato server necessaria, il meccanismo esisteva già e funzionava correttamente, mancava solo la UI raggiungibile da controller.
+
+- **`src/components/VirtualKeyboard.tsx`**: nuova prop opzionale `topRowExternalUpId?: string`. Quando fornita, sovrascrive SOLO il vicino "su" della riga suggerimenti (la prima, in cima), che di norma avvolge ciclicamente alla barra spaziatrice (v1.1.79) — rompe il ciclo interno esclusivamente in quel punto per raggiungere qualcosa di esterno. Retrocompatibile al 100%: quando assente (ogni altro campo — Launch Arguments, Custom Env, Executable Path), il comportamento resta invariato.
+- **`src/App.tsx`**: nuova sezione di chip genere/categoria, visibile SOLO editando la ricerca (`!activeField`), tra il riquadro fluttuante del testo e la tastiera — stesso identico dato già usato dai chip mouse-only nella barra filtri libreria (`game.genres`/`game.categories`, fino a 8 generi e 5 categorie), stessa azione (`setSelectedGenre`/`setSelectedCategory`, toggle on/off). Il blocco `{showKeyboard && (...)}` è stato trasformato in una IIFE per condividere `searchGenres`/`searchCats`/`topRowExternalUpId` fra la nuova sezione tag e la prop passata a `VirtualKeyboard` più sotto, senza duplicare il calcolo.
+- **Navigazione**: ogni riga (generi, categorie) usa `sequentialChain`/`chainAxis="horizontal"` per sinistra/destra, con "giù"/"su" espliciti — semplificati con lo STESSO target per ogni chip della riga (non un mapping proporzionale per colonna come la griglia a tasti fissi della tastiera): genere → categoria (se presente) altrimenti dritto in tastiera; categoria → tastiera. La tastiera stessa risale fino all'ultima riga di tag presente tramite `topRowExternalUpId`.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 96 id (94+2, i nuovi pattern `tag-genre-${i}`/`tag-cat-${i}`), 1 solo riferimento segnalato come "non dichiarato" (`key-sugg-0`) — falso positivo verificato: lo script analizza solo App.tsx, quell'id è dichiarato in VirtualKeyboard.tsx (`QUICK_SUGGESTIONS`, mai vuoto — target sempre valido). Nessun riferimento realmente rotto.
+
+---
+
+## v1.5.20-dev.8 — 3 correzioni dopo il test utente
+
+### Reset dei tag genere/categoria alla chiusura della ricerca
+
+`App.tsx`: il reset di `searchQuery` alla chiusura (Y) viveva già in un `useEffect` dedicato (`if (!showSearch) setSearchQuery('')`, separato da `toggleSearch()`) — i tag genere/categoria introdotti in dev.7 non erano inclusi in quel reset, lasciando il filtro attivo mentre il testo veniva già azzerato. Aggiunto `setSelectedGenre('')`/`setSelectedCategory('')` nello stesso effetto — stessa sorte del testo, entrambi filtri della stessa ricerca.
+
+### Dimensioni tasti riga barra spaziatrice — corretto per davvero
+
+Il rapporto flex relativo di dev.6 (2:1:6:1:2) non restituiva "un tasto"/"due tasti" in senso assoluto — su schermi larghi i pesi si allargano proporzionalmente all'intera riga, non a una dimensione fissa. Sostituito con gli STESSI `max-w` assoluti già usati altrove nel file per key-back/key-enter/key-shift: `max-w-[44px]` per le frecce cursore (un tasto), `max-w-[92px]` per lingua/incolla (due tasti, 44×2+gap) — coerenti con quella convenzione già esistente invece di inventarne una nuova. La barra spaziatrice resta senza `max-w`, unico elemento a consumare lo spazio residuo.
+
+### Invio da tastiera fisica riattivava l'ultimo tasto digitato invece di inviare la ricerca
+
+Causa reale (non ipotizzata): `Focusable` (FocusProvider.tsx) ha un proprio listener — in fase *bubble* — che attiva `onEnter()` del tasto ATTUALMENTE a fuoco su un fisico Invio/Spazio. Poiché ogni carattere digitato fisicamente (v1.5.20-dev.6) sposta il focus visivo sul tasto corrispondente, il tasto "a fuoco" al momento di premere Invio è sempre l'ultima lettera scritta, mai `key-enter` — da qui il doppio tasto invece dell'invio. Rimandato deliberatamente in dev.6 perché l'ordine fra due listener indipendenti in fase bubble sullo stesso `window` non è garantito.
+
+**Risolto per davvero**: il listener della tastiera fisica in `VirtualKeyboard.tsx` è ora registrato in fase **CAPTURE** (`addEventListener('keydown', handler, true)`). Per specifica DOM, un listener in capture su un target viene sempre invocato PRIMA di qualunque listener in bubble sullo stesso target, indipendentemente dall'ordine di registrazione — non un'assunzione fragile come il tentativo scartato in dev.6, ma un comportamento garantito dallo standard. `stopPropagation()` impedisce all'evento di raggiungere la fase bubble, quindi il listener di `Focusable` non si attiva affatto per Invio/Spazio quando la tastiera fisica li gestisce. Fisico Invio ora chiama `onClose()` direttamente (chiude/invia la ricerca); fisico Spazio ora inserisce davvero uno spazio al cursore — entrambi i casi lasciati volutamente scoperti in dev.6 sono ora coperti correttamente con lo stesso meccanismo.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 96 id, stesso singolo falso positivo di sempre (`key-sugg-0`, cross-file). Nessuna modifica di navigazione in questa voce oltre al reset stati.
+
+---
+
+## v1.5.20-dev.9 — Larghezza riga barra spaziatrice allineata a Z/@ del layout italiano
+
+Richiesta: far coincidere l'estremità sinistra di "lingua" e destra di "incolla" con l'estremità sinistra del tasto Z e destra del tasto @ della riga 4 italiana, invece delle dimensioni assolute (44px/94px) libere di dev.8, che riempivano tutto lo spazio residuo con la barra spaziatrice senza alcun rapporto con le righe sopra.
+
+**Calcolo esatto** (stessi valori già in uso in tutto il file: 44px per tasto, 6px per gap): riga 4 italiana ha Shift + 13 tasti (Z,X,C,V,B,N,M,ù,`,`,`.`,`-`,@,apostrofo) = 694px totali. Lo span da Z a @ copre 12 di quei tasti e 11 gap interni = 594px. Verificato che Shift e l'apostrofo (esclusi dallo span) pesano esattamente uguale su entrambi i lati (44px tasto + 6px gap ciascuno) — lo span Z→@ risulta quindi centrato esattamente al centro di riga 4, ed essendo anche la riga barra spaziatrice centrata nello stesso contenitore, basta dargli la STESSA larghezza totale per ereditarne i bordi esatti.
+
+Scomposizione dei 594px fra i 5 elementi: lingua 94px, freccia sinistra 44px, **barra spaziatrice 294px (nuovo tetto esplicito — prima senza limite)**, freccia destra 44px, incolla 94px — somma 570px + 24px di gap (4×6px) = 594px.
+
+Verificato con un piccolo calcolo isolato prima di scrivere il codice, non solo a occhio: simmetria delle esclusioni confermata (50px su entrambi i lati), somma totale confermata uguale allo span.
+
+**Limite intrinseco, dichiarato esplicitamente**: vale in modo esatto solo con il layout italiano attivo — la riga 4 inglese ha un tasto in meno (manca "ù", esclusivo IT), quindi passando a EN i bordi non coincidono più con la stessa precisione. Coerente con la richiesta, che si riferiva esplicitamente al layout italiano.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 96 id, stesso falso positivo di sempre. Nessuna modifica di navigazione, solo classi di larghezza.
+
+---
+
+## v1.5.20-dev.10 — Fase A.1/A.2/A.3: generalizzare l'installazione dei launcher terzi
+
+Prima voce del piano concordato per estendere il supporto oltre Ubisoft Connect (EA App, Battle.net, Rockstar Games Launcher) — deciso esplicitamente CON l'utente di **non** unificare in un plugin unico: ogni launcher resta un proprio `StorePlugin` con le proprie particolarità (card, switch, libreria interna), ma la parte davvero comune a tutti — creazione prefix, ricerca dell'installer — va scritta una volta sola.
+
+### `src/types.ts`
+
+Aggiunto `'Rockstar Games Launcher'` a `StoreType` (EA App era già presente dalla progettazione originale, mai usato).
+
+### `src/backend/plugins/thirdPartyLaunchers.ts`
+
+- Nuovo campo `storeId: StoreType` — collega ogni voce del registro al proprio `StorePlugin.id` (es. `'Ubisoft'` per `ubisoft-connect`), un solo ponte fra i due spazi di id invece di stringhe duplicate sparse in gameManager.ts/downloadManager.ts.
+- Nuovo campo `installerFilenameHints: string[]` — pattern (sintassi `find -iname`) per riconoscere l'installer di QUESTO launcher in Downloads, prima hardcoded dentro `findInstallerInDownloads()` (solo `*ubisoft*`/`*uplay*`). Popolato per Ubisoft Connect, vuoto per gli altri tre (da compilare quando affrontati, mai indovinato).
+- Nuovo helper `getThirdPartyLauncherByStoreId(storeId)` — l'altro verso del ponte.
+
+### `src/backend/downloadManager.ts`
+
+- **Nuova `resolveDownloadsDir()`** — bug reale corretto, non solo preparazione per il futuro file manager: `homedir()+'Downloads'` scritto alla lettera non trova nulla su un sistema con locale italiano, dove la cartella si chiama `Scaricati`. Ordine di risoluzione verificato: `xdg-user-dir DOWNLOAD` (il comando ufficiale del pacchetto xdg-user-dirs) → lettura diretta di `~/.config/user-dirs.dirs` → `~/Downloads` letterale → `~/Scaricati` letterale come ultima rete di sicurezza. Verificata con un test isolato la regex di estrazione (`XDG_DOWNLOAD_DIR="..."`) su caso italiano, inglese e percorso assoluto personalizzato.
+- `findInstallerInDownloads()` generalizzata: il pattern del nome file è ora un parametro (`filenameHints: string[]`), letto da `installerFilenameHints` invece di hardcoded.
+- `runUbisoftConnect(task)` rinominata e generalizzata in `runThirdPartyLauncherInstall(task, def)` — legge `def.displayName`/`def.installerUrl`/`def.installerFilenameHints` invece di stringhe letterali "Ubisoft"/`'ubisoft-connect'` sparse nel corpo della funzione. Log prefissato con `[${def.displayName.toUpperCase()}]` invece di `[UBISOFT]` fisso.
+- Dispatch in `startTask()`: da `else if (task.store === 'Ubisoft') await this.runUbisoftConnect(task)` a una ricerca generica nel registro (`getThirdPartyLauncherByStoreId(task.store)`) — un nuovo plugin non richiede più toccare questo punto.
+- `addTask()`: la risoluzione del prefix (`store === 'Ubisoft' ? getSharedPrefixBasePath('ubisoft-connect') : ...`) generalizzata allo stesso modo.
+- `continueInstaller()`/`browseInstaller()`: usano il registro per trovare il launcher del task corrente invece di assumere sempre Ubisoft Connect.
+- `browseInstaller()`: titolo del dialogo dinamico (`def.displayName`), `startDir` ora da `resolveDownloadsDir()`, filtro esteso da solo `.exe` a `.exe/.msi/.cab` (richiesta utente, pensata originariamente per il futuro file manager ma applicata qui per coerenza sullo stesso identico caso d'uso).
+
+### `src/backend/plugins/base.ts`
+
+Nuovo metodo `onLauncherProcessClosed(game): Promise<void>` su `StorePlugin`, default no-op. Sposta fuori da gameManager.ts la logica "il processo appena chiuso era l'installer del MIO launcher, ricontrolla il bootstrap" — decisione esplicita con l'utente: gameManager.ts resta il coordinatore generico, ogni plugin gestisce le proprie particolarità.
+
+### `src/backend/plugins/ubisoftConnectPlugin.ts`
+
+Implementato `onLauncherProcessClosed()` — stessa identica logica prima hardcoded in gameManager.ts (ricerca del vero eseguibile via `findInstalledLauncherExe()`, registrazione del bootstrap). Nuova funzione interna `pluginLog()` che replica `GameManager.addLog()` (scrittura su file + persistenza DB per il Debug Console UI) — i plugin non hanno un riferimento a `GameManager`, ma il logging doveva restare visibile nell'interfaccia esattamente come prima, non degradare a solo-file.
+
+### `src/backend/gameManager.ts`
+
+- Il blocco hardcoded (`if (game.store === 'Ubisoft' && game.id === UBISOFT_CONNECT_GAME_ID && ...)`) sostituito da `this.plugins.find(p => p.id === game.store)?.onLauncherProcessClosed(game)` — generico per qualunque plugin futuro.
+- Il callback di `startGameExitPolling()` (un `setInterval`) reso `async` per poter fare `await` sulla chiamata al plugin — il `try/catch` strutturale esistente (v0.99.38) resta la stessa rete di sicurezza, un errore nel plugin non fa crashare il daemon.
+- Il secondo punto hardcoded (messaggio di log "installer individuato, clicca di nuovo la card") generalizzato con lo stesso ponte store→launcher.
+- Import ripuliti: `UBISOFT_CONNECT_GAME_ID`, `resolveSharedPrefixExecutionPath`, `markLauncherBootstrapped`, `findInstalledLauncherExe`, `getThirdPartyLauncherDefinition` non più usati direttamente qui (spostati nel plugin).
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata, zero errori nuovi introdotti dalla generalizzazione). `check-focus-ids.cjs`: 96 id, stesso falso positivo di sempre (nessuna modifica a App.tsx in questa voce). Test isolato: la regex di estrazione `XDG_DOWNLOAD_DIR` verificata su 4 casi (italiano, inglese, percorso assoluto personalizzato, riga assente) prima di considerarla affidabile.
+
+**Non ancora testato su hardware reale**: Ubisoft Connect dovrebbe continuare a funzionare esattamente come prima (stessa logica, solo riorganizzata) — da riconfermare con un lancio reale prima di considerare questa generalizzazione definitiva, coerente con la prudenza già seguita per ogni voce precedente.
+
+---
+
+## v1.5.20-dev.11 — Fix bug reale: dimensione GOG non trovata per The Witcher/The Witcher 3
+
+Segnalato dall'utente durante il ritest di Ubisoft Connect: la libreria GOG non trova il "peso" in GB solo per The Witcher e The Witcher 3 Wild Hunt (GOTY/Complete Edition), mentre funziona per altri titoli (es. The Last Blade). Log fornito dall'utente: output completamente vuoto, con "Getting product data 2 / 2" invece di "1 / 1" nel log di progresso.
+
+### Causa reale (verificata, non ipotizzata)
+
+`--game` di `lgogdownloader` è documentato ufficialmente come un **filtro regex** (sintassi Perl), non una corrispondenza esatta sull'id del gioco — confermato anche da una issue reale sul repository ufficiale ([Sude-/lgogdownloader#213](https://github.com/Sude-/lgogdownloader/issues/213)): *"--game army_men scarica tutti e 5 i titoli il cui nome contiene la stringa 'army_men' invece di uno solo"*, esattamente lo stesso pattern di bug. Uno slug come `the_witcher`, passato senza ancoraggio, combacia ANCHE come sottostringa con altri giochi posseduti che lo contengono — `the_witcher_3_wild_hunt_...` inizia proprio con `the_witcher`. `lgogdownloader` interroga quindi l'API per più prodotti insieme invece di uno solo (da qui "2 / 2"), un'operazione più lenta che con più prodotti/edizioni può avvicinarsi o superare il timeout di 20s esistente — stdout resta vuoto perché i dati veri vengono stampati solo a fine ciclo, mai raggiunto, mentre stderr accumula i soli messaggi di progresso.
+
+### `src/backend/plugins/gogPlugin.ts` — `getPredictedInstallSizeBytes()`
+
+- Il regex passato a `--game` è ora ancorato a inizio/fine stringa (`^${slug}$` invece di `slug` nudo) — combacia SOLO con lo slug esatto, indipendentemente da altri giochi/DLC/edizioni che lo contengono come sottostringa.
+- Timeout alzato da 20s a 30s come margine di sicurezza aggiuntivo — il fix sopra risolve la causa reale, ma un singolo prodotto con molta storia di versioni/lingue (proprio il caso Witcher) può comunque restare più lento della media.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 96 id, stesso falso positivo di sempre (nessuna modifica a App.tsx). **Non ancora testato su hardware reale** — da confermare che The Witcher e The Witcher 3 mostrino ora correttamente la dimensione prevista.
+
+---
+
+## v1.5.20-dev.12 — Fase A.4: file manager nativo controller-navigabile
+
+Sostituisce zenity/kdialog quando `inputDevice === 'controller'` (quei dialog nativi non rispondono affatto al gamepad — un vero buco nell'esperienza "solo controller"). Punto di innesto già pronto da tempo: `filePicker.ts` era stato scritto fin dall'inizio con questo momento in mente ("oggi delega a un dialog nativo... domani potrà delegare a un file browser interno alla Dashboard, controller-navigabile").
+
+### `src/backend/fileManager.ts` (nuovo)
+
+- `listDirectory(dirPath, extensions?)` — elenca una cartella: cartelle sempre incluse (serve poterci entrare), file filtrati per estensione solo quando richiesto. File/cartelle nascosti (nome che inizia con `.`) esclusi. Ordinamento: cartelle prima, poi alfabetico case-insensitive. Ogni voce porta `sizeBytes`/`mtimeMs` (null per le cartelle — richiederebbe una scansione ricorsiva costosa e non necessaria per navigare). **Data di ultima modifica (mtime), non di creazione** — deciso esplicitamente con l'utente: su Linux la data di creazione in senso stretto spesso non è disponibile in modo affidabile a seconda del filesystem, mtime è sempre presente.
+- `resolveRemovableMediaRoot()` — quick-link "Supporti rimovibili": verificato (Arch Wiki, non assunto) che udisks2 monta di default in `/run/media/$USER/`; prova anche `/media/$USER/` come fallback per altri setup. null se nessuno dei due esiste (il quick-link si disabilita, non un errore).
+- Verificato con un test isolato (node/tsx, cartella finta): ordinamento cartelle-prima-poi-file, esclusione file nascosti, filtro per estensione, errore su cartella inesistente — tutti i casi confermati corretti prima della consegna.
+
+### `src/backend/downloadManager.ts`
+
+- `resolveDownloadsDir()` esportata (era già stata scritta in dev.11, riusata qui per il quick-link "Downloads" — nessuna logica duplicata fra le due funzionalità).
+- Nuovo metodo pubblico `confirmInstallerPath(gameId, filePath)` — stessa validazione/completamento di `browseInstaller()`, ma senza invocare alcun dialog nativo: il path arriva già risolto dal client, che lo ha ottenuto navigando nell'overlay in-app.
+
+### `server.ts`
+
+Tre nuovi endpoint: `POST /api/downloads/installer-select` (conferma il file scelto nell'overlay in-app), `GET /api/filesystem/list` (elenco cartella, `extensions` opzionale separato da virgola), `GET /api/filesystem/quick-links` (risolve home/downloads/supporti rimovibili una volta sola).
+
+### `src/App.tsx`
+
+- Nuovo overlay (z-[95], sopra il pannello Download che oggi è l'unico chiamante) — lista verticale (non griglia, a differenza della libreria Avatar: nomi di lunghezza variabile si prestano meglio a righe che a riquadri), con dimensione (KB/MB/GB auto-convertiti) e data allineati a destra per ogni file.
+- Header con quick-link (Risali di un livello, Home, Downloads, Supporti rimovibili — disabilitato/in grigio se non disponibile) e switch on/off del filtro estensioni, che riusa lo stesso campo `filter` già esistente in `filePicker.ts` — nessun meccanismo nuovo da inventare.
+- Navigazione: stessa convenzione della libreria Avatar (nessun `neighbors` esplicito, scoring geometrico automatico — sufficiente per una struttura semplice come questa).
+- Il pulsante "Sfoglia" nel pannello Download ora apre questo overlay quando `inputDevice === 'controller'`, il dialog nativo altrimenti — nessun cambiamento per chi usa mouse/tastiera.
+- Il tasto B/Indietro chiude l'overlay per primo se aperto (priorità sopra il pannello Download sottostante, che altrimenti si chiuderebbe insieme o al posto suo).
+- Attenzione tecnica: `loadFileBrowserDir` riceve SEMPRE `extensions`/`filterOn` come argomenti espliciti, mai letti dallo stato al proprio interno — evita un bug di closure superata quando la funzione viene richiamata subito dopo aver appena cambiato quello stesso stato nello stesso gestore (es. alternando il filtro: `setState` è asincrono, una lettura dallo stato vedrebbe ancora il valore vecchio).
+- Traduzioni: nuova sezione `fileBrowser` in `dashboard.json` (it/en).
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 103 id (96+7, i nuovi `fb-*`), stesso singolo falso positivo di sempre (`key-sugg-0`, cross-file), zero riferimenti nuovi rotti. Test isolato di `listDirectory()` e del formattatore dimensione, entrambi confermati corretti (incluso un test con la dimensione reale di un installer già vista nei log di una sessione precedente).
+
+**Non ancora testato su hardware reale.**
+
+---
+
+## v1.5.20-dev.13 — Investigazione: Watch Dogs 2 via Epic/legendary fallisce subito ("exited with code 1")
+
+Segnalato dall'utente: tentando di installare Watch Dogs 2 (Ubisoft, posseduto su Epic) con `requiresLauncher=ubisoft-connect` e Proton-Experimental come runner, `legendary` fallisce dopo pochi secondi con `exited with code 1`, nessun altro dettaglio nel log.
+
+### Causa reale (non un bug di X-Launcher)
+
+Confermato con un caso reale identico su GitHub (Heroic Games Launcher #2432, **stesso gioco, stesso nome interno Epic "Angelonia"** — corrispondenza esatta col log dell'utente): Watch Dogs 2 su Epic non ha file di gioco scaricabili affatto — solo un flag *"This game requires installation via Uplay and does not ship executable game files"*. `legendary install` fallisce per design su questo titolo specifico, indipendentemente da prefix/runner/configurazione — il gioco vive interamente dentro Ubisoft Connect, Epic funge solo da rivenditore della licenza. Il modello attuale di `requiresLauncher` (Epic scarica i file, il launcher condiviso serve solo per farli girare) non si applica a questa categoria di titoli Ubisoft-su-Epic.
+
+**Sblocco manuale**: `legendary activate --uplay Angelonia` recupera il codice di attivazione — il gioco va poi installato direttamente da Ubisoft Connect con quel codice, bypassando il flusso Epic per questo titolo.
+
+### Bug reale trovato investigando e corretto — `src/backend/downloadManager.ts`
+
+`spawnWithProgress()` (usata da legendary/lgogdownloader/nile) leggeva stdout/stderr **solo** per alimentare il parser di avanzamento — un fallimento (`exit != 0`) produceva solo `"legendary exited with code 1"`, scartando in silenzio il messaggio d'errore reale (che in questo caso avrebbe già rivelato la causa sopra). Aggiunto un anello circolare delle ultime 40 righe di output, scritto nel log **solo se il processo fallisce** (nessun impatto sui download riusciti, log non gonfiato).
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). Nessuna modifica a App.tsx in questa voce.
+
+**Miglioramento futuro possibile, non implementato ora**: rilevare in anticipo questa categoria di titoli (legendary espone il flag "requires Uplay/does not ship executable files" prima di tentare l'install) e mostrare un messaggio chiaro invece di lasciare che l'installazione fallisca — da valutare se e quando si presenta di nuovo questo caso.
+
+---
+
+## v1.5.20-dev.14 — Riconciliazione requiresLauncher: notifica, rilevamento installazione, avvio automatico
+
+Implementato il disegno discusso con l'utente per il caso Watch Dogs 2/Epic (v1.5.20-dev.13): tre parti distinte, tutte estensioni di meccanismi già esistenti, decise esplicitamente per evitare sia un plugin unico sia una doppia card nella collezione totale.
+
+### Parte 1 — Riconoscimento del fallimento definitivo + notifica
+
+- **`types.ts`/`db.ts`**: nuovo campo `Game.storeInstallUnavailable` (colonna `store_install_unavailable`, migrazione ALTER TABLE, stessa convenzione di `requires_launcher`). Gestito a parte nel colMap di `updateGameConfig` (booleano JS → 0/1 esplicito, better-sqlite3 rifiuta booleani diretti).
+- **`base.ts`**: nuovo metodo `StorePlugin.detectUnrecoverableInstallFailure(recentOutput): boolean`, default `false` — ogni plugin riconosce la propria frase di fallimento definitivo, nessuna logica centrale specifica di un singolo store.
+- **`epicPlugin.ts`**: implementato cercando la frase esatta di legendary (`"does not ship executable game files"`, verificata su un'issue reale Heroic #2432).
+- **`downloadManager.ts`**: l'output reale catturato in dev.13 ora viaggia insieme all'oggetto Error (`err.recentOutput`) invece di restare solo loggato — `errorCallbacks`/`onError` esteso per portarlo a valle.
+- **`gameManager.ts`**: nuovo metodo pubblico `getPluginForStore(storeId)` — `plugins` resta privato, solo un lookup mirato esposto.
+- **`server.ts`**: `onError` ora interroga il plugin proprietario; se riconosce il fallimento come definitivo, marca `storeInstallUnavailable` e personalizza il messaggio suggerendo il launcher condiviso già impostato su quel gioco (se presente).
+
+### Parte 2 — Rilevamento automatico dell'installazione (senza scraping né doppioni)
+
+- **`sharedLauncherManager.ts`**: nuova `findGameExeInSharedPrefix(launcherId, gameTitle)` — cerca l'eseguibile di UN gioco specifico dentro il prefix condiviso già noto (`resolveSharedPrefixExecutionPath`, esistente), per nome di cartella normalizzato (minuscolo, solo alfanumerico) contro il titolo — mai il database interno del launcher, mai un'intera libreria enumerata. **Bug reale trovato con un test isolato prima della consegna**: la prima versione cercava solo un livello sotto Program Files, ma Ubisoft Connect installa i giochi DUE livelli più in profondità (`.../Ubisoft/Games/<titolo>`) — corretto ad hoc, riverificato.
+- **`gameManager.ts`**: `syncExternalInstallStates()` esteso con un nuovo ramo generico — per ogni gioco con `requiresLauncher` non ancora installato (di QUALUNQUE store, non solo Epic), cerca l'eseguibile nel prefix condiviso e aggiorna la riga ESISTENTE (mai una nuova) se trovato. Questa scelta di design — riconciliare invece di scrappare l'intera libreria del launcher — è quella che evita la doppia card nella collezione totale di cui discutevamo: non viene mai creata una seconda riga.
+
+### Parte 3 — Avvio automatico del launcher condiviso al lancio del gioco
+
+Bug reale trovato discutendo il caso: `requiresLauncher` non veniva mai letto al momento del LANCIO effettivo, solo all'installazione (per condividere il prefix) — nessun gioco avviava mai automaticamente Ubisoft Connect/EA App insieme a sé, anche se il titolo lo richiede per DRM/funzioni online.
+
+- **`sharedLauncherManager.ts`**: nuova `isSharedLauncherRunning(launcherId)` — stesso pattern `pgrep -f` già usato altrove nel progetto per verificare processi in corso, sul nome file dell'eseguibile del launcher (già noto dal bootstrap).
+- **`gameManager.ts`**: `launchGame()` ora, se `game.requiresLauncher` è impostato e il launcher non risulta già in esecuzione, lo avvia (fire-and-forget — un fallimento qui non blocca il lancio del gioco stesso, solo un avviso in log).
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata — un errore intermedio introdotto per una stringa di stato sbagliata, `'Installed'` invece di `'Ready to Launch'`, trovato e corretto durante la verifica). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre (nessuna modifica a App.tsx). Test isolato di `findGameExeInSharedPrefix` (node, cartelle finte replicando la struttura reale Ubisoft Connect): trova l'eseguibile corretto ignorando il disinstallatore, `null` per un titolo assente e per un titolo vuoto — bug dei 2 livelli scoperto e corretto proprio da questo test prima della consegna.
+
+**Non ancora testato su hardware reale.**
+
+---
+
+## v1.5.20-dev.15 — Fix bug reale: la riconciliazione requiresLauncher non si attivava mai
+
+Segnalato dall'utente dopo il primo test completo (installazione riuscita da Ubisoft Connect, ma card Epic mai aggiornata): "shared launcher" risultava impostato correttamente, l'installazione era reale e funzionante, ma la card Epic continuava a proporre solo il tentativo di installazione fallito.
+
+### Causa reale (non un problema di matching cartelle)
+
+`syncExternalInstallStates()` — la funzione con dentro la riconciliazione aggiunta in dev.14 — veniva chiamata **una sola volta, dentro `init()`, all'avvio del demone**. Il refresh periodico esistente (`refreshLibrary()`, ogni 5 minuti via `startPeriodicRefresh()`) non la richiamava affatto. Risultato: senza un riavvio esplicito del demone dopo aver installato il gioco dal launcher condiviso, la riconciliazione non aveva mai alcuna occasione di girare — esattamente il sintomo riportato.
+
+### `src/backend/gameManager.ts`
+
+Aggiunta `await this.syncExternalInstallStates();` dentro `refreshLibrary()` stessa (dopo la persistenza dei titoli, prima dell'arricchimento metadati in background) — ora gira ad ogni refresh, sia periodico (ogni 5 minuti) sia al boot, sia su richiesta manuale (`POST /api/library/refresh`, già esistente) — nessun riavvio del demone più necessario perché la riconciliazione si attivi.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata).
+
+### Per il prossimo test dell'utente
+
+Per verificare subito senza aspettare 5 minuti, dopo aver applicato il fix e riavviato il demone una volta:
+```bash
+curl -X POST http://localhost:3000/api/library/refresh
+```
+Prima di considerare il fix completo, va anche confermato che l'euristica di corrispondenza cartella↔titolo (dev.14) trovi davvero l'eseguibile — non ancora verificato contro la struttura reale creata da Ubisoft Connect sul sistema dell'utente (solo su una struttura di test locale).
+
+---
+
+## v1.5.20-dev.16 — Fix bug reale: euristica cartella↔titolo riscritta con `find` ricorsivo
+
+Segnalato dall'utente dopo aver applicato dev.15 (riavvio del demone incluso): la card Epic continuava a non aggiornarsi. Percorso reale fornito dall'utente:
+```
+.../shared-launchers/ubisoft-connect/prefix/pfx/drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/WATCH_DOGS2/bin/WatchDogs2.exe
+```
+
+### Causa reale
+
+`findGameExeInSharedPrefix()` (dev.14) camminava livello per livello a mano in JS, assumendo una profondità fissa — verificata SOLO su una struttura di test locale costruita da Claude, mai su dati reali. Il percorso vero mostra che Ubisoft Connect installa i giochi **4 livelli** sotto `Program Files (x86)` (`Ubisoft` → `Ubisoft Game Launcher` → `games` → `WATCH_DOGS2`), non 2 come assunto — la cartella `games` è un contenitore generico dentro la cartella del launcher stesso, non un percorso separato a fianco. Qualunque profondità fissa scelta a mano rischiava di sbagliare di nuovo alla prossima struttura diversa incontrata.
+
+### `src/backend/sharedLauncherManager.ts`
+
+Riscritta per usare `find "<base>" -maxdepth 6 -type d` — enumerazione ricorsiva reale invece di una camminata a mano livello per livello, gestisce qualunque profondità entro il limite senza bisogno di indovinarla. Il confronto fuzzy per nome (normalizzato: minuscolo, solo alfanumerico) resta in JS, necessario dato che un pattern shell `-iname` non gestirebbe bene differenze come "Watch Dogs 2" vs "WATCH_DOGS2". Rimossi `readdirSync`/`statSync`, non più utilizzati dopo la riscrittura.
+
+### Verifica
+
+Test isolato (node) **ricreando esattamente la struttura di cartelle fornita dall'utente** (non più una struttura inventata): trova correttamente `WatchDogs2.exe` ignorando `Uninstall.exe`, `null` per un titolo assente e per un titolo vuoto. `tsc --noEmit`: 8 (baseline invariata).
+
+**Ancora da confermare dall'utente**: che la card Epic si aggiorni davvero dopo un refresh (`curl -X POST http://localhost:3000/api/library/refresh` per un test immediato) e che Ubisoft Connect si avvii al lancio.
+
+---
+
+## v1.5.20-dev.17 — Due bug reali nel lancio del gioco dopo la riconciliazione
+
+Test dell'utente: la riconciliazione (dev.16) funziona — la card Epic trova ed espone il gioco. Ma al lancio: il gioco si chiude subito e Wine apre il proprio file manager sulla scrivania; lanciando manualmente il collegamento Ubisoft parte in systray con una finestra nera; solo scegliendo il gioco dal menu contestuale della tray di Ubisoft Connect funziona regolarmente.
+
+### Bug 1 — `launchSharedLauncher()` non passava mai `umuRun`
+
+Riproduceva esattamente la finestra nera già risolta in Step 19d (container Steam Linux Runtime mancante): il fix umu-run era arrivato solo per il lancio manuale dalla card di Ubisoft Connect (`ProtonRunner.launch()` diretto), mai per questa funzione — scritta prima ancora che umu-run esistesse, mai aggiornata quando è arrivato.
+
+`src/backend/sharedLauncherManager.ts`: ora legge `db.getCompatProfile(`${launcherId}-launcher`)?.umuRun` (convenzione id già esistente, `UBISOFT_CONNECT_GAME_ID = 'ubisoft-connect-launcher'`) e lo passa a `runner.launch()` — stesso switch già impostato e verificato funzionante dall'utente sulla card di Ubisoft Connect stessa.
+
+### Bug 2 — nessuna attesa fra l'avvio del launcher condiviso e il lancio del gioco
+
+Il gioco partiva fire-and-forget, subito dopo aver chiesto l'avvio del launcher condiviso, senza aspettare login/sincronizzazione libreria. Molti giochi Ubisoft verificano la presenza/API del launcher al proprio avvio — lanciati troppo presto falliscono silenziosamente, sintomo compatibile con "il gioco si chiude, Wine apre il file manager come fallback di crash".
+
+`src/backend/gameManager.ts` (`launchGame()`): ora attende il completamento di `launchSharedLauncher()` e, se riuscito, un margine fisso (8s) prima di procedere col gioco. **Non verificato su hardware reale quanto sia sufficiente** — un punto di partenza, non una garanzia (nessuna API per sapere quando il launcher è "davvero pronto").
+
+### Domanda dell'utente: `uplay://launch/<id>` invece del lancio diretto?
+
+Concettualmente la strada più corretta (come `steam://rungameid/`), ma due limiti reali segnalati all'utente prima di intraprenderla: serve l'id numerico interno di Ubisoft (non disponibile senza il lavoro di reverse-engineering rimandato alla Fase C), e una discussione precedente aveva già annotato che i protocolli diretti `uplay://` risultavano bloccarsi su "initializing" nei test — non verificato se nelle stesse condizioni rotte dei due bug sopra o come limite indipendente. Raccomandato di riverificare prima con questi due fix.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata).
+
+---
+
+## v1.5.20-dev.18 — Bug reale CONFERMATO CON LOG: il controllo verb bloccava il lancio per 16 minuti
+
+Segnalato dall'utente ("il check verbs deve essere snellito") e poi CONFERMATO con log reali durante il debug del caso Watch Dogs 2: Ubisoft Connect sembrava non avviarsi più affatto, anche disattivando EAC.
+
+### Causa reale (letta nei timestamp del log, non ipotizzata)
+
+Due controlli winetricks — reinstallazione verb dichiarati (v1.1.117-dev.1) e rilevamento verb installati a mano (`winetricks list-installed`, v1.1.118/119-dev.1) — vivevano dentro `launchGame()` **PRIMA** del lancio vero e proprio, **sincroni e bloccanti**. Il primo ha un timeout di **300 secondi (5 minuti) per singolo verb**. Il log reale dell'utente mostra `dotnet48`, `d3dcompiler_43` e `d3dcompiler_47` colpire quel timeout pieno **in sequenza** — 16 minuti totali prima che `umu-run` venisse anche solo avviato. Lo script di debug esterno (`launch-debug.sh`, che salta questo controllo) ha confermato che `umu-run` fa invece progressi reali (avvio del container steamrt4, generazione locale) una volta rimosso questo collo di bottiglia — l'utente aveva ragionevolmente concluso "non parte nulla" molto prima che i 16 minuti trascorressero.
+
+### `src/backend/gameManager.ts`
+
+Entrambi i controlli estratti in un nuovo metodo privato `reconcileWinetricksVerbs(id, game, profile)` — stessa identica logica di prima (v1.1.117/118/119-dev.1), invariata riga per riga. La chiamata è stata spostata da PRIMA a **DOPO** il lancio riuscito (`runner.launch()`/`launchEpicViaLegendary()`), come **fire-and-forget**: il gioco/launcher parte subito, la riconciliazione dei verb gira in background senza bloccare l'utente — un suo fallimento non interferisce mai con una sessione già avviata con successo.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata, un errore intermedio — `CompatibilityProfile` non importato nel nuovo metodo — trovato e corretto durante la verifica). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre (nessuna modifica a App.tsx).
+
+**Da confermare dall'utente**: che Ubisoft Connect si avvii ora immediatamente, senza il collo di bottiglia dei 16 minuti.
+
+**Nota separata, non ancora affrontata**: il log ha anche rivelato `PROTON_EAC_RUNTIME` impostato sul lancio di Ubisoft Connect stesso (che non ne ha bisogno) — quasi certamente uno switch attivato per errore sulla card sbagliata invece che su quella di Watch Dogs 2, ancora da confermare/correggere lato utente prima di considerare chiusa anche questa pista.
+
+---
+
+## v1.5.20-dev.19 — Bug reale CONFERMATO CON DIAGNOSTICA DIRETTA: dev.18 spostava il blocco, non lo eliminava
+
+Segnalato dall'utente dopo dev.18: Ubisoft Connect ora si avvia velocemente (la finestra compare, confermata in `wmctrl -l`), ma la Dashboard non viene più minimizzata automaticamente e resta in primo piano.
+
+### Causa reale (dimostrata, non ipotizzata)
+
+La minimizzazione è gestita da `tray.py` (script Python separato, non toccato da questa sessione), che fa polling di `GET /api/system/game-running` ogni 2 secondi e nasconde la finestra al primo `running: true`. Diagnostica dell'utente: `wmctrl -l` mostra la finestra col titolo esatto atteso (non un problema di `tray.py`/`wmctrl`), `tray.py` è in esecuzione — ma `curl http://localhost:3000/api/system/game-running` restava **appeso**, senza mai rispondere.
+
+Quell'endpoint fa solo un controllo istantaneo in memoria — se resta bloccato, l'unica spiegazione è che l'**intero processo Node è bloccato** a fare qualcos'altro. Il fix di dev.18 aveva spostato la *posizione* del controllo verb (da prima a dopo il lancio) ma non la sua *natura*: restava `execSync`, che blocca l'intero event loop a thread singolo di Node — indipendentemente da dove si trova nel codice o se la Promise che lo racchiude viene attesa oppure no. Il demone restava sordo a QUALUNQUE richiesta HTTP, incluso il polling di `tray.py`, per tutta la durata della riconciliazione verb in background.
+
+### `src/backend/gameManager.ts`
+
+`reconcileWinetricksVerbs()`: tutte le chiamate `execSync` convertite a `execFileAsync` (`promisify(execFile)`, stesso pattern già usato altrove in questo file e in `downloadManager.ts`) — libera davvero il thread principale invece di limitarsi a spostare quando il blocco avviene.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata, stessi errori). **Test isolato** (node, prima del commit): dimostrato con `execFileAsync` che un altro lavoro asincrono (timer da 500ms) completa regolarmente MENTRE un comando lento (`sleep 2`) è ancora in corso — tempo totale ~2011ms, non 2500ms, prova diretta di esecuzione parallela. Controprova con `execSync`: il timer da 500ms non riesce nemmeno a eseguire il proprio callback fino al termine del comando bloccante (2007ms) — conferma netta del meccanismo esatto che causava il problema.
+
+**Da confermare dall'utente**: che la Dashboard torni a minimizzarsi automaticamente al lancio.
+
+---
+
+## v1.5.20-dev.20 — Bug reale CONFERMATO: riconciliazione verb in parallelo corrompeva la sessione di gioco
+
+Segnalato dall'utente dopo dev.19: Ubisoft Connect si comporta correttamente, ma LEGO Indiana Jones: The Original Adventures (Amazon Games via nile) non parte più — il log mostra il lancio riuscito (PID assegnato, "trattato come lancio riuscito"), la riconciliazione verb che gira regolarmente (vcrun2022/dxvk/vkd3d/corefonts/d3dcompiler/d3d9 tutti OK), ma il gioco non resta in esecuzione.
+
+### Causa reale (dedotta dalla sequenza esatta nel log, non ipotizzata)
+
+dev.18 aveva spostato la riconciliazione verb per girare **dopo** il lancio, come fire-and-forget, per risolvere il blocco di 16 minuti. Ma alcuni di quei verb (`dxvk`, `vkd3d`, `d3dcompiler_*`) **sostituiscono file DLL dentro la prefix Wine** — la STESSA prefix che il gioco appena lanciato sta usando in quel momento. Sostituire DLL mentre un processo le ha già caricate in memoria è una causa nota di instabilità (la stessa ragione per cui ogni guida DXVK raccomanda di chiudere il gioco prima di reinstallarlo). Per Ubisoft Connect il problema è passato inosservato — evidentemente più tollerante o con verb che non toccano DLL in uso attivo — ma per LEGO Indiana Jones la riconciliazione concorrente ha impedito al gioco di restare in esecuzione.
+
+### `src/backend/gameManager.ts`
+
+La chiamata a `reconcileWinetricksVerbs()` è tornata a essere **sequenziale, PRIMA del lancio** (mai più in parallelo con un gioco già avviato) — ma ora `await`-ata invece che fire-and-forget. Il fix reale di dev.19 (conversione a `execFileAsync` invece di `execSync`) resta valido e necessario: il problema originale (demone/Dashboard sordi ad ogni richiesta, incluso il polling di `tray.py`) non era la POSIZIONE della chiamata ma la sua natura bloccante — il demone resta reattivo per tutta la riconciliazione anche stando PRIMA del lancio, la Dashboard continua a rispondere a `/api/system/game-running` (che ora corretamente riporta `running: false` finché il gioco non è davvero partito, non un hang) mentre il gioco parte solo a prefix stabile.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre (nessuna modifica a App.tsx).
+
+**Da confermare dall'utente**: che LEGO Indiana Jones torni a funzionare, e che Ubisoft Connect continui a comportarsi correttamente con la sequenza ripristinata.
+
+---
+
+## v1.5.20-dev.21 — Lancio "leggero" nella sessione condivisa già attiva
+
+Implementata l'architettura discussa e **verificata a mano dall'utente prima di scrivere codice** — non un'idea teorica: con Ubisoft Connect già aperto (avviato con lo switch Umu-launcher attivo), l'utente ha lanciato manualmente `WatchDogs2.exe` con il `wine` incluso nella stessa build Proton puntato sulla stessa prefix (`WINEPREFIX=... wine "WatchDogs2.exe"`, bypassando del tutto un secondo `proton run`/`umu-run`) — il gioco è partito correttamente, Ubisoft Connect si è ridotto a icona riconoscendolo come proprio, ed è tornato in primo piano alla chiusura del gioco. L'intera catena di autorizzazione ha funzionato, confermando che Wine mantiene davvero un solo `wineserver` per `WINEPREFIX` (documentato) e che un secondo processo puntato alla stessa prefix si aggancia alla sessione già viva.
+
+Esplorato ma scartato per ora: lancio nativo tramite `winebrowser.exe "uplay://launch/<id>/0"` (id reale verificato dall'utente su [Haoose/UPLAY_GAME_ID](https://github.com/Haoose/UPLAY_GAME_ID) e confermato dalla cartella `data/2688/` su disco) — bloccato da un errore di disallineamento versione wine/wineserver (`931/957`) mai risolto nonostante diagnosi approfondita (esclusi: processi residui, wineserver di sistema al posto di quello bundlato, disallineamento di date fra i file della build, percorsi `~/.steam/steam` divergenti). Causa più probabile: la natura "in aggiornamento continuo" del ramo Proton - Experimental. Non blocca l'implementazione — l'approccio verificato funzionante non dipende in alcun modo da questa pista, rimandata a un'eventuale ripresa futura.
+
+### `src/backend/runners/implementations.ts`
+
+`expandHome()` esportata (era privata) — riusata da `gameManager.ts` per il nuovo percorso di lancio.
+
+### `src/backend/sharedLauncherManager.ts`
+
+Nuova `launchGameInSharedPrefix(launcherId, exePath, args, cwd)` — risolve la STESSA build Proton che il launcher condiviso sta già usando (mai una build diversa: è esattamente la causa del mismatch di versione appena descritto) tramite `resolveProtonBin()` già esistente, poi il binario `wine` al suo interno (`files/bin/wine` per build moderne, `dist/bin/wine` per build più vecchie — entrambe le convenzioni gestite, verificato con test isolato). Invoca `wine <exe>` direttamente sulla prefix condivisa (`resolveSharedPrefixExecutionPath`, già esistente), bypassando `umu-run`/lo script di Proton per intero.
+
+**Limite noto e dichiarato esplicitamente nel codice, non nascosto**: bypassando lo script di Proton, `PROTON_EAC_RUNTIME`/`PROTON_BATTLEYE_RUNTIME` (lette solo da quello script) non hanno alcun effetto, e il processo non gira dentro il container Steam Linux Runtime.
+
+### `src/backend/gameManager.ts` (`launchGame()`)
+
+Nuova condizione `useSharedPrefixLightLaunch`, generica per QUALUNQUE gioco con `requiresLauncher` (non specifica di Ubisoft Connect) — tutte necessarie: `requiresLauncher` impostato, `executablePath` già risolto, **nessun EAC/BattlEye richiesto per quel gioco** (altrimenti resta sul lancio pieno, che sa gestire l'anticheat), e il launcher condiviso **davvero** in esecuzione in quel momento (non solo "tentato" — il blocco già esistente prima di `db.recordGameLaunch` lo avvia se serve). Quando tutte le condizioni sono vere, sostituisce la normale chiamata a `runner.launch()`/`launchEpicViaLegendary()` con `launchGameInSharedPrefix()`.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata, un errore intermedio — tipo di ritorno di `launchGameInSharedPrefix` senza `logPath`, causava un conflitto di unione con l'altro ramo — trovato e corretto durante la verifica). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre (nessuna modifica a App.tsx). Test isolato: risoluzione del binario `wine` verificata su entrambe le convenzioni di cartella (`files/bin`/`dist/bin`) e sul caso di build inesistente.
+
+**Non ancora testato su hardware reale in questa forma automatizzata** (il percorso manuale equivalente è già stato verificato dall'utente).
+
+---
+
+## v1.5.20-dev.22 — Scelta esplicita dell'utente alla chiusura di un gioco col launcher condiviso
+
+Discusso a fondo con l'utente: alla chiusura di un gioco, il launcher condiviso (es. Ubisoft Connect) resta sempre in esecuzione — nessun codice lo termina mai automaticamente (verificato, non solo osservato). Deciso di **non** costruire una pulizia automatica ("termina tutto prima di ogni lancio" avrebbe vanificato il vantaggio del lancio leggero appena costruito in dev.21, oltre a essere inutile: prefix diverse hanno wineserver indipendenti, non confliggono mai fra loro). La filosofia scelta: la Dashboard non decide da sola su una scelta con un impatto reale (RAM/CPU occupate vs. sessione pronta per il prossimo gioco) — la propone esplicitamente all'utente.
+
+### `src/backend/notificationEngine.ts`
+
+Nuovo evento `shared-launcher-idle` — emesso solo se il launcher condiviso risulta ANCORA in esecuzione dopo la chiusura confermata di un gioco che lo richiedeva. Notifica con due scelte, riusando il sistema `primaryAction`/`secondaryAction` già esistente (stesso pattern di ogni altra notifica azionabile nel progetto, nessun meccanismo nuovo): **"Chiudi ora"** (`handler: 'close_shared_launcher'`) e **"Tieni aperto"** (comportamento di default già esistente, nessuna azione necessaria). Testo it/en inline, stesso schema `lang === 'en' ? ... : ...` già in uso in ogni altro caso di questo file.
+
+### `src/backend/gameManager.ts`
+
+Nell'handler di chiusura gioco (`startGameExitPolling`), subito dopo `onLauncherProcessClosed`: se `game.requiresLauncher` è impostato e `isSharedLauncherRunning()` conferma che è ancora vivo, emette la notifica sopra.
+
+### `src/backend/sharedLauncherManager.ts`
+
+Nuova `closeSharedLauncher(launcherId)` — usa `wineserver -k` (comando ufficiale, documentato, lo stesso già identificato durante il debug di `winebrowser` in questa sessione) sulla **stessa build Proton** che il launcher sta usando (mai un `wineserver` di sistema diverso — stessa causa di mismatch di versione già diagnosticata). Termina l'intera sessione Wine per quella prefix con SIGINT poi SIGKILL, ripulendo anche eventuali processi figli residui (aggiornatori, servizi in background), non solo il processo principale.
+
+### `server.ts` / `src/App.tsx`
+
+Nuovo endpoint `POST /api/shared-launchers/:id/close`. Nuovo ramo nel dispatch delle azioni di notifica per `close_shared_launcher` — chiama l'endpoint e chiude la notifica con `dismissNotification()` (non lo stato `'applied'` usato dalle altre azioni: non ha senso un "ha funzionato?" di riscontro per un'azione fire-and-forget come questa).
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre — nessuna modifica strutturale alla navigazione, solo logica dentro `onEnter` esistenti.
+
+**Non ancora testato su hardware reale.**
+
+---
+
+## v1.5.20-dev.23 — Eredità runner/prefix per giochi col launcher condiviso + aggiornamento script diagnostico
+
+Discusso a fondo con l'utente: cosa succede se il launcher condiviso resta attivo con una build Proton (es. Proton 10) e un gioco che lo richiede viene lanciato con una build diversa (es. Experimental/GE)? Verificato nel codice: il percorso leggero (dev.21) era già corretto per costruzione — legge il runner dal launcher condiviso, mai da quello del gioco. Il **percorso di riserva** (lancio pieno, usato quando il leggero non scatta) invece leggeva ancora `game.runner`/`game.prefixPath` — sbagliati per questa categoria di gioco, dato che l'installazione tramite lo store d'origine non completa mai (vedi saga Watch Dogs 2) e quei due campi restano vuoti o stantii. Se il gioco avesse una build diversa configurata, il percorso di riserva avrebbe tentato un secondo `proton run`/`umu-run` con una build diversa sulla stessa prefix — lo stesso identico mismatch di versione (`931/957`) già diagnosticato dal vivo durante il debug di `winebrowser`.
+
+### `src/backend/gameManager.ts`
+
+In `launchGame()`, prima della risoluzione del runner: se `game.requiresLauncher` è impostato, sia il runner sia il prefix vengono ora **sempre** ereditati dalla riga del launcher condiviso (`db.getGameById('\${launcherId}-launcher')`), mai da `game.runner`/`game.prefixPath` — vale per entrambi i percorsi di lancio, non solo quello leggero. Log esplicito quando avviene questa sostituzione (trasparenza, mai un'eredità silenziosa non spiegata). `reconcileWinetricksVerbs()` esteso con due nuovi parametri (`runnerId`, `prefixPath`) invece di leggere `game.runner`/`game.prefixPath` internamente — stesso principio, un gioco con `requiresLauncher` deve riconciliare i verb sulla prefix condivisa corretta, non su una propria isolata mai esistita. La riconciliazione automatica (`syncExternalInstallStates`) ora scrive anche `prefixPath` sul DB, non solo `executablePath` — dato coerente per chiunque altro lo legga in futuro, anche se il lancio non dipende più da questo campo per funzionare.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata, un errore intermedio — tipo `string | undefined` vs `string | null` sul nuovo parametro — trovato e corretto durante la verifica). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre (nessuna modifica a App.tsx).
+
+### `launch-debug.sh` — nuovo `--mode shared` (script esterno, non versionato, non parte del progetto)
+
+Aggiunta la terza modalità richiesta dall'utente per testare fuori dalla Dashboard il meccanismo leggero/pieno appena corretto: `--mode shared` (richiede il nuovo `--launcher-exe-hint`) rileva se il launcher condiviso risulta già in esecuzione (stesso meccanismo di `isSharedLauncherRunning()`, `pgrep -f` sul nome dell'eseguibile) — se sì, lancia con `wine` incluso nella build `--runner` direttamente sulla prefix condivisa (nessun `proton run`/`umu-run`); se no, ripiega sulla stessa identica sequenza di `--mode umu`. Riepilogo pre-lancio esteso per mostrare sia la modalità richiesta sia quella effettivamente scelta.
+
+**Bug reale trovato testando lo script stesso, corretto prima della consegna**: `pgrep -f` sul nome del launcher trovava **sempre** una corrispondenza, anche a launcher spento — perché `--launcher-exe-hint` viene passato come argomento allo script stesso, la cui riga di comando contiene quindi letteralmente il testo cercato (`pgrep -f` confronta la riga di comando intera). Confermato con un test isolato: un caso con il launcher genuinamente assente (verificato con un `pgrep` indipendente) risultava comunque "già in esecuzione" senza il fix. Corretto escludendo esplicitamente il proprio PID (`$$`) dai risultati. **Non è un bug del codice reale della Dashboard** — `isSharedLauncherRunning()` gira dentro il processo del demone Node, la cui riga di comando non contiene mai il nome del launcher cercato, quindi non soffre di questo problema — un artefatto specifico di come lo script diagnostico passa i propri parametri.
+
+Verificato con un secondo test isolato, dopo il fix: caso "launcher attivo" (processo finto reale, confermato da un `pgrep` indipendente) → lancio leggero corretto; caso "launcher assente" (stesso, confermato assente) → ripiego su `umu-run` corretto; `--mode direct` originale non toccato dalla modifica, riverificato per esclusione di regressioni.
+
+---
+
+## v1.5.20-dev.24 — Bug reale CONFERMATO DALL'UTENTE: mismatch del metodo di sincronizzazione nel lancio leggero
+
+Test dell'utente con `--mode shared` dopo dev.23: con Ubisoft Connect già attivo in systray, il lancio leggero di Watch Dogs 2 restava bloccato in silenzio (nessuna finestra, nessun errore, il processo semplicemente non progrediva). Impostando manualmente `WINEFSYNC=1` prima di invocare lo script, il gioco partiva correttamente.
+
+### Causa reale
+
+Quando Ubisoft Connect parte tramite il percorso pieno (`umu-run`/Proton), lo script di Proton **rileva da solo** il supporto fsync del kernel e lo attiva internamente (imposta `WINEFSYNC=1`) prima di invocare `wine` — il `wineserver` nasce quindi già con fsync attivo. Il lancio leggero (dev.21) invoca `wine` nudo, bypassando per design quello script — senza impostare esplicitamente questa variabile, il nuovo processo tenta di agganciarsi al wineserver già attivo con un metodo di sincronizzazione diverso da quello con cui è nato. A differenza del mismatch di versione (`931/957`, un errore esplicito già diagnosticato in una sessione precedente), questo si manifesta come un blocco silenzioso — stessa causa di fondo (due processi sulla stessa prefix devono combaciare in tutto, non solo nella build Proton), manifestazione diversa.
+
+### `src/backend/sharedLauncherManager.ts`
+
+`launchGameInSharedPrefix()`: aggiunta `WINEFSYNC: '1'` esplicita nell'ambiente passato al processo `wine`. Commento esteso aggiornato per includere questo limite accanto a quelli già noti (bypass di PROTON_EAC_RUNTIME/BATTLEYE_RUNTIME e del container SLR).
+
+### `launch-debug.sh` (script esterno, non versionato, non parte del progetto)
+
+Stessa correzione nel branch `light`: `export WINEFSYNC=1`. Riepilogo pre-lancio esteso per mostrarla esplicitamente quando applicata. Verificato con test isolato (binario `wine` finto che stampa le proprie variabili d'ambiente) che la variabile arriva davvero al processo, non solo al riepilogo testuale.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). Test isolato sullo script: confermato che `WINEFSYNC=1` viene ricevuto dal processo `wine` invocato nel percorso leggero.
+
+**Limite dichiarato**: assume supporto fsync del kernel — praticamente universale sui kernel Linux moderni (verificato funzionante sul sistema reale dell'utente), non garantito su un kernel molto datato dove Proton potrebbe aver scelto un metodo diverso (esync o server-side) — in quel caso raro andrebbe rilevato dinamicamente invece di assunto, non ancora affrontato.
+
+**Da confermare dall'utente**: che il lancio leggero funzioni ora regolarmente anche nella Dashboard vera (non solo nello script diagnostico) con questo fix.
+
+---
+
+## v1.5.20-dev.25 — Bug reale CONFERMATO DALL'UTENTE: riconciliazione verb disturbava il launcher già attivo
+
+Test dell'utente dopo dev.24: dalla Dashboard, Watch Dogs 2 parte e gira correttamente con Ubisoft Connect già aperto (lancio leggero confermato funzionante) — ma alla chiusura del gioco, la finestra di Ubisoft Connect torna in primo piano **completamente nera**, seguita da un errore "rundll32" e, rispondendo No, dall'apertura del file manager di Wine. Lo stesso identico scenario riprodotto con lo script diagnostico **non presenta mai** questo problema.
+
+### Causa reale
+
+`reconcileWinetricksVerbs()` gira incondizionatamente prima di ogni lancio, indipendentemente dallo store o da `requiresLauncher`. Prima di dev.23, per un gioco come Watch Dogs 2 il suo `prefixPath` restava vuoto/sbagliato — quella riconciliazione era di fatto un no-op per questa categoria di gioco. Dev.23 ha corretto `effectivePrefixPath` a risolversi sempre sulla prefix condivisa vera — ma questo significa che ora, se il launcher condiviso è **già in esecuzione** al momento del lancio (esattamente lo scenario testato: un secondo gioco Ubisoft lanciato con Ubisoft Connect ancora aperto), la riconciliazione interroga davvero quella prefix **mentre il launcher la sta attivamente usando**. Il secondo blocco della riconciliazione (`winetricks list-installed`) gira sempre quando `prefixPath` è valorizzato, indipendentemente dai verb dichiarati sul gioco stesso — e può disturbare un processo GUI già attivo sulla stessa prefix. Stessa identica classe di problema di dev.20 (operazioni winetricks concorrenti a un processo già attivo sulla stessa prefix Wine), qui con un "già attivo" diverso: non un lancio precedente dello stesso gioco, ma il launcher condiviso stesso. Lo script diagnostico non lo riproduce mai perché non fa **alcuna** riconciliazione verb — da qui la differenza di comportamento osservata dall'utente.
+
+### `src/backend/gameManager.ts`
+
+In `launchGame()`: quando `game.requiresLauncher` è impostato, `reconcileWinetricksVerbs()` viene ora **saltata del tutto**, con un log esplicito del motivo. La riconciliazione della prefix condivisa resta comunque coperta correttamente: avviene già, sequenziale e sicura, nel momento in cui è il launcher condiviso **stesso** a essere lanciato dalla propria card — un gioco dipendente non deve né può rifarla in sicurezza sulla sessione di qualcun altro.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata).
+
+**Da confermare dall'utente**: che l'intera cascata di sintomi (finestra nera, errore rundll32, file manager di Wine) sparisca del tutto con questo fix — sono tutti presumibilmente conseguenze a valle della stessa causa, non bug separati, ma resta da confermare sul sistema reale.
+
+---
+
+## v1.5.20-dev.26 — Bug reale CONFERMATO CON LOG: launchSharedLauncher() usava un runner congelato al bootstrap
+
+Il fix di dev.25 non ha risolto — segnalato dall'utente con log alla mano, stavolta inequivocabile (non una nuova ipotesi da verificare): con Ubisoft Connect NON ancora in esecuzione, avviando Watch Dogs 2 dalla sua card, il log mostra:
+
+```
+[PROTON] (umu-run) /usr/bin/umu-run .../windows/explorer.exe
+[PROTON-ENV] ... PROTONPATH=/home/daniele/.local/share/Steam/compatibilitytools.d/GE-Proton11-1 ...
+```
+
+Due problemi diretti, non sintomi a valle: il launcher condiviso viene avviato con **GE-Proton11-1**, mentre Watch Dogs 2 (poco dopo, correttamente) usa "Proton 10.0" — e l'eseguibile lanciato è **`windows/explorer.exe`**, non `UbisoftConnect.exe`.
+
+### Causa reale
+
+`launchSharedLauncher()` (la funzione che avvia il launcher condiviso quando scatta automaticamente per un gioco dipendente) leggeva il runner da `state.runner` — un valore scritto **una sola volta**, al momento del bootstrap iniziale, nella tabella `shared_launchers`. Il Runner Bridge che l'utente vede/modifica sulla card di Ubisoft Connect scrive invece su `games.runner` — un campo completamente diverso. L'utente aveva cambiato il runner di Ubisoft Connect da GE-Proton11-1 (bootstrap originale) a Proton 10.0 tramite l'overlay in una sessione precedente — quella modifica aggiorna solo `games.runner`, mai la copia congelata in `shared_launchers`, usata **solo** da questa funzione. Risultato: GE-Proton11-1, mai più usato con questa prefix da allora (ormai abituata a Proton 10.0), veniva rilanciato — `windows/explorer.exe` è il comportamento di ripiego di Proton quando qualcosa non torna nella risoluzione dell'eseguibile.
+
+Questo è esattamente lo stesso principio già applicato in **dev.23** al gioco dipendente (che eredita il runner dalla riga `games` del launcher, mai da un valore statico) — era rimasto da applicare anche al lancio del launcher **stesso**. `closeSharedLauncher()` (dev.22) risultava già corretto fin dall'inizio, verificato per esclusione.
+
+### `src/backend/sharedLauncherManager.ts`
+
+`launchSharedLauncher()`: il runner viene ora letto da `db.getGameById('\${launcherId}-launcher')?.runner` — la stessa, sola fonte di verità già usata ovunque altro nel codice — con `state.runner` (il valore congelato al bootstrap) come ripiego solo se la riga `games` non ha un runner impostato. Log esplicito quando i due valori divergono, per trasparenza.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata).
+
+**Da confermare dall'utente**: che Watch Dogs 2 parta ora correttamente anche a freddo (Ubisoft Connect non ancora avviato), con il launcher condiviso lanciato con la build corretta e la propria interfaccia visibile invece di `explorer.exe`.
+
+---
+
+## v1.5.20-dev.27 — Causa vera trovata (query DB diretta), eliminata la duplicazione, 2 fix collaterali richiesti dall'utente
+
+Il fix di dev.26 non bastava — l'utente ha interrogato direttamente il database invece di continuare a ipotizzare, trovando la causa reale in un colpo solo.
+
+### Causa reale, confermata con query diretta
+
+```
+launcher_id      | launcher_exe          | bootstrapped_at          | runner
+ubisoft-connect  | windows/explorer.exe  | 2026-07-29T17:54:09.834Z | GE-Proton11-1
+```
+
+`launcher_exe` era sbagliato **fin dal bootstrap originale** (29 luglio) — mai un problema introdotto in questa sessione. Nessuno se n'era accorto perché la funzione che *legge* questo campo per lanciare automaticamente il launcher (`launchSharedLauncher()`, arrivata solo con dev.14) non esisteva ancora: l'utente ha sempre avviato Ubisoft Connect a mano dalla sua card, che usa `games.executablePath` — un campo diverso, sempre corretto perché mantenuto aggiornato dalla Dashboard ad ogni lancio riuscito. Stessa causa profonda di dev.26 (due tabelle per lo stesso concetto, che driftano), ma ancora più estesa: **anche** `isSharedLauncherRunning()` usava lo stesso campo corrotto per il rilevamento (`pgrep -f` sul nome base di `launcher_exe`) — cercava un processo chiamato `explorer.exe`, mai il vero launcher, da settimane. Questo spiega buona parte dell'incoerenza osservata fra script diagnostico (che riceve `--launcher-exe-hint` corretto a mano) e Dashboard in tutta questa indagine.
+
+### `src/backend/sharedLauncherManager.ts` — eliminata la duplicazione, non solo corretto il sintomo
+
+Su richiesta esplicita dell'utente di "distinguere runner e shared_runner": `games.executablePath`/`games.runner` (riga `${launcherId}-launcher`) diventano l'**unica** fonte di verità, ovunque:
+- `isSharedLauncherRunning()`: rilevamento ora basato su `games.executablePath`, mai più su `state.launcherExe`
+- `launchSharedLauncher()`: runner ed eseguibile letti **solo** da `games`, `state.launcherExe`/`state.runner` non più letti affatto (restano nello schema per compatibilità, semplicemente ignorati)
+
+La riga corrotta nel DB resta lì ma diventa innocua — nessun codice la legge più per queste due funzioni.
+
+### `src/App.tsx` — Runner Bridge: nasconde, non solo blocca (richiesta esplicita dell'utente)
+
+Il blocco precedente permetteva comunque di scegliere qualunque build Proton diversa da quella del launcher condiviso (vietava solo Wine) — l'overlay mostrava una scelta che il lancio reale ignorava silenziosamente (dev.23), fonte diretta di confusione. Ora, quando un gioco eredita il runner da un launcher condiviso: le build alternative vengono **nascoste** (non solo disattivate), resta visibile solo quella realmente in uso (letta dalla riga `games` del launcher, stessa fonte di verità del backend), con una didascalia esplicita ("Ereditato dal launcher condiviso — modificalo dalla sua card", nuova chiave `gameOptions:runnerInheritedFromLauncher`, it+en). Ripiego difensivo se la riga del launcher non è ancora nota: mostra l'elenco completo bloccato invece di una sezione vuota.
+
+### Bug reale trovato nel sistema di notifiche (richiesta esplicita dell'utente)
+
+Segnalato: i pulsanti della notifica "tieni aperto / chiudi ora" (dev.22) sparivano dopo pochi secondi, impedendo la scelta. Causa: **due implementazioni duplicate** dell'auto-scomparsa notifiche (`useNotifications.ts` per quelle create lato client, l'handler EventSource in `App.tsx` per quelle dal backend) auto-chiudevano qualunque notifica `type:'info'` dopo 6 secondi — la mia notifica di dev.22 è `type:'info'`, quindi ci cadeva dentro senza che l'utente potesse decidere. Fix in entrambe le implementazioni: l'auto-scomparsa ora si applica solo se la notifica **non ha alcuna azione** (`primaryAction`/`secondaryAction`/`tertiaryAction` tutte assenti) — un avviso genuinamente transitorio (cambio modalità, passaggio a desktop) continua a sparire da solo; qualunque notifica con una scelta da compiere resta finché l'utente non decide davvero.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre — nessun nuovo riferimento rotto nonostante il cambio del numero di tile effettivamente renderizzati nel Runner Bridge quando bloccato.
+
+**Non ancora corretto in questa voce**: la riga corrotta nel DB resta fisicamente presente (innocua ma non ripulita) — non necessario dato che nessun codice la legge più, ma segnalato per trasparenza.
+
+**Da confermare dall'utente**: che Watch Dogs 2 parta ora correttamente a freddo, che l'overlay di Watch Dogs 2 mostri solo Proton 10.0 come opzione, e che la notifica di chiusura del launcher condiviso resti visibile finché non si sceglie esplicitamente.
+
+---
+
+## v1.5.20-dev.28 — Ereditarietà Umu-launcher + filtro "Launcher condiviso" sulla propria card
+
+**CONFERMATO DALL'UTENTE**: la catena Watch Dogs 2 → Ubisoft Connect funziona correttamente end-to-end. Confermato anche empiricamente che nel percorso leggero lo switch Umu-launcher sul gioco è ininfluente (eredita il container già attivo dal launcher condiviso) — ma questo non dice nulla sul percorso di riserva, dove il campo viene letto davvero e una combinazione disallineata resterebbe un caso mai verificato (due container Steam Linux Runtime potenzialmente distinti sulla stessa prefix).
+
+Discusse 3 opzioni con l'utente per Umu-launcher (eredita/lascia invariato/oscura come il Runner Bridge) — scelta l'opzione 3, stessa filosofia già applicata al Runner Bridge in dev.27: mai offrire una scelta indipendente che il lancio reale potrebbe ignorare o, in un caso limite, generare una combinazione non testata.
+
+### `server.ts`
+
+`GET /api/shared-launchers` esteso con un nuovo campo `umuRun` per voce (letto da `db.getCompatProfile('\${def.id}-launcher')`) — necessario al frontend per mostrare lo stato REALE del launcher condiviso quando un gioco lo eredita, non un valore indovinato.
+
+### `src/App.tsx` — due correzioni distinte nella stessa griglia Compatibility Layer
+
+**1) Umu-launcher bloccato quando ereditato** (richiesta esplicita): quando `requiresLauncher` è impostato, il tile mostra lo stato reale del launcher condiviso (letto dal nuovo campo sopra) e diventa non selezionabile — riusa lo stesso guardiano `!available` già in uso per ogni altro tile oscurato (EAC/BattlEye quando il runner è incompatibile), nessun meccanismo nuovo.
+
+**2) "Launcher condiviso" nascosto sulla card del launcher stesso** (la "finezza" richiesta): un launcher non può dipendere da sé stesso — il tile ora scompare del tutto (non solo disattivato) quando il gioco selezionato **è** uno dei launcher condivisi noti, riconosciuto per convenzione d'id (`\${launcherId}-launcher`, la stessa già usata ovunque nel backend — nessun flag nuovo, solo un confronto con l'elenco `sharedLaunchers` già caricato). Stesso principio "griglia si adatta al numero reale di tile visibili" già verificato in dev.27 per il Runner Bridge — la formula di ancoraggio dell'ultima riga si ricalcola da sola sulla lunghezza dell'array filtrato, nessun aggiustamento manuale necessario.
+
+### Verifica
+
+`tsc --noEmit`: 8 (baseline invariata — la struttura ad IIFE necessaria per calcolare i due filtri prima della griglia ha richiesto particolare attenzione alla chiusura delle parentesi, verificata con la compilazione reale invece che a conteggio manuale). `check-focus-ids.cjs`: 103 id, stesso falso positivo di sempre, nessun nuovo riferimento rotto nonostante il numero di tile renderizzati cambi in entrambi gli scenari nuovi (card del launcher: 6 tile invece di 7; gioco dipendente: Umu-launcher bloccato invece che libero).
+
+**Non ancora testato su hardware reale.**
+
+---
 ### Nota — script diagnostico esterno generalizzato (non versionato, non parte del progetto)
 
 `launch-ubisoft-connect-debug.sh` riscritto e rinominato `launch-debug.sh`: non più specifico per Ubisoft Connect, ora strumento generico per qualunque gioco/launcher Proton in difficoltà. Aggiunta la modalità `--mode umu` (via `umu-run`, il fix di questa stessa voce) accanto a `--mode direct` (comportamento precedente, bypassa il container SLR) per un confronto A/B diretto sullo stesso prefix/eseguibile. Tutti i percorsi prima hardcoded (runner, prefix, eseguibile, DLL override) sono ora parametri da riga di comando (`--runner`, `--prefix`, `--gameid`, `--dll-override`, `--env`, `--gamemode`, `--game-logs`, ecc. — vedi `--help`). Log di Proton/umu-run e l'intera sessione (stdout/stderr del processo incluso) finiscono in un'unica cartella con timestamp, elencata per intero a fine esecuzione invece di assumere un nome file preciso (la naming convention interna di `steam-<appid>.log` non è stata verificata in ogni dettaglio). Testato con binari finti (`proton`/`umu-run`/`gamemoderun` mock) per entrambe le modalità, percorsi con spazi, variabili extra ed elenco log del gioco — nessun test su hardware reale ancora.

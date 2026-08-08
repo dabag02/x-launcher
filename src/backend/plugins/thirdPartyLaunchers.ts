@@ -16,9 +16,24 @@
  * seguito per Amazon/nile (Step 19c).
  */
 
+import { StoreType } from '../../types';
+
 export interface ThirdPartyLauncherDefinition {
   id: string;
   displayName: string;
+
+  /**
+   * v1.5.20-dev.10 — collega questo launcher al proprio StorePlugin (es.
+   * 'Ubisoft' per UbisoftConnectPlugin) — un solo punto dove tradurre fra
+   * i due spazi di id distinti (lo `store` su cui gira ogni Game riga, e
+   * il `launcherId` usato da sharedLauncherManager.ts/thirdPartyLaunchers
+   * stesso), invece di stringhe duplicate sparse in gameManager.ts/
+   * downloadManager.ts. Nessun launcher-plugin unico (deciso esplicitamente
+   * con l'utente: ogni launcher resta un proprio StorePlugin per le
+   * proprie particolarità — card, switch, libreria interna) — questo
+   * campo è solo il ponte fra i due registri, non un accorpamento.
+   */
+  storeId: StoreType;
 
   /**
    * Pagina ufficiale di download — MAI un URL di file binario diretto.
@@ -66,6 +81,17 @@ export interface ThirdPartyLauncherDefinition {
   requiredWinetricksVerbs: string[];
 
   /**
+   * v1.5.20-dev.10 — pattern (case-insensitive, sintassi `find -iname`)
+   * per riconoscere l'installer di QUESTO launcher già scaricato in
+   * ~/Downloads — prima hardcoded dentro findInstallerInDownloads()
+   * (solo `*ubisoft*`/`*uplay*`), ora dato dichiarativo per launcher,
+   * stesso principio del resto del file. Vuoto finché non verificato con
+   * un download reale del vero installer (stesso principio di verified
+   * sotto — mai indovinato).
+   */
+  installerFilenameHints: string[];
+
+  /**
    * false finché non testato con un bootstrap completo + almeno un gioco
    * reale installato dentro, su hardware reale. Non un flag decorativo:
    * governa se la Fase 2 (lettura libreria interna) può fidarsi delle
@@ -78,16 +104,19 @@ export const THIRD_PARTY_LAUNCHERS: ThirdPartyLauncherDefinition[] = [
   {
     id: 'ubisoft-connect',
     displayName: 'Ubisoft Connect',
+    storeId: 'Ubisoft',
     installerUrl: 'https://www.ubisoft.com/en-us/ubisoft-connect/download',
     executableRelPathHint: 'Program Files (x86)/Ubisoft/Ubisoft Game Launcher/UbisoftConnect.exe',
     libraryReader: 'unknown',
     directLaunchUriTemplate: 'uplay://launch/{id}/0',
     requiredWinetricksVerbs: [],
+    installerFilenameHints: ['*ubisoft*', '*uplay*'],
     verified: false,
   },
   {
     id: 'ea-app',
     displayName: 'EA App',
+    storeId: 'EA App',
     // Da compilare quando affrontato — nessun URL/path indovinato ora.
     installerUrl: '',
     executableRelPathHint: '',
@@ -97,30 +126,48 @@ export const THIRD_PARTY_LAUNCHERS: ThirdPartyLauncherDefinition[] = [
     // lasciato null finché non testato, non copiato per assunzione.
     directLaunchUriTemplate: null,
     requiredWinetricksVerbs: [],
+    installerFilenameHints: [],
     verified: false,
   },
   {
     id: 'battlenet',
     displayName: 'Battle.net',
+    storeId: 'Battle.net',
     installerUrl: '',
     executableRelPathHint: '',
     libraryReader: 'unknown',
     directLaunchUriTemplate: null,
     requiredWinetricksVerbs: [],
+    installerFilenameHints: [],
     verified: false,
   },
   {
     id: 'rockstar-launcher',
     displayName: 'Rockstar Games Launcher',
+    storeId: 'Rockstar Games Launcher',
     installerUrl: '',
     executableRelPathHint: '',
     libraryReader: 'unknown',
     directLaunchUriTemplate: null,
     requiredWinetricksVerbs: [],
+    installerFilenameHints: [],
     verified: false,
   },
 ];
 
 export function getThirdPartyLauncherDefinition(id: string): ThirdPartyLauncherDefinition | undefined {
   return THIRD_PARTY_LAUNCHERS.find(l => l.id === id);
+}
+
+/**
+ * v1.5.20-dev.10 — l'altro verso del ponte: dato lo `store` di una riga
+ * `games` (o di un DownloadTask), trova la definizione del launcher terzo
+ * corrispondente — un solo punto invece di ripetere `store === 'Ubisoft'`
+ * in gameManager.ts/downloadManager.ts. Restituisce undefined per
+ * qualunque store che non sia un launcher condiviso (Steam, GOG, ecc.) —
+ * il chiamante lo usa già così, come "non è uno di questi", non come
+ * errore.
+ */
+export function getThirdPartyLauncherByStoreId(storeId: string): ThirdPartyLauncherDefinition | undefined {
+  return THIRD_PARTY_LAUNCHERS.find(l => l.storeId === storeId);
 }

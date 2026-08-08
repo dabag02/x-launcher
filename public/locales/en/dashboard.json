@@ -83,5 +83,17 @@
     "displayModeBody": "Preference saved — will take effect on the next Dashboard restart.",
     "switchToDesktopTitle": "Switching to Desktop",
     "switchToDesktopBody": "X-Launcher stays running in the background — come back here from XFCE's user menu."
+  },
+  "fileBrowser": {
+    "title": "Choose file",
+    "up": "Up",
+    "home": "Home",
+    "downloads": "Downloads",
+    "removableMedia": "Removable media",
+    "filterOn": "Installer files only",
+    "filterOff": "All files",
+    "emptyFolder": "Empty folder",
+    "noRemovableMedia": "No removable media inserted",
+    "communicationError": "Could not reach the daemon."
   }
 }

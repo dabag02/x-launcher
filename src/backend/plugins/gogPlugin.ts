@@ -476,12 +476,41 @@ export class GOGPlugin extends StorePlugin {
       // sintassi confermata funzionante da un esempio reale trovato con una
       // ricerca in precedenza — testuale, non JSON: il parsing sotto cerca
       // righe con una dimensione invece di interpretare JSON.
-      const proc = spawn('lgogdownloader', ['--list', 'details', '--game', slug, '--no-color'], {
+      // v1.5.20-dev.11 — bug reale segnalato dall'utente: per "The
+      // Witcher" e "The Witcher 3 Wild Hunt (GOTY/Complete Edition)"
+      // l'output risultava vuoto (log: "Getting product data 2 / 2"
+      // invece di "1 / 1" come per gli altri giochi). Causa verificata
+      // (non ipotizzata): --game di lgogdownloader è documentato come
+      // un FILTRO REGEX (sintassi Perl), non una corrispondenza esatta
+      // sull'id — confermato anche da una issue reale sul repository
+      // ufficiale (Sude-/lgogdownloader#213: "--game army_men scarica
+      // tutti e 5 i titoli il cui nome contiene la stringa 'army_men'
+      // invece di uno solo"). Uno slug come "the_witcher", passato senza
+      // ancoraggio, matcha ANCHE come sottostringa altri giochi posseduti
+      // che lo contengono (es. "the_witcher_3_wild_hunt_..." inizia
+      // proprio con "the_witcher") — lgogdownloader interroga quindi
+      // l'API per PIÙ prodotti insieme invece di uno solo, un'operazione
+      // più lenta che con giochi/DLC in serie o edizioni multiple può
+      // avvicinarsi o superare il timeout di 20s sotto, lasciando stdout
+      // vuoto (i dati veri vengono stampati solo a fine ciclo, mai
+      // raggiunto) mentre stderr accumula i messaggi di progresso
+      // "Getting product data N / M" per ciascun prodotto matchato.
+      // Fix: ancorare il regex a inizio/fine stringa (^...$, sintassi
+      // Perl standard) cosi combacia SOLO con questo slug esatto,
+      // indipendentemente da eventuali altri giochi/DLC che lo
+      // contengono come sottostringa.
+      const proc = spawn('lgogdownloader', ['--list', 'details', '--game', `^${slug}$`, '--no-color'], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let stdout = '';
       let stderr = '';
-      const timer = setTimeout(() => { proc.kill(); resolve(null); }, 20_000);
+      // v1.5.20-dev.11 — margine di sicurezza aggiuntivo: 20s→30s. Il fix
+      // sopra (ancoraggio del regex) risolve la causa reale del timeout
+      // osservato, ma un singolo prodotto con molta storia di versioni/
+      // lingue (proprio il caso Witcher) può comunque restare più lento
+      // della media — meglio un margine più ampio che rischiare un altro
+      // taglio prematuro per un caso limite non ancora incontrato.
+      const timer = setTimeout(() => { proc.kill(); resolve(null); }, 30_000);
 
       proc.stdout.on('data', (d) => { stdout += d.toString(); });
       proc.stderr.on('data', (d) => { stderr += d.toString(); });

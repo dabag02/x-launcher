@@ -307,6 +307,19 @@ if (!existingCols.includes('predicted_size_bytes')) {
 if (!existingCols.includes('requires_launcher')) {
   db.exec("ALTER TABLE games ADD COLUMN requires_launcher TEXT");
 }
+// v1.5.20-dev.14 — richiesta utente: alcuni giochi (es. titoli Ubisoft
+// riscattati su Epic, vedi CHANGELOG.md) non hanno MAI file scaricabili
+// tramite il proprio store d'origine — legendary lo scopre solo durante
+// il tentativo di installazione stesso ("does not ship executable game
+// files"), non prima. Una volta riconosciuto (vedi
+// StorePlugin.detectUnrecoverableInstallFailure), smettiamo di lasciare
+// che l'utente riprovi un'installazione destinata a fallire sempre —
+// la card mostra invece un invito ad installare dal launcher condiviso.
+// NULL/0 = comportamento invariato per tutti gli store che non hanno
+// questo concetto.
+if (!existingCols.includes('store_install_unavailable')) {
+  db.exec("ALTER TABLE games ADD COLUMN store_install_unavailable INTEGER NOT NULL DEFAULT 0");
+}
 // v1.1.108-dev.1: budget token per-provider (sostituisce l'unico numero
 // globale precedente, vedi appConfig.ts) + tracciamento mese già avvisato
 // alla soglia 80%.
@@ -411,6 +424,7 @@ function rowToGame(row: any): Game {
     verifiedAt:         row.verified_at ?? undefined,
     verificationMethod: row.verification_method ?? undefined,
     requiresLauncher:   row.requires_launcher ?? undefined,
+    storeInstallUnavailable: row.store_install_unavailable === 1,
   };
 }
 
@@ -811,6 +825,12 @@ export function updateGameConfig(id: string, config: {
   // null = rimuove la dipendenza (il gioco torna a un prefix isolato al
   // prossimo lancio/installazione).
   requiresLauncher?: string | null;
+  // v1.5.20-dev.14 — vedi ALTER TABLE sopra per il perché. Gestito a
+  // parte sotto (non nella colMap generica): better-sqlite3 rifiuta un
+  // booleano JS diretto come parametro, va convertito esplicitamente in
+  // 0/1 — stesso principio già seguito altrove nel file per ogni altro
+  // campo booleano.
+  storeInstallUnavailable?: boolean;
 }): void {
   // Mappa campo JS → colonna SQL
   const colMap: Record<string, string> = {
@@ -836,6 +856,11 @@ export function updateGameConfig(id: string, config: {
       setClauses.push(`${sqlCol} = @${jsKey}`);
       params[jsKey] = (config as any)[jsKey] ?? null;
     }
+  }
+
+  if ('storeInstallUnavailable' in config) {
+    setClauses.push('store_install_unavailable = @storeInstallUnavailable');
+    params.storeInstallUnavailable = config.storeInstallUnavailable ? 1 : 0;
   }
 
   if (setClauses.length === 0) return;

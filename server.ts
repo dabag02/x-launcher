@@ -4,7 +4,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { gameManager } from './src/backend/gameManager';
 import { compatibilityManager } from './src/backend/compatibilityManager';
-import { downloadManager } from './src/backend/downloadManager';
+import { downloadManager, resolveDownloadsDir } from './src/backend/downloadManager';
 import { writeLog, LOG_PATH_EXPORT } from './src/backend/logger';
 import { notificationEngine } from './src/backend/notificationEngine';
 import { knowledgeBase } from './src/backend/knowledgeBase';
@@ -13,12 +13,14 @@ import * as attemptTracker from './src/backend/aiProviders/attemptTracker';
 import { readAppConfig, writeAppConfig, hasLanguageBeenSet } from './src/backend/appConfig';
 import { getSystemInfo } from './src/backend/systemInfo';
 import { DATA_DIR, ENV_PATH } from './src/backend/paths';
-import { THIRD_PARTY_LAUNCHERS } from './src/backend/plugins/thirdPartyLaunchers';
+import { THIRD_PARTY_LAUNCHERS, getThirdPartyLauncherDefinition } from './src/backend/plugins/thirdPartyLaunchers';
+import { listDirectory, resolveRemovableMediaRoot } from './src/backend/fileManager';
 import {
   getSharedLauncherState,
   openInstallerPage,
   markLauncherBootstrapped,
   launchSharedLauncher,
+  closeSharedLauncher,
   isLauncherBootstrapped,
 } from './src/backend/sharedLauncherManager';
 import fs from 'fs';
@@ -109,7 +111,32 @@ async function startServer() {
     // arrivava un library-updated per un altro motivo, o un riavvio.
     notifyLibraryUpdated();
   });
-  downloadManager.onError((gameId, gameTitle, error) => {
+  downloadManager.onError((gameId, gameTitle, error, recentOutput) => {
+    // v1.5.20-dev.14 — richiesta utente: alcuni titoli (es. Ubisoft
+    // riscattati su Epic) non hanno mai file scaricabili tramite il
+    // proprio store — invece di lasciare che l'utente riprovi
+    // un'installazione destinata a fallire sempre, il plugin proprietario
+    // riconosce (se sa farlo — vedi StorePlugin.detectUnrecoverableInstallFailure,
+    // no-op per la maggioranza degli store) il fallimento definitivo
+    // dall'output reale già catturato (dev.13), e qui marchiamo il gioco
+    // di conseguenza e suggeriamo il launcher condiviso nel messaggio.
+    const plugin = gameManager.getPluginForStore(
+      downloadManager.getTasks().find(t => t.gameId === gameId)?.store
+        ?? db.getGameById(gameId)?.store
+        ?? ''
+    );
+    const unrecoverable = !!recentOutput && !!plugin?.detectUnrecoverableInstallFailure(recentOutput);
+    if (unrecoverable) {
+      db.updateGameConfig(gameId, { storeInstallUnavailable: true });
+      const game = db.getGameById(gameId);
+      const launcherDef = game?.requiresLauncher ? getThirdPartyLauncherDefinition(game.requiresLauncher) : undefined;
+      const suggestion = launcherDef
+        ? `Questo titolo non è scaricabile da qui — installalo da ${launcherDef.displayName} (già impostato come launcher condiviso per questo gioco).`
+        : `Questo titolo non è scaricabile da qui — impostalo su "Launcher condiviso" nelle opzioni del gioco e installalo da lì.`;
+      notificationEngine.emit({ type: 'download-error', gameId, gameTitle, error: suggestion });
+      notifyLibraryUpdated();
+      return;
+    }
     notificationEngine.emit({ type: 'download-error', gameId, gameTitle, error });
   });
   // v0.99.35 — esito lookup Heroic known-fixes, per trasparenza
@@ -491,6 +518,41 @@ async function startServer() {
     res.json(await downloadManager.browseInstaller(gameId));
   });
 
+  // v1.5.20-dev.12 — Fase A.4: file manager nativo controller-navigabile.
+  // La selezione avviene già lato client (l'utente ha navigato nell'overlay
+  // in-app) — qui arriva solo il path finale da confermare, stessa
+  // convalida/completamento di installer-browse ma senza dialog nativo.
+  app.post("/api/downloads/installer-select", (req, res) => {
+    const gameId = req.body.gameId ?? req.body.id;
+    const filePath = req.body.path;
+    if (!gameId || !filePath) return res.status(400).json({ success: false, message: 'gameId e path richiesti' });
+    res.json(downloadManager.confirmInstallerPath(gameId, filePath));
+  });
+
+  // v1.5.20-dev.12 — Fase A.4: elenco di una cartella arbitraria per il
+  // file manager nativo. `extensions` opzionale, separato da virgola
+  // (es. "exe,msi,cab") — filtra solo i FILE, le cartelle restano sempre
+  // visibili per poterci navigare dentro.
+  app.get("/api/filesystem/list", (req, res) => {
+    const dirPath = req.query.path as string;
+    if (!dirPath) return res.status(400).json({ error: 'path richiesto' });
+    const extensions = typeof req.query.extensions === 'string' && req.query.extensions.length > 0
+      ? req.query.extensions.split(',')
+      : undefined;
+    res.json(listDirectory(dirPath, extensions));
+  });
+
+  // v1.5.20-dev.12 — Fase A.4: percorsi di partenza per i quick-link
+  // dell'header (Home/Downloads/Supporti rimovibili) — risolti una volta
+  // sola qui invece che il client debba conoscerne la logica.
+  app.get("/api/filesystem/quick-links", (_req, res) => {
+    res.json({
+      home: os.homedir(),
+      downloads: resolveDownloadsDir(),
+      removableMedia: resolveRemovableMediaRoot(),
+    });
+  });
+
   app.get("/api/runners", (req, res) => {
     res.json(compatibilityManager.getAvailableRunners());
   });
@@ -588,12 +650,22 @@ async function startServer() {
   app.get("/api/shared-launchers", (_req, res) => {
     const list = THIRD_PARTY_LAUNCHERS.map(def => {
       const state = getSharedLauncherState(def.id);
+      // v1.5.20-dev.28 — richiesta utente: il Runner Bridge di un gioco
+      // dipendente mostra già il runner ereditato dal launcher condiviso
+      // (dev.27) — lo stesso principio va applicato al tile Umu-launcher,
+      // che deve mostrare (bloccato, mai una scelta indipendente) lo
+      // stato REALE del launcher condiviso, non un valore indovinato.
+      // `games.executablePath`/`runner` sono l'unica fonte di verità per
+      // runner/eseguibile (dev.27) — qui la stessa riga games.id serve
+      // anche a leggere il proprio CompatibilityProfile.umuRun.
+      const compatProfile = db.getCompatProfile(`${def.id}-launcher`);
       return {
         id: def.id,
         displayName: def.displayName,
         verified: def.verified,
         bootstrapped: !!state?.bootstrappedAt,
         runner: state?.runner ?? null,
+        umuRun: compatProfile?.umuRun ?? false,
         // Step 19d — distingue i launcher gia' costruiti (Ubisoft
         // Connect, installerUrl compilato) da quelli ancora placeholder
         // (EA App/Battle.net/Rockstar, installerUrl vuoto) — usato dallo
@@ -642,6 +714,14 @@ async function startServer() {
   // bootstrap) — stesso principio della card Steam Big Picture.
   app.post("/api/shared-launchers/:id/launch", async (req, res) => {
     const result = await launchSharedLauncher(req.params.id);
+    res.json(result);
+  });
+
+  // v1.5.20-dev.22 — chiusura ESPLICITA su scelta dell'utente (notifica
+  // "tieni aperto / chiudi ora" alla chiusura di un gioco dipendente) —
+  // mai chiamato automaticamente da nessun'altra parte del demone.
+  app.post("/api/shared-launchers/:id/close", async (req, res) => {
+    const result = await closeSharedLauncher(req.params.id);
     res.json(result);
   });
 

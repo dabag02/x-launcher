@@ -49,7 +49,10 @@ import {
   CircuitBoard,
   MemoryStick,
   Laptop,
-  Cloud
+  Cloud,
+  Folder,
+  File,
+  Home
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -717,6 +720,22 @@ function MainApp() {
     }).catch(() => {});
   };
   const [showAvatarLibrary, setShowAvatarLibrary] = useState(false);
+  // v1.5.20-dev.12 — Fase A.4: file manager nativo controller-navigabile,
+  // sostituisce zenity/kdialog quando inputDevice === 'controller' (quei
+  // dialog nativi non rispondono affatto al gamepad). fileBrowserContext
+  // porta il gameId e il filtro estensioni di CHI ha aperto l'overlay
+  // (oggi solo "Sfoglia" per un installer in attesa, in futuro qualunque
+  // altro chiamante che sappia passare gameId+extensions) — VirtualKeyboard
+  // insegna che tenere il "chi/perché" fuori dal componente generico
+  // paga, stesso principio qui.
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [fileBrowserPath, setFileBrowserPath] = useState<string | null>(null);
+  const [fileBrowserParentPath, setFileBrowserParentPath] = useState<string | null>(null);
+  const [fileBrowserEntries, setFileBrowserEntries] = useState<{ name: string; isDirectory: boolean; sizeBytes: number | null; mtimeMs: number | null }[]>([]);
+  const [fileBrowserFilterOn, setFileBrowserFilterOn] = useState(true);
+  const [fileBrowserQuickLinks, setFileBrowserQuickLinks] = useState<{ home: string; downloads: string | null; removableMedia: string | null }>({ home: '', downloads: null, removableMedia: null });
+  const [fileBrowserContext, setFileBrowserContext] = useState<{ gameId: string; extensions: string[] } | null>(null);
+  const [fileBrowserError, setFileBrowserError] = useState<string | null>(null);
 
   // Plugin manager
   // v1.5.14-dev.1 — estratto in un hook dedicato (useStorePluginRegistry),
@@ -780,7 +799,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.5.20-dev.5');
+  const [appVersion, setAppVersion] = useState('v1.5.20-dev.28');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1100,6 +1119,14 @@ function MainApp() {
   useEffect(() => {
     if (!showSearch) {
       setSearchQuery('');
+      // v1.5.20-dev.8 — bug reale segnalato dall'utente: selezionare un
+      // tag genere/categoria nella ricerca (v1.5.20-dev.7) e poi chiudere
+      // con Y lasciava il filtro attivo, mentre il testo digitato veniva
+      // già azzerato qui sopra — un'asimmetria concettuale (sia il testo
+      // che i tag sono filtri della STESSA ricerca, dovrebbero avere la
+      // stessa sorte alla chiusura). Stesso trattamento del testo.
+      setSelectedGenre('');
+      setSelectedCategory('');
     }
   }, [showSearch]);
 
@@ -1385,6 +1412,73 @@ function MainApp() {
       .catch(() => setAvatarFiles([]));
   }, []);
 
+  // v1.5.20-dev.12 — Fase A.4: helper di join percorso — fileBrowserPath
+  // è sempre un percorso assoluto già risolto dal server (mai relativo),
+  // ma "/" (radice) non deve diventare "//nome" quando ci si entra dentro.
+  const joinFsPath = (base: string, name: string) => (base.endsWith('/') ? `${base}${name}` : `${base}/${name}`);
+
+  // v1.5.20-dev.12 — Fase A.4: extensions/filterOn passati SEMPRE come
+  // argomenti espliciti, mai letti dallo stato dentro la funzione —
+  // evita un bug di closure superata quando questa viene chiamata subito
+  // dopo aver appena cambiato quello stesso stato nello stesso gestore
+  // (es. aprendo l'overlay, o alternando il filtro: setState è
+  // asincrono, la callback qui dentro vedrebbe ancora il valore vecchio
+  // se letta da una closure invece che da un parametro).
+  const loadFileBrowserDir = useCallback((dirPath: string, extensions: string[], filterOn: boolean) => {
+    const query = filterOn && extensions.length > 0 ? `&extensions=${extensions.join(',')}` : '';
+    fetch(`/api/filesystem/list?path=${encodeURIComponent(dirPath)}${query}`)
+      .then(r => r.json())
+      .then((data: { path?: string; parentPath?: string | null; entries?: typeof fileBrowserEntries; error?: string }) => {
+        if (data.error) {
+          setFileBrowserError(data.error);
+          setFileBrowserEntries([]);
+          setFileBrowserParentPath(null);
+          return;
+        }
+        setFileBrowserError(null);
+        setFileBrowserPath(data.path ?? dirPath);
+        setFileBrowserParentPath(data.parentPath ?? null);
+        setFileBrowserEntries(data.entries ?? []);
+      })
+      .catch(() => setFileBrowserError(t('dashboard:fileBrowser.communicationError')));
+  }, [t]);
+
+  const openFileBrowser = useCallback((context: { gameId: string; extensions: string[] }) => {
+    setFileBrowserContext(context);
+    setFileBrowserFilterOn(true);
+    fetch('/api/filesystem/quick-links')
+      .then(r => r.json())
+      .then((links: { home: string; downloads: string | null; removableMedia: string | null }) => {
+        setFileBrowserQuickLinks(links);
+        setShowFileBrowser(true);
+        loadFileBrowserDir(links.downloads ?? links.home, context.extensions, true);
+      })
+      .catch(() => {
+        // Anche senza quick-link risolti, l'overlay può ancora aprirsi
+        // sulla home — meglio di un fallimento silenzioso.
+        setShowFileBrowser(true);
+        loadFileBrowserDir('~', context.extensions, true);
+      });
+  }, [loadFileBrowserDir]);
+
+  const closeFileBrowser = useCallback(() => {
+    setShowFileBrowser(false);
+    setFileBrowserContext(null);
+    setActiveGroup('downloads');
+  }, [setActiveGroup]);
+
+  const confirmFileBrowserSelection = useCallback((fileName: string) => {
+    if (!fileBrowserContext || !fileBrowserPath) return;
+    const fullPath = joinFsPath(fileBrowserPath, fileName);
+    fetch('/api/downloads/installer-select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gameId: fileBrowserContext.gameId, path: fullPath }),
+    }).finally(() => {
+      closeFileBrowser();
+    });
+  }, [fileBrowserContext, fileBrowserPath, closeFileBrowser]);
+
   useEffect(() => {
     if (!showAvatarLibrary) return;
     loadAvatarFiles();
@@ -1496,7 +1590,21 @@ function MainApp() {
             // 'success' (es. "gioco installato") non si auto-dismette
             // più. Le due implementazioni erano duplicate e leggermente
             // divergenti solo per caso — ora coerenti.
-            if (mapped.type === 'info') {
+            //
+            // v1.5.20-dev.27 — BUG REALE CONFERMATO DALL'UTENTE: una
+            // notifica azionabile (con primaryAction/secondaryAction,
+            // es. "tieni aperto / chiudi ora" del launcher condiviso,
+            // dev.22) è comunque di type='info' — questo timer la
+            // faceva scomparire dopo 6s indipendentemente dal fatto che
+            // l'utente avesse deciso, impedendo qualunque scelta se non
+            // si è abbastanza rapidi. Il tipo 'info' da solo non basta
+            // più a decidere se auto-scompare: solo l'ASSENZA di azioni
+            // lo rende un avviso genuinamente transitorio (toggle
+            // modalità, passaggio a desktop) — qualunque notifica con
+            // un'azione da compiere resta finché l'utente non decide
+            // davvero (dismissNotification esplicito).
+            const isActionable = !!(mapped.primaryAction || mapped.secondaryAction || mapped.tertiaryAction);
+            if (mapped.type === 'info' && !isActionable) {
               setTimeout(() => {
                 setNotifications(p2 => p2.map(p => p.id === mapped.id && p.status === 'pending' ? { ...p, status: 'dismissed' } : p));
               }, 6000);
@@ -3178,6 +3286,12 @@ Vuoi provare ad avviarlo comunque?`);
       } else if (pendingExitRef.current) {
         // Stessa priorità: annulla la conferma di chiusura Dashboard.
         setPendingExit(false);
+      } else if (showFileBrowser) {
+        // v1.5.20-dev.12 — Fase A.4: si apre SOPRA il pannello Download
+        // (l'unico chiamante oggi) — deve chiudersi per primo, altrimenti
+        // il ramo showDownloads sotto lo lascerebbe aperto mentre chiude
+        // il pannello che gli sta dietro.
+        closeFileBrowser();
       } else if (showKeyboard) {
         // La tastiera può essere aperta per la ricerca o per un campo
         // dell'overlay Game Options: ciascuno ha la sua chiusura corretta.
@@ -3255,6 +3369,7 @@ Vuoi provare ad avviarlo comunque?`);
       showDownloads, showSettings, showNotifications, selectedGameId,
       showGameOptions, showAvatarLibrary, handlePlay, setFocusedId, toggleSearch,
       setActiveGroup, openGameOptions, closeGameOptions, showKeyboard, activeField, closeKeyboard,
+      showFileBrowser, closeFileBrowser,
       activeGroup, cycleStore, triggerFocusedAction, cycleSettingsTab, cycleUiLanguage]);
 
   // v1.1.10 — timer indipendente per "tieni premuto B per uscire"
@@ -3882,7 +3997,215 @@ Vuoi provare ad avviarlo comunque?`);
         )}
       </AnimatePresence>
 
-      {/* Main Content */}
+      {/* v1.5.20-dev.12 — Fase A.4: file manager nativo controller-navigabile,
+          sostituisce zenity/kdialog quando inputDevice === 'controller'.
+          z-[95]: sopra il pannello Download (z-50) che oggi è l'unico
+          chiamante — deve sempre restare visibile sopra di esso. */}
+      <AnimatePresence>
+        {showFileBrowser && (() => {
+          const formatFileSize = (bytes: number | null): string => {
+            if (bytes === null) return '';
+            if (bytes < 1024) return `${bytes} B`;
+            if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(0)} KB`;
+            if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+            return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+          };
+          const formatFileDate = (mtimeMs: number | null): string => {
+            if (mtimeMs === null) return '';
+            return new Date(mtimeMs).toLocaleDateString(i18n.language, { day: '2-digit', month: '2-digit', year: 'numeric' });
+          };
+          const extensions = fileBrowserContext?.extensions ?? [];
+          return (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className={cn(
+              "absolute inset-0 z-[95] flex flex-col pt-[80px] pl-[80px] pr-[80px] pb-[64px]",
+              theme === 'dark' ? "bg-[#0b0c0f]/98" : "bg-gray-100/98"
+            )}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between mb-6 shrink-0 gap-4">
+              <div className="min-w-0">
+                <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('dashboard:fileBrowser.title')}</h2>
+                <p className={cn("text-[10px] font-mono mt-0.5 truncate select-all", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                  {fileBrowserPath ?? ''}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <Focusable group="file-browser" id="fb-up" onEnter={() => {
+                  if (fileBrowserParentPath) loadFileBrowserDir(fileBrowserParentPath, extensions, fileBrowserFilterOn);
+                }}>
+                  {(isFocused) => (
+                    <button
+                      disabled={!fileBrowserParentPath}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
+                        !fileBrowserParentPath ? "opacity-20 border-transparent" :
+                        isFocused
+                          ? "bg-blue-600 border-blue-600 text-white scale-105"
+                          : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                      )}
+                    >
+                      <ArrowUp size={13} />
+                      <span className="hidden md:inline">{t('dashboard:fileBrowser.up')}</span>
+                    </button>
+                  )}
+                </Focusable>
+                <Focusable group="file-browser" id="fb-home" onEnter={() => {
+                  if (fileBrowserQuickLinks.home) loadFileBrowserDir(fileBrowserQuickLinks.home, extensions, fileBrowserFilterOn);
+                }}>
+                  {(isFocused) => (
+                    <button className={cn(
+                      "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
+                      isFocused
+                        ? "bg-blue-600 border-blue-600 text-white scale-105"
+                        : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                    )}>
+                      <Home size={13} />
+                      <span className="hidden md:inline">{t('dashboard:fileBrowser.home')}</span>
+                    </button>
+                  )}
+                </Focusable>
+                <Focusable group="file-browser" id="fb-downloads" onEnter={() => {
+                  if (fileBrowserQuickLinks.downloads) loadFileBrowserDir(fileBrowserQuickLinks.downloads, extensions, fileBrowserFilterOn);
+                }}>
+                  {(isFocused) => (
+                    <button
+                      disabled={!fileBrowserQuickLinks.downloads}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
+                        !fileBrowserQuickLinks.downloads ? "opacity-20 border-transparent" :
+                        isFocused
+                          ? "bg-blue-600 border-blue-600 text-white scale-105"
+                          : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                      )}
+                    >
+                      <FileDown size={13} />
+                      <span className="hidden md:inline">{t('dashboard:fileBrowser.downloads')}</span>
+                    </button>
+                  )}
+                </Focusable>
+                <Focusable group="file-browser" id="fb-removable" onEnter={() => {
+                  if (fileBrowserQuickLinks.removableMedia) loadFileBrowserDir(fileBrowserQuickLinks.removableMedia, extensions, fileBrowserFilterOn);
+                }}>
+                  {(isFocused) => (
+                    <button
+                      disabled={!fileBrowserQuickLinks.removableMedia}
+                      title={!fileBrowserQuickLinks.removableMedia ? t('dashboard:fileBrowser.noRemovableMedia') : undefined}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
+                        !fileBrowserQuickLinks.removableMedia ? "opacity-20 border-transparent" :
+                        isFocused
+                          ? "bg-blue-600 border-blue-600 text-white scale-105"
+                          : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                      )}
+                    >
+                      <HardDrive size={13} />
+                      <span className="hidden md:inline">{t('dashboard:fileBrowser.removableMedia')}</span>
+                    </button>
+                  )}
+                </Focusable>
+                {/* v1.5.20-dev.12 — richiesta utente: switch on/off del
+                    filtro estensioni, riusa lo stesso campo `filter` già
+                    esistente in filePicker.ts (il chiamante lo passa via
+                    fileBrowserContext.extensions, qui solo acceso/spento). */}
+                <Focusable group="file-browser" id="fb-filter" onEnter={() => {
+                  const next = !fileBrowserFilterOn;
+                  setFileBrowserFilterOn(next);
+                  if (fileBrowserPath) loadFileBrowserDir(fileBrowserPath, extensions, next);
+                }}>
+                  {(isFocused) => (
+                    <button className={cn(
+                      "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
+                      isFocused
+                        ? "bg-blue-600 border-blue-600 text-white scale-105"
+                        : fileBrowserFilterOn
+                          ? (theme === 'dark' ? "border-blue-500/40 text-blue-400" : "border-blue-400 text-blue-600")
+                          : (theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500")
+                    )}>
+                      <Filter size={13} />
+                      <span className="hidden md:inline">{fileBrowserFilterOn ? t('dashboard:fileBrowser.filterOn') : t('dashboard:fileBrowser.filterOff')}</span>
+                    </button>
+                  )}
+                </Focusable>
+                {/* Chiudi */}
+                <Focusable group="file-browser" id="fb-close" fallbackPriority={-1} onEnter={closeFileBrowser}>
+                  {(isFocused) => (
+                    <button
+                      className={cn(
+                        "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
+                        isFocused
+                          ? "bg-red-600 border-red-600 text-white scale-110"
+                          : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                      )}
+                    >
+                      <X size={18} />
+                    </button>
+                  )}
+                </Focusable>
+              </div>
+            </div>
+
+            {/* Corpo — lista verticale */}
+            {fileBrowserError ? (
+              <div className="flex-1 flex flex-col items-center justify-center opacity-30">
+                <Folder size={64} className="mb-6" />
+                <p className="text-sm font-medium">{fileBrowserError}</p>
+              </div>
+            ) : fileBrowserEntries.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center opacity-30">
+                <Folder size={64} className="mb-6" />
+                <h3 className="text-xl font-black italic uppercase tracking-widest">{t('dashboard:fileBrowser.emptyFolder')}</h3>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto overflow-x-visible custom-scrollbar">
+                <div className="flex flex-col gap-1.5 px-2 pb-4 pt-2">
+                  {fileBrowserEntries.map((entry, idx) => (
+                    <Focusable
+                      key={entry.name}
+                      id={`fb-entry-${idx}`}
+                      group="file-browser"
+                      onEnter={() => {
+                        if (entry.isDirectory) {
+                          if (fileBrowserPath) loadFileBrowserDir(joinFsPath(fileBrowserPath, entry.name), extensions, fileBrowserFilterOn);
+                        } else {
+                          confirmFileBrowserSelection(entry.name);
+                        }
+                      }}
+                    >
+                      {(isFocused) => (
+                        <div className={cn(
+                          "flex items-center justify-between gap-4 px-4 py-2.5 rounded-xl border transition-all",
+                          isFocused
+                            ? "bg-blue-600 border-blue-600 text-white scale-[1.01]"
+                            : theme === 'dark' ? "border-white/10 bg-white/[0.02]" : "border-gray-200 bg-white"
+                        )}>
+                          <div className="flex items-center gap-3 min-w-0">
+                            {entry.isDirectory
+                              ? <Folder size={16} className="shrink-0 opacity-70" />
+                              : <File size={16} className="shrink-0 opacity-70" />}
+                            <span className="truncate text-sm font-medium">{entry.name}</span>
+                          </div>
+                          {!entry.isDirectory && (
+                            <div className={cn("flex items-center gap-3 shrink-0 text-[10px] font-mono tabular-nums", isFocused ? "text-white/80" : "opacity-50")}>
+                              <span>{formatFileSize(entry.sizeBytes)}</span>
+                              <span>{formatFileDate(entry.mtimeMs)}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </Focusable>
+                  ))}
+                </div>
+              </div>
+            )}
+          </motion.div>
+          );
+        })()}
+      </AnimatePresence>
       <main className="flex flex-1 overflow-hidden relative">
         {/* Background Ambient Blur */}
         {selectedGame && (
@@ -4870,6 +5193,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   group="downloads"
                                   id={`dl-browse-${task.gameId}`}
                                   onEnter={() => {
+                                    // v1.5.20-dev.12 — Fase A.4: zenity/
+                                    // kdialog non rispondono affatto al
+                                    // gamepad — con un controller si apre
+                                    // il file manager nativo in-app al
+                                    // loro posto, stessa distinzione
+                                    // inputDevice già usata altrove nel
+                                    // progetto (footer). Con mouse/
+                                    // tastiera resta il dialog nativo di
+                                    // sempre, nessun cambiamento per loro.
+                                    if (inputDevice === 'controller') {
+                                      openFileBrowser({ gameId: task.gameId, extensions: ['exe', 'msi', 'cab'] });
+                                      return;
+                                    }
                                     fetch('/api/downloads/installer-browse', {
                                       method: 'POST',
                                       headers: { 'Content-Type': 'application/json' },
@@ -5110,6 +5446,32 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                           setShowSettings(true);
                                           setActiveSettingsTab(section);
                                         }
+                                        setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, status: 'applied' } : n));
+                                        return;
+                                      }
+                                      // v1.5.20-dev.22 — richiesta utente:
+                                      // scelta esplicita "chiudi ora" per
+                                      // il launcher condiviso rimasto
+                                      // aperto dopo la chiusura di un
+                                      // gioco dipendente — la scelta
+                                      // opposta ("tieni aperto") non
+                                      // richiede alcuna azione, è già il
+                                      // comportamento del pulsante
+                                      // secondario/dismiss di sempre.
+                                      // dismissNotification invece di
+                                      // status:'applied' — non ha senso
+                                      // un "ha funzionato?" di riscontro
+                                      // per un'azione fire-and-forget
+                                      // come questa (a differenza di un
+                                      // fix applicato, qui non c'è nulla
+                                      // da confermare).
+                                      if (notif.primaryAction?.handler === 'close_shared_launcher') {
+                                        const launcherId = notif.primaryAction.params?.launcherId;
+                                        if (launcherId) {
+                                          fetch(`/api/shared-launchers/${launcherId}/close`, { method: 'POST' }).catch(() => {});
+                                        }
+                                        dismissNotification(notif.id);
+                                        return;
                                       }
                                       setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, status: 'applied' } : n));
                                     }}
@@ -7136,10 +7498,36 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // sapere con certezza qual è l'ULTIMO elemento e
                         // agganciarlo esplicitamente a ciò che segue.
                         const nonDefaultRunners = availableRunners.filter((r: any) => (r.id || r) !== 'Wine-Lutris');
-                        return nonDefaultRunners.map((r: any, idx: number) => {
+                        // v1.5.20-dev.27 — richiesta utente, causa diretta
+                        // del bug reale appena diagnosticato (dev.26/27):
+                        // il blocco precedente permetteva comunque di
+                        // scegliere QUALUNQUE build Proton diversa da
+                        // quella del launcher condiviso (vietava solo
+                        // Wine) — l'overlay mostrava una scelta che il
+                        // lancio reale ignorava silenziosamente (dev.23),
+                        // fonte diretta di confusione. Quando il gioco
+                        // eredita il runner dal launcher condiviso, le
+                        // alternative vanno NASCOSTE, non solo disattivate
+                        // — mostriamo solo la build realmente in uso,
+                        // letta dalla riga `games` del launcher stesso
+                        // (già caricata in `games`, nessuna chiamata in
+                        // più) — stessa fonte di verità usata dal backend.
+                        const lockedToSharedLauncher = !!localGameConfig.requiresLauncher;
+                        const inheritedRunnerId = lockedToSharedLauncher
+                          ? games.find(g => g.id === `${localGameConfig.requiresLauncher}-launcher`)?.runner
+                          : undefined;
+                        // Ripiego difensivo: se per qualche motivo la riga
+                        // del launcher non è ancora nota, non nascondere
+                        // tutto (sezione vuota, sembrerebbe un bug) — resta
+                        // sull'elenco completo bloccato, meglio visibile
+                        // che silenzioso.
+                        const visibleRunners = (lockedToSharedLauncher && inheritedRunnerId)
+                          ? nonDefaultRunners.filter((r: any) => (r.id || r) === inheritedRunnerId)
+                          : nonDefaultRunners;
+                        return visibleRunners.map((r: any, idx: number) => {
                         const runnerId    = r.id || r;
-                        const isActive    = selectedGame?.runner === runnerId;
-                        const isLastRunnerRow = idx === nonDefaultRunners.length - 1;
+                        const isActive    = lockedToSharedLauncher ? true : selectedGame?.runner === runnerId;
+                        const isLastRunnerRow = idx === visibleRunners.length - 1;
                         // Step 19d — un gioco legato a un launcher condiviso
                         // (requiresLauncher impostato) gira SEMPRE nel
                         // prefix Proton di quella scatola condivisa — mai
@@ -7149,9 +7537,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // BattlEye quando il runner attivo è incompatibile:
                         // il tile resta visibile (indici/neighbor invariati)
                         // ma non cliccabile.
-                        const lockedToSharedLauncher = !!localGameConfig.requiresLauncher;
-                        const isProtonRunner = /proton/i.test(runnerId);
-                        const runnerLocked = lockedToSharedLauncher && !isProtonRunner;
+                        //
+                        // v1.5.20-dev.27 — SEMPRE bloccato quando ereditato
+                        // (non più solo per Wine): l'unica riga visibile a
+                        // questo punto è già quella del launcher condiviso,
+                        // cambiarla romperebbe esattamente la coerenza che
+                        // questo intero fix vuole garantire.
+                        const runnerLocked = lockedToSharedLauncher;
                         return (
                           <Focusable
                             key={runnerId}
@@ -7200,6 +7592,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   </p>
                                   {r.version && r.version !== runnerId && (
                                     <p className="text-[9px] font-mono opacity-40 mt-0.5">v{r.version}</p>
+                                  )}
+                                  {/* v1.5.20-dev.27 — richiesta utente: spiega
+                                      SEMPRE il perché, non lasciare l'utente
+                                      a chiedersi perché non può scegliere. */}
+                                  {lockedToSharedLauncher && (
+                                    <p className="text-[9px] font-mono opacity-40 mt-0.5">
+                                      {t('gameOptions:runnerInheritedFromLauncher')}
+                                    </p>
                                   )}
                                 </div>
                                 {/* Badge "attivo" quando è il runner corrente */}
@@ -7375,7 +7775,34 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:compatibilityLayer')}</span>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
-                      {([
+                      {(() => {
+                        // v1.5.20-dev.28 — richiesta utente, due filtri
+                        // distinti applicati alla STESSA griglia:
+                        //
+                        // (1) "Launcher condiviso" nascosto sulla card del
+                        // launcher stesso — un launcher non può dipendere
+                        // da sé stesso, mostrarlo lì non serve a nulla e
+                        // può confondere. Riconosciuto per convenzione
+                        // d'id (`${launcherId}-launcher`, stessa già usata
+                        // ovunque nel backend, non un flag nuovo).
+                        const isThisGameASharedLauncher = sharedLaunchers.some(
+                          (sl: any) => selectedGame?.id === `${sl.id}-launcher`
+                        );
+                        // (2) "Umu-launcher" bloccato (mai nascosto — a
+                        // differenza del Runner Bridge, qui c'è comunque
+                        // un valore reale da mostrare, non solo scelte
+                        // alternative prive di senso) quando il gioco
+                        // dipende da un launcher condiviso — stessa
+                        // filosofia già applicata al Runner Bridge in
+                        // dev.27: mai offrire una scelta indipendente che
+                        // il lancio reale potrebbe ignorare o, nel
+                        // percorso di riserva mai completamente
+                        // verificato, generare una combinazione non
+                        // testata (due container Steam Linux Runtime
+                        // potenzialmente distinti sulla stessa prefix).
+                        const lockedToSharedLauncherForUmu = !!localGameConfig.requiresLauncher;
+
+                        return ([
                         { key: 'fsr',      label: 'AMD FSR',       desc: 'WINE_FULLSCREEN_FSR=1', sysKey: 'fsr'      },
                         { key: 'gameMode', label: 'GameMode',      desc: 'gamemoderun wrapper',   sysKey: 'gamemode' },
                         { key: 'mangohud', label: 'MangoHud',      desc: 'overlay FPS/GPU',       sysKey: 'mangohud' },
@@ -7396,15 +7823,32 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // la disponibilità a systemTools.umu, stesso
                         // principio delle altre voci con rilevamento reale.
                         { key: 'umuRun', label: t('gameOptions:umuLauncher'), desc: t('gameOptions:umuLauncherDesc'), sysKey: 'umu' },
-                      ] as const).map(({ key, label, desc, sysKey }, idx, arr) => {
+                      ] as const)
+                        .filter(({ key }) => !(key === 'sharedLauncher' && isThisGameASharedLauncher))
+                        .map(({ key, label, desc, sysKey }, idx, arr) => {
                         // v1.1.104-dev.1 — mangohud non è più booleano ma
                         // un livello 0/1/2 (spento/compatta/completa).
                         const mangohudLevel = key === 'mangohud' ? (Number((localCompatProfile as any).mangohud) || 0) : 0;
+                        // v1.5.20-dev.28 — richiesta utente: quando il
+                        // gioco dipende da un launcher condiviso, il tile
+                        // Umu-launcher mostra lo stato REALE del launcher
+                        // (mai una scelta indipendente che il lancio
+                        // potrebbe ignorare o, nel percorso di riserva,
+                        // generare una combinazione mai verificata — due
+                        // container potenzialmente distinti sulla stessa
+                        // prefix). Letto da `sharedLaunchers` (già
+                        // caricato, esteso lato server per includere
+                        // anche questo campo), non un valore indovinato.
+                        const inheritedUmuRun = (key === 'umuRun' && lockedToSharedLauncherForUmu)
+                          ? sharedLaunchers.find((sl: any) => sl.id === localGameConfig.requiresLauncher)?.umuRun ?? false
+                          : undefined;
                         const enabled   = key === 'mangohud'
                           ? mangohudLevel > 0
                           : key === 'sharedLauncher'
                             ? (localGameConfig.requiresLauncher ?? '') !== ''
-                            : ((localCompatProfile as any)[key] ?? false);
+                            : inheritedUmuRun !== undefined
+                              ? inheritedUmuRun
+                              : ((localCompatProfile as any)[key] ?? false);
                         // v1.5.3-dev.1 — richiesta utente: EAC/BattlEye
                         // funzionano SOLO col runner Proton, mai con wine
                         // puro (verificato: le variabili
@@ -7425,9 +7869,20 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // le opzioni non ancora costruite sono già filtrate
                         // fuori da cycleOptions, non rappresentate come stato
                         // disabilitato di QUESTO tile.
+                        //
+                        // v1.5.20-dev.28 — richiesta utente: Umu-launcher
+                        // bloccato (riusa lo stesso guardiano `!available`
+                        // già in uso poco sotto per ogni altro tile
+                        // oscurato, nessun meccanismo nuovo) quando
+                        // ereditato da un launcher condiviso — stessa
+                        // filosofia già applicata al Runner Bridge
+                        // (dev.27): mai una scelta indipendente che il
+                        // lancio reale potrebbe ignorare.
                         const available = key === 'sharedLauncher'
                           ? true
-                          : !!systemTools[sysKey] && (!requiresProton || protonActive);
+                          : key === 'umuRun' && lockedToSharedLauncherForUmu
+                            ? false
+                            : !!systemTools[sysKey] && (!requiresProton || protonActive);
                         // Step 19d — dati del ciclo N+1 stati (Nessuno + un
                         // launcher per ciascuno già costruito), calcolati qui
                         // solo per key==='sharedLauncher', stesso principio
@@ -7577,7 +8032,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             )}
                           </Focusable>
                         );
-                      })}
+                      })})()}
                     </div>
                   </div>
                 ) : (
@@ -8643,7 +9098,27 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
       {/* Compatibility Overlay */}
       <AnimatePresence>
-        {showKeyboard && (
+        {showKeyboard && (() => {
+          // v1.5.20-dev.7 — richiesta utente: tag genere/categoria
+          // selezionabili sotto al campo di ricerca, stesso identico dato
+          // già usato dai chip mouse-only nella barra filtri libreria
+          // (game.genres/categories, da IGDB) — qui SOLO quando si sta
+          // modificando la ricerca (!activeField), mai per gli altri campi
+          // (Launch Arguments, Custom Env, ecc., dove "genere di gioco"
+          // non ha senso). Selezionare un tag chiama la STESSA
+          // setSelectedGenre/setSelectedCategory già usata dal mouse —
+          // filtro indipendente combinato in AND col testo digitato
+          // (verificato in gameManager.getGames: search poi genre poi
+          // category, filtri sequenziali sullo stesso risultato via
+          // getGames() lato server), mai una sostituzione del testo.
+          // IIFE invece di un useMemo esterno: serve condividere questi
+          // valori fra il nuovo blocco tag qui sotto E la prop
+          // topRowExternalUpId passata a VirtualKeyboard più in fondo
+          // allo stesso JSX, senza duplicare il calcolo due volte.
+          const searchGenres = !activeField ? [...new Set(games.flatMap(g => g.genres ?? []))].slice(0, 8) : [];
+          const searchCats   = !activeField ? [...new Set(games.flatMap(g => g.categories ?? []))].slice(0, 5) : [];
+          const topRowExternalUpId = searchCats.length > 0 ? 'tag-cat-0' : searchGenres.length > 0 ? 'tag-genre-0' : undefined;
+          return (
           <div className="fixed inset-0 z-[200] flex flex-col items-center justify-end pb-8 md:pb-12 px-2 pointer-events-none bg-black/40 backdrop-blur-sm">
             {/* Testo digitato — visibile dal divano.
                 v1.1.15 — prima mostrava SEMPRE searchQuery, anche quando
@@ -8719,6 +9194,71 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 )}
               </div>
             </div>
+            {(searchGenres.length > 0 || searchCats.length > 0) && (
+              <div className="pointer-events-auto w-full max-w-4xl px-2 mb-3 space-y-2">
+                {searchGenres.length > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-white/40 italic shrink-0">{t('dashboard:genres')}</span>
+                    {searchGenres.map((genre, i) => (
+                      <Focusable
+                        key={genre}
+                        id={`tag-genre-${i}`}
+                        group="keyboard"
+                        sequentialChain="tag-genres"
+                        chainAxis="horizontal"
+                        neighbors={{ down: searchCats.length > 0 ? 'tag-cat-0' : 'key-sugg-0' }}
+                        onEnter={() => setSelectedGenre(selectedGenre === genre ? '' : genre)}
+                      >
+                        {(isFocused: boolean) => (
+                          <div className={cn(
+                            "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
+                            isFocused
+                              ? "ring-2 ring-blue-400 scale-105 bg-blue-600 text-white"
+                              : selectedGenre === genre
+                                ? "bg-blue-600 text-white"
+                                : "bg-white/10 text-white/60"
+                          )}>
+                            {genre}
+                          </div>
+                        )}
+                      </Focusable>
+                    ))}
+                  </div>
+                )}
+                {searchCats.length > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-white/40 italic shrink-0">{t('dashboard:categories')}</span>
+                    {searchCats.map((cat, i) => (
+                      <Focusable
+                        key={cat}
+                        id={`tag-cat-${i}`}
+                        group="keyboard"
+                        sequentialChain="tag-categories"
+                        chainAxis="horizontal"
+                        neighbors={{
+                          up: searchGenres.length > 0 ? 'tag-genre-0' : undefined,
+                          down: 'key-sugg-0',
+                        }}
+                        onEnter={() => setSelectedCategory(selectedCategory === cat ? '' : cat)}
+                      >
+                        {(isFocused: boolean) => (
+                          <div className={cn(
+                            "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
+                            isFocused
+                              ? "ring-2 ring-blue-400 scale-105 bg-blue-600 text-white"
+                              : selectedCategory === cat
+                                ? "bg-blue-600 text-white"
+                                : "bg-white/10 text-white/60"
+                          )}>
+                            {cat}
+                          </div>
+                        )}
+                      </Focusable>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="pointer-events-auto w-full max-w-4xl">
               <VirtualKeyboard 
                 value={activeField ? activeField.value : searchQuery}
@@ -8756,10 +9296,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 theme={theme}
                 altSuggestions={keyboardAltSuggestions}
                 onSuggestionFocus={setSuggestionTip}
+                topRowExternalUpId={topRowExternalUpId}
               />
             </div>
           </div>
-        )}
+          );
+        })()}
       </AnimatePresence>
 
       {/* Footer */}

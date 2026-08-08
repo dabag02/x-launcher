@@ -277,6 +277,20 @@ export class EpicPlugin extends StorePlugin {
   }
 
   /**
+   * v1.5.20-dev.14 — riconosce il fallimento definitivo scoperto con
+   * Watch Dogs 2 (vedi CHANGELOG.md): alcuni titoli Ubisoft riscattati su
+   * Epic non hanno file scaricabili affatto, legendary lo dichiara con
+   * questa frase esatta (verificata su un'issue reale Heroic Games
+   * Launcher #2432, stesso identico messaggio) DURANTE il tentativo di
+   * installazione — non prima. Nessun altro pattern qui: solo questa
+   * frase, il resto degli errori legendary (rete, auth, spazio disco)
+   * restano fallimenti ordinari, ritentabili come sempre.
+   */
+  detectUnrecoverableInstallFailure(recentOutput: string): boolean {
+    return recentOutput.includes('does not ship executable game files');
+  }
+
+  /**
    * Verifica autenticazione Epic: `legendary status --json`
    * Restituisce autenticato se il campo `account` è presente e non vuoto.
    */
