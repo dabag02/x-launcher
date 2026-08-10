@@ -59,6 +59,23 @@ export interface CompatibilityProfile {
   // non in una struttura affidabile da parsare in automatico senza rischio
   // di inserire argomenti sbagliati.
   knownFixesNotes?: Record<string, string>;
+  // v1.5.20-dev.32 — richiesta esplicita dell'utente, verificata sul
+  // campo prima di generalizzare: per Assassin's Creed Syndicate (Epic
+  // + Ubisoft Connect condiviso), il gioco lanciato DIRETTAMENTE dalla
+  // libreria di Ubisoft Connect funziona perfettamente senza alcun
+  // intervento di `legendary`/EOS — una volta che il launcher condiviso
+  // riconosce il gioco come proprio, l'intera catena di autenticazione
+  // dello store d'acquisto diventa irrilevante, gestisce tutto lui.
+  // Comportamento NON generalizzato a priori ad altri launcher
+  // condivisi (EA App/Battle.net/Rockstar, quando arriveranno) — non
+  // standardizzato, va verificato caso per caso, da qui uno switch
+  // esplicito per singolo gioco invece di un automatismo valido per
+  // tutti. Significativo SOLO quando `requiresLauncher` è impostato:
+  // se attivo, salta interamente `launchEpicViaLegendary()` (o
+  // l'equivalente futuro per altri store) e usa sempre il percorso del
+  // launcher condiviso (leggero se già attivo, pieno altrimenti) — mai
+  // gli argomenti di autenticazione dello store d'origine.
+  bypassStoreAuthChain?: boolean;
 }
 
 export interface Game {

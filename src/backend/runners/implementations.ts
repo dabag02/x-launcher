@@ -85,7 +85,7 @@ function spawnDetached(bin: string, args: string[], env: Record<string, string> 
  * voluminosi, e destinati solo a essere letti programmaticamente in caso
  * di uscita rapida sospetta, non mostrati di default nell'interfaccia).
  */
-function gameLaunchLogPath(gameId: string): string {
+export function gameLaunchLogPath(gameId: string): string {
   const dir = path.join(DATA_DIR, 'game-logs');
   return path.join(dir, `${gameId}-${Date.now()}.log`);
 }
@@ -345,6 +345,22 @@ export class ProtonRunner extends BaseRunner {
       STEAM_COMPAT_DATA_PATH: prefix,
       STEAM_COMPAT_CLIENT_INSTALL_PATH: `${homedir()}/.local/share/Steam`,
       DXVK_ASYNC: '1',
+      // v1.5.20-dev.31 — BUG REALE CONFERMATO, causa già diagnosticata
+      // in una sessione precedente ma mai realmente corretta (verificato
+      // nel sorgente reale di Proton allora — vedi CHANGELOG.md, sezione
+      // sulla saga "finestra nera" — accantonato perché non era la causa
+      // di QUEL sintomo, mai cablato nel codice reale, restato solo come
+      // opzione manuale in launch-debug.sh). Xalia (ponte accessibilità/
+      // gamepad di Proton per app non native) può agganciare processi
+      // nella stessa sessione Wine, innescando protezioni anti-manomissione
+      // — stesso pattern confermato con una issue reale di Proton (Far
+      // Cry 4, VMProtect + xalia.exe, spam EXCEPTION_SINGLE_STEP) e
+      // riprodotto identico dal vivo con Assassin's Creed
+      // Syndicate/UplayLaunch.exe condividendo la prefix di Ubisoft
+      // Connect. Disattivato di default per ogni lancio Proton — nessuna
+      // perdita per chi non usa strumenti di accessibilità per giocare,
+      // un rischio di crash in meno per chi condivide una prefix.
+      PROTON_USE_XALIA: '0',
       ...(config?.env ?? {}),
     };
 
@@ -499,6 +515,15 @@ export async function launchEpicViaLegendary(game: Game, runner: BaseRunner, con
       return { success: false, message: `Proton "${runner.id}" non trovato. Installalo via Steam o ProtonUp-Qt.` };
     }
     const prefix = expandHome(config?.prefix ?? `~/.local/share/proton-prefixes/${game.id}`);
+
+    // v1.5.20-dev.31 — stesso fix appena aggiunto a ProtonRunner.launch()
+    // (vedi commento esteso lì per il perché), qui perché questa funzione
+    // costruisce il proprio ambiente Proton separatamente (non passa da
+    // ProtonRunner.launch(), sempre via legendary — v1.1.30). `?? '0'`
+    // invece di un'assegnazione diretta: se l'utente ha esplicitamente
+    // impostato PROTON_USE_XALIA nel proprio ambiente personalizzato
+    // (Game Options), quella scelta vince sempre — mai sovrascritta.
+    env.PROTON_USE_XALIA = env.PROTON_USE_XALIA ?? '0';
 
     // v1.5.20-dev.4 — switch "Umu-launcher": stesso principio già applicato
     // a ProtonRunner.launch(), qui per il percorso Epic via legendary

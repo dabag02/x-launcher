@@ -2,6 +2,34 @@
 
 ---
 
+## MILESTONE v1.5.20-Venus (8 agosto) — quinta Venus
+
+Congela l'intera sessione Step 19d — dalla generalizzazione dello switch Umu-launcher fino alla chiusura completa della catena "gioco che dipende da un launcher condiviso", con Watch Dogs 2/Ubisoft Connect come primo caso reale portato fino in fondo su hardware reale. Precede v1.5.14-Venus.
+
+### Cosa contiene, in sintesi (dettaglio completo voce per voce qui sotto, v1.5.20-dev.1→28)
+
+**Fondamenta Umu-launcher** (dev.1-4): switch "Umu-launcher" generalizzato a qualunque gioco Proton (non solo i launcher condivisi); risolve in modo confermato il problema storico "finestra nera dal secondo avvio" di Ubisoft Connect (container Steam Linux Runtime mancante); esteso anche a Epic/legendary via `--wrapper`.
+
+**Fase A — infrastruttura generica per launcher terzi futuri** (dev.10, dev.12): `thirdPartyLaunchers.ts`/`downloadManager.ts`/`base.ts` generalizzati per EA App/Battle.net/Rockstar (mai costruiti come plugin unico — decisione esplicita, ognuno resta un proprio `StorePlugin`); file manager nativo controller-navigabile (`fileManager.ts`) per sostituire zenity/kdialog col controller.
+
+**Bug reale GOG** (dev.11): `--game` di lgogdownloader è un filtro regex, non un match esatto — corretto con ancoraggio `^slug$`.
+
+**Saga Watch Dogs 2/Epic** (dev.13-17): Epic non ospita file per questa categoria di titoli Ubisoft (confermato con issue GitHub reale) — costruita una riconciliazione generica (mai scraping di libreria, per evitare doppioni) che rileva l'installazione avvenuta altrove e aggiorna la card d'origine.
+
+**Saga controllo verb al lancio** (dev.18-20): il controllo dipendenze pre-lancio bloccava Ubisoft Connect per 16 minuti (log reali alla mano) — reso davvero asincrono (`execFileAsync`), poi riportato a girare PRIMA del lancio (mai in parallelo a un processo già attivo sulla stessa prefix — corrompeva la sessione di LEGO Indiana Jones).
+
+**Saga lancio "leggero" nella sessione condivisa** (dev.21-28, la più estesa): verificato a mano che un secondo processo può agganciarsi al `wineserver` già attivo di un launcher condiviso invece di richiedere un secondo container — costruita l'intera catena (avvio automatico del launcher, notifica esplicita di chiusura, eredità obbligatoria di runner/prefix/Umu-launcher dal launcher condiviso, mai una scelta indipendente che il lancio reale potrebbe ignorare). **8 bug reali trovati in sequenza, quasi tutti con diagnosi diretta dell'utente** (log, query SQL dirette al DB) — mai un fix accettato come risolutivo senza conferma esplicita su hardware reale. Causa più significativa: due tabelle diverse (`games` e `shared_launcher_prefixes`) conservavano lo stesso concetto (runner/eseguibile del launcher) con proprietari di scrittura diversi, driftate silenziosamente da settimane — risolto eliminando la duplicazione, non solo il sintomo.
+
+### Verificato
+
+`tsc --noEmit`: 8 (baseline invariata dall'inizio della sessione). `check-focus-ids.cjs`: 103 id, stesso singolo falso positivo di sempre (`key-sugg-0`, limite noto dello script di analisi statica). **Confermato dall'utente su hardware reale**: la catena Watch Dogs 2 → Ubisoft Connect funziona end-to-end, dalla scoperta del gioco alla chiusura.
+
+### Prossimi passi (vedi X-Launcher-Roadmap.md e CHANGELOG-2.md per lo sviluppo successivo a questa milestone)
+
+Fase B (EA App/Battle.net/Rockstar Games Launcher, dati reali uno alla volta) non ancora iniziata. Nota aperta non urgente: `PROTON_EAC_RUNTIME` risultava impostato sulla card sbagliata di Ubisoft Connect in un log di sessione (dev.18) — mai confermato/corretto lato utente, verosimilmente un tocco accidentale sulla card sbagliata.
+
+---
+
 ## v1.5.20-dev.1 — Step 19d: switch "Umu-launcher" generalizzato nel Compatibility Layer
 
 Implementato il fix `umu-launcher` deciso a fine sessione precedente (vedi diario di sessione dopo v1.5.19-dev.1), ma **generalizzato su richiesta dell'utente**: non solo per i launcher condivisi, uno switch disponibile in Compatibility Layer per QUALUNQUE gioco con runner Proton.

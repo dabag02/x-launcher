@@ -799,7 +799,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.5.20-dev.28');
+  const [appVersion, setAppVersion] = useState('v1.5.20-dev.40');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -2114,6 +2114,14 @@ function MainApp() {
           // campo booleano futuro aggiunto a CompatibilityProfile senza
           // toccare anche questo punto.
           umuRun:   !!profile.umuRun,
+          // v1.5.20-dev.33 — BUG REALE segnalato dall'utente, esattamente
+          // l'avvertimento lasciato scritto nel commento qui sopra da
+          // dev.3 ("qualunque nuovo campo booleano futuro... senza
+          // toccare anche questo punto") — dimenticato aggiungendo
+          // bypassStoreAuthChain in dev.32. Stesso identico sintomo di
+          // allora: salvato correttamente nel DB, scartato ad ogni
+          // riapertura dell'overlay, switch sempre mostrato spento.
+          bypassStoreAuthChain: !!profile.bypassStoreAuthChain,
         });
         setCustomEnvText(
           Object.entries(profile.customEnv ?? {})
@@ -7526,7 +7534,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           : nonDefaultRunners;
                         return visibleRunners.map((r: any, idx: number) => {
                         const runnerId    = r.id || r;
-                        const isActive    = lockedToSharedLauncher ? true : selectedGame?.runner === runnerId;
+                        // v1.5.20-dev.32 — BUG REALE segnalato dall'utente:
+                        // era `lockedToSharedLauncher ? true : ...` — quindi
+                        // OGNI tile veniva segnato come attivo quando
+                        // bloccato, non solo quello giusto. Innocuo quando
+                        // `visibleRunners` contiene un solo elemento (il
+                        // caso normale, filtrato sopra), ma nel ripiego
+                        // difensivo (runner ereditato non ancora noto, lista
+                        // intera mostrata) risultava in TUTTI gli switch
+                        // marcati come selezionati insieme — esattamente il
+                        // sintomo osservato nella libreria Epic con Watch
+                        // Dogs 2/Assassin's Creed Syndicate. Confronto
+                        // esplicito col runner ereditato invece di un
+                        // `true` fisso — nessuno risulta selezionato se
+                        // davvero sconosciuto, più onesto che marcarli tutti.
+                        const isActive    = lockedToSharedLauncher ? (runnerId === inheritedRunnerId) : selectedGame?.runner === runnerId;
                         const isLastRunnerRow = idx === visibleRunners.length - 1;
                         // Step 19d — un gioco legato a un launcher condiviso
                         // (requiresLauncher impostato) gira SEMPRE nel
@@ -7801,6 +7823,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // testata (due container Steam Linux Runtime
                         // potenzialmente distinti sulla stessa prefix).
                         const lockedToSharedLauncherForUmu = !!localGameConfig.requiresLauncher;
+                        // v1.5.20-dev.32 — richiesta esplicita dell'utente,
+                        // switch per singolo gioco (mai un automatismo
+                        // generalizzato — comportamento non standardizzato
+                        // fra launcher condivisi diversi, verificato solo
+                        // per Ubisoft Connect+Epic finora). Significativo
+                        // SOLO per un gioco Epic con un launcher condiviso
+                        // già attivo — per ogni altro store/situazione non
+                        // c'è alcuna catena di autenticazione dello store
+                        // d'origine da poter bypassare, il tile va nascosto
+                        // del tutto (stesso principio già applicato al
+                        // tile "Launcher condiviso" sulla card del
+                        // launcher stesso in dev.28 — non un'opzione
+                        // priva di senso lasciata visibile per coerenza
+                        // grafica).
+                        const showBypassStoreAuthChain = selectedGame?.store === 'Epic Games' && lockedToSharedLauncherForUmu;
 
                         return ([
                         { key: 'fsr',      label: 'AMD FSR',       desc: 'WINE_FULLSCREEN_FSR=1', sysKey: 'fsr'      },
@@ -7823,8 +7860,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // la disponibilità a systemTools.umu, stesso
                         // principio delle altre voci con rilevamento reale.
                         { key: 'umuRun', label: t('gameOptions:umuLauncher'), desc: t('gameOptions:umuLauncherDesc'), sysKey: 'umu' },
+                        // v1.5.20-dev.32 — 8° tile, semplice booleano come
+                        // fsr/gameMode/umuRun — visibile solo per un gioco
+                        // Epic con launcher condiviso attivo (filtrato
+                        // sotto), sysKey vuoto (non dipende da systemTools,
+                        // stesso principio di sharedLauncher sopra).
+                        { key: 'bypassStoreAuthChain', label: t('gameOptions:bypassStoreAuthChain'), desc: t('gameOptions:bypassStoreAuthChainDesc'), sysKey: '' },
                       ] as const)
                         .filter(({ key }) => !(key === 'sharedLauncher' && isThisGameASharedLauncher))
+                        .filter(({ key }) => !(key === 'bypassStoreAuthChain' && !showBypassStoreAuthChain))
                         .map(({ key, label, desc, sysKey }, idx, arr) => {
                         // v1.1.104-dev.1 — mangohud non è più booleano ma
                         // un livello 0/1/2 (spento/compatta/completa).
@@ -7878,7 +7922,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // filosofia già applicata al Runner Bridge
                         // (dev.27): mai una scelta indipendente che il
                         // lancio reale potrebbe ignorare.
-                        const available = key === 'sharedLauncher'
+                        const available = (key === 'sharedLauncher' || key === 'bypassStoreAuthChain')
                           ? true
                           : key === 'umuRun' && lockedToSharedLauncherForUmu
                             ? false

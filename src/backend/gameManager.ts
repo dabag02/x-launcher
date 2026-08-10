@@ -11,7 +11,7 @@ import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
 import { UbisoftConnectPlugin } from './plugins/ubisoftConnectPlugin';
-import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath } from './sharedLauncherManager';
+import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath, waitForContainerReadyMarker } from './sharedLauncherManager';
 import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
@@ -345,7 +345,24 @@ class GameManager {
           }
         }
 
-        if (elapsedMs < GameManager.QUICK_EXIT_THRESHOLD_MS && !realProcessStillRunning) {
+        // v1.5.20-dev.29 — BUG REALE segnalato dall'utente: un gioco con
+        // requiresLauncher può restare per un po' in attesa che il
+        // launcher condiviso diventi DAVVERO responsivo, anche dopo che
+        // isSharedLauncherRunning() lo rileva già presente (il processo
+        // esiste, ma potrebbe non aver ancora finito login/inizializzazione
+        // interna — nessun modo di saperlo con certezza, vedi la stessa
+        // attesa "intelligente" appena aggiunta prima del lancio). Quella
+        // finestra d'attesa aggiuntiva, specifica di questa categoria di
+        // gioco, rischia di superare la soglia ordinaria di tolleranza
+        // "chiusura rapida" — il vero processo che finalmente subentra
+        // arriverebbe già fuori tempo massimo, scambiato per una
+        // chiusura genuina invece che per un avvio riuscito. Soglia
+        // estesa SOLO per questa categoria, non per ogni gioco.
+        const quickExitThresholdMs = game.requiresLauncher
+          ? GameManager.QUICK_EXIT_THRESHOLD_MS * 3
+          : GameManager.QUICK_EXIT_THRESHOLD_MS;
+
+        if (elapsedMs < quickExitThresholdMs && !realProcessStillRunning) {
           // v0.99.90 — uscita sospettosamente rapida: probabile fallimento
           // di avvio (exe non trovato, prefix corrotta, dipendenza
           // mancante che fa crashare subito). A differenza del prompt di
@@ -410,7 +427,7 @@ class GameManager {
         db.addPlayTime(before.gameId, elapsedMs / (1000 * 60 * 60));
         this.notifyLibraryRefreshed(); // la sidebar mostra il tempo aggiornato subito, non al prossimo sync periodico
 
-        if (realProcessStillRunning && elapsedMs < GameManager.QUICK_EXIT_THRESHOLD_MS) {
+        if (realProcessStillRunning && elapsedMs < quickExitThresholdMs) {
           this.addLog(`[LAUNCH] ${before.gameTitle}: processo tracciato chiuso dopo ${Math.round(elapsedMs / 1000)}s, ma processi reali ancora attivi in "${installDirName}" — trattato come lancio riuscito, non fallimento.`, 'system');
         }
 
@@ -1146,26 +1163,100 @@ class GameManager {
     // esecuzione per DRM/funzioni online, ma nulla lo avviava mai in
     // automatico. Solo se non già in esecuzione (isSharedLauncherRunning,
     // stesso pattern pgrep -f già usato altrove in questo file).
-    if (game.requiresLauncher && !isSharedLauncherRunning(game.requiresLauncher)) {
+    //
+    // v1.5.20-dev.35/39 — RIPRISTINATO dopo essere stato ritirato per
+    // errore in dev.36. La causa reale è stata confermata con una
+    // traccia completa dell'eccezione (WINEDEBUG=+seh, vedi
+    // sharedLauncherManager.ts): Assassin's Creed Syndicate esegue un
+    // controllo anti-manomissione (NtQueryInformationProcess sul
+    // proprio processo, poi un EXCEPTION_SINGLE_STEP deliberato dentro
+    // ACS.exe stesso) che fallisce SENZA il container Steam Linux
+    // Runtime — non un'ipotesi, la traccia mostra l'eccezione partire
+    // da dentro l'eseguibile del gioco stesso. Per questa categoria di
+    // gioco (`bypassStoreAuthChain` attivo) il container pieno è
+    // obbligatorio, e il gioco stesso si tira dietro il launcher
+    // condiviso come proprio processo figlio (verificato a mano
+    // dall'utente da terminale) — il nostro avvio anticipato andrebbe
+    // in competizione con quella sessione, non in aiuto: due container
+    // Steam Linux Runtime separati sulla stessa prefix non convivono
+    // (verificato in una sessione precedente). Saltato SOLO per questa
+    // categoria di gioco — chiunque altro con requiresLauncher impostato
+    // continua a beneficiarne normalmente.
+    const forceFullContainerLaunch = !!game.requiresLauncher && !!db.getCompatProfile(id)?.bypassStoreAuthChain;
+    if (game.requiresLauncher && !forceFullContainerLaunch && !isSharedLauncherRunning(game.requiresLauncher)) {
       this.addLog(`[LAUNCH] Avvio launcher condiviso "${game.requiresLauncher}" insieme a ${game.title}...`, 'system');
       const launcherResult = await launchSharedLauncher(game.requiresLauncher).catch(err => {
         this.addLog(`[LAUNCH] Avvio launcher condiviso fallito (non blocca ${game.title}): ${err}`, 'warning');
         return null;
       });
-      // v1.5.20-dev.17 — BUG REALE segnalato dall'utente: il gioco veniva
-      // lanciato subito dopo (fire-and-forget, nessuna attesa) — il
-      // launcher condiviso appena avviato impiega qualche secondo per
-      // completare login/sincronizzazione libreria, e molti giochi
-      // Ubisoft verificano la sua presenza/API al proprio avvio,
-      // fallendo silenziosamente se lanciati troppo presto (sintomo
-      // osservato: il gioco si chiude subito, Wine apre il proprio file
-      // manager). Nessuna API per sapere "è davvero pronto" — margine
-      // fisso, stesso principio già usato altrove nel progetto
-      // (WINEBOOT_TIMEOUT_MS ecc.). NON verificato quanto sia sufficiente
-      // su hardware reale — un valore di partenza, non una garanzia.
+      // v1.5.20-dev.29 — BUG REALE segnalato dall'utente con un avvio a
+      // freddo reale: un'attesa FISSA di 8s (dev.17) non basta al primo
+      // avvio in assoluto di un launcher condiviso — il container
+      // Steam Linux Runtime, alla prima esecuzione, deve ancora generare
+      // le locale e completare l'inizializzazione (visto nei log di
+      // sessioni precedenti: "pv-locale-gen: Generating locale..."), può
+      // richiedere più di 8s. Conseguenza doppia osservata dal vivo: (1)
+      // il gioco resta in attesa di Ubisoft Connect più a lungo della
+      // finestra di tolleranza "processo tracciato chiuso ma reale
+      // ancora attivo" (QUICK_EXIT_THRESHOLD_MS, la STESSA soglia usata
+      // lì) — scaduta quella tolleranza, il vero processo del gioco che
+      // subentra viene scambiato per una chiusura genuina, la Dashboard
+      // torna a schermo intero prima del tempo; (2) non trovando
+      // Ubisoft Connect ancora pronto, il gioco ne avvia una copia
+      // PROPRIA per conto suo (comportamento già scoperto testando lo
+      // script diagnostico da solo, mesi fa in questa stessa saga) — ma
+      // quella copia bypassa `umu-run` (il gioco non sa nulla del
+      // container), da cui la finestra nera osservata.
+      //
+      // Fix: invece di un'attesa fissa (indovinata), un ciclo che
+      // ricontrolla isSharedLauncherRunning() ogni secondo — procede
+      // SUBITO se il launcher risulta pronto prima (la maggioranza dei
+      // lanci successivi al primo, container già caldo), aspetta più a
+      // lungo SOLO quando serve davvero (fino a un tetto massimo, oltre
+      // il quale si procede comunque — nessuna API per sapere "è
+      // davvero pronto" con certezza assoluta, questo resta un margine
+      // ragionevole, non una garanzia).
       if (launcherResult?.success) {
-        this.addLog(`[LAUNCH] Attesa qualche secondo perché il launcher condiviso completi l'avvio...`, 'system');
-        await new Promise(resolve => setTimeout(resolve, 8000));
+        // v1.5.20-dev.30 — richiesta utente: prima del poll a tempo
+        // (dev.29, mantenuto sotto come rete di sicurezza finale), un
+        // segnale REALE legato specificamente al processo che ABBIAMO
+        // avviato — "il container Steam Linux Runtime della NOSTRA
+        // invocazione ha finito la preparazione" (marcatore pv-adverb
+        // nel suo stesso log, vedi waitForContainerReadyMarker). Non
+        // sostituisce il poll successivo, lo precede: anche se il gioco
+        // dovesse comunque avviare una propria copia del launcher non
+        // trovandolo ancora del tutto pronto (caso limite accettato,
+        // recuperabile chiudendo il duplicato), quella NOSTRA istanza
+        // avrà comunque il rendering corretto — il problema visibile
+        // (finestra nera) dipende dal container mancante, non da quale
+        // copia "vince".
+        if (launcherResult.logPath) {
+          this.addLog(`[LAUNCH] Attesa che il container del launcher condiviso completi la preparazione...`, 'system');
+          const containerReady = await waitForContainerReadyMarker(launcherResult.logPath);
+          this.addLog(containerReady
+            ? `[LAUNCH] Container del launcher condiviso pronto.`
+            : `[LAUNCH] Marcatore di container pronto non rilevato entro il tempo massimo — procedo comunque (rete di sicurezza sotto).`,
+            containerReady ? 'system' : 'warning');
+        }
+
+        const maxWaitMs = 25_000;
+        const pollIntervalMs = 1_000;
+        const waitStart = Date.now();
+        let becameReady = false;
+        this.addLog(`[LAUNCH] Attesa che il launcher condiviso "${game.requiresLauncher}" completi l'avvio (fino a ${maxWaitMs / 1000}s)...`, 'system');
+        while (Date.now() - waitStart < maxWaitMs) {
+          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+          if (isSharedLauncherRunning(game.requiresLauncher)) {
+            becameReady = true;
+            break;
+          }
+        }
+        const waitedMs = Date.now() - waitStart;
+        if (becameReady) {
+          this.addLog(`[LAUNCH] Launcher condiviso pronto dopo ${Math.round(waitedMs / 1000)}s.`, 'system');
+        } else {
+          this.addLog(`[LAUNCH] Launcher condiviso non risulta ancora rilevabile dopo ${Math.round(waitedMs / 1000)}s — procedo comunque col lancio di ${game.title}.`, 'warning');
+        }
       }
     }
 
@@ -1190,6 +1281,18 @@ class GameManager {
     // restano vuoti o stantii sul DB.
     let effectiveRunnerId  = game.runner;
     let effectivePrefixPath = game.prefixPath;
+    // v1.5.20-dev.34 — stesso principio di runner/prefix appena sopra,
+    // esteso a `umuRun`: un gioco con requiresLauncher non deve mai
+    // usare la propria impostazione Umu-launcher indipendente (quasi
+    // certamente mai impostata per questa categoria di gioco, vedi
+    // stessa nota su runner/prefix) — deve ereditare quella del launcher
+    // condiviso. Bug reale trovato con l'utente: il percorso di riserva
+    // (forceFullContainerLaunch/bypassStoreAuthChain) instradava
+    // correttamente verso runner.launch() diretto, ma senza questo fix
+    // avrebbe comunque letto `profile?.umuRun` del GIOCO (mai impostato)
+    // invece che del launcher — risultato: nessun container nemmeno nel
+    // percorso "pieno" appositamente forzato per ottenerlo.
+    let effectiveUmuRun = profile?.umuRun ?? false;
     if (game.requiresLauncher) {
       const launcherGame = db.getGameById(`${game.requiresLauncher}-launcher`);
       if (launcherGame?.runner && launcherGame.runner !== game.runner) {
@@ -1200,6 +1303,7 @@ class GameManager {
       }
       effectiveRunnerId   = launcherGame?.runner ?? game.runner;
       effectivePrefixPath = getSharedPrefixBasePath(game.requiresLauncher);
+      effectiveUmuRun     = db.getCompatProfile(`${game.requiresLauncher}-launcher`)?.umuRun ?? false;
     }
 
     const runner = this.allRunners.get(effectiveRunnerId);
@@ -1295,7 +1399,7 @@ class GameManager {
         mangohud: profile?.mangohud ?? 0,
         eac:      profile?.eac      ?? false,
         battleye: profile?.battleye ?? false,
-        umuRun:   profile?.umuRun   ?? false,
+        umuRun:   effectiveUmuRun,
       };
       // v1.5.20-dev.21 — richiesta utente, disegno esplicitamente discusso
       // e verificato a mano prima di scrivere codice: quando il gioco
@@ -1315,11 +1419,44 @@ class GameManager {
       // gioco — EAC/BattlEye sono letti solo dallo script di Proton,
       // bypassato qui, quindi un gioco che ne ha bisogno resta sul
       // lancio pieno sotto, mai su questo percorso più veloce.
+      //
+      // v1.5.20-dev.34 — BUG DI COMPRENSIONE MIO, corretto dall'utente:
+      // avevo capito che Watch Dogs 2 "funzionasse sempre" grazie a un
+      // qualche meccanismo esplicito di bypass di legendary — falso.
+      // Questa condizione dipende solo da `requiresLauncher`, vera per
+      // QUALUNQUE gioco che lo abbia impostato — la ramificazione Epic/
+      // legendary più sotto non viene mai raggiunta nel caso normale
+      // (il launcher condiviso è quasi sempre già attivo a questo punto,
+      // vedi l'attesa poco sopra), per Watch Dogs 2 come per Assassin's
+      // Creed Syndicate allo stesso identico modo — legendary non era
+      // mai stato il problema per nessuno dei due. La vera differenza,
+      // isolata dall'utente con un test diretto: Assassin's Creed
+      // Syndicate ha bisogno del container Steam Linux Runtime anche
+      // quando il launcher condiviso è già attivo (wine nudo crasha/non
+      // renderizza), Watch Dogs 2 no. `bypassStoreAuthChain` ridefinito
+      // di conseguenza: non più "salta legendary" (che non serviva),
+      // ma "per questo gioco, mai il percorso leggero — sempre il
+      // container pieno", verificato funzionante a mano dall'utente.
+      //
+      // v1.5.20-dev.39 — RIPRISTINATO dopo essere stato tolto per
+      // errore in dev.36 (quel giro aveva interpretato male il
+      // conflitto osservato — vedi commento su forceFullContainerLaunch
+      // qualche riga sopra, prima di db.getCompatProfile(id)). Causa
+      // reale ora confermata con una traccia SEH completa: Assassin's
+      // Creed Syndicate ha un controllo anti-manomissione che fallisce
+      // SENZA il container Steam Linux Runtime — non tollera affatto
+      // il percorso leggero (wine nudo), indipendentemente da chi ha
+      // avviato la sessione per primo. `forceFullContainerLaunch`
+      // (calcolato sopra, prima dell'avvio anticipato del launcher)
+      // disattiva qui il percorso leggero per questa categoria di
+      // gioco — resta invariato, e resta lo stesso identico meccanismo
+      // di Watch Dogs 2, per ogni altro gioco con requiresLauncher.
       const useSharedPrefixLightLaunch =
         !!game.requiresLauncher &&
         !!game.executablePath &&
         !runnerConfig.eac &&
         !runnerConfig.battleye &&
+        !forceFullContainerLaunch &&
         isSharedLauncherRunning(game.requiresLauncher);
 
       // v1.1.30 — giochi Epic: sempre via legendary launch, non l'exe
@@ -1330,14 +1467,36 @@ class GameManager {
       // configurato per questo gioco — non cambia nulla per i giochi che
       // non hanno bisogno di quella verifica, legendary li lancia allo
       // stesso modo di sempre con lo stesso wine/proton.
+      //
+      // v1.5.20-dev.32/34/39 — richiesta esplicita dell'utente, verificata
+      // a mano su Assassin's Creed Syndicate (traccia SEH completa,
+      // vedi sopra) prima di scrivere questa riga (non un automatismo
+      // generalizzato, ma nemmeno più una semplice ipotesi): un gioco
+      // Epic con launcher condiviso attivo, riconosciuto dalla libreria
+      // interna di quel launcher, non ha bisogno degli argomenti EOS
+      // che `legendary` costruirebbe — a differenza di Watch Dogs 2
+      // (che non ha mai avuto nulla da gestire per `legendary`), questo
+      // gioco HA una cartella/id reali tracciati da `legendary`, quindi
+      // senza questo switch il percorso di riserva lo instraderebbe lì
+      // per errore. Comportamento NON standardizzato fra launcher
+      // condivisi diversi (potrebbe non valere per EA App/Battle.net/
+      // Rockstar) — switch esplicito per singolo gioco, scritto nel
+      // profilo dopo un test verificato dall'utente, mai un'assunzione
+      // valida per tutti. Generico per costruzione: se attivato in
+      // futuro anche su un altro gioco (es. Watch Dogs 2, per unificare
+      // il processo se il test dell'utente lo confermasse necessario
+      // anche lì), si applica automaticamente, nessun codice aggiuntivo.
+      const bypassStoreAuthChain = forceFullContainerLaunch;
+
       const result = useSharedPrefixLightLaunch
         ? await launchGameInSharedPrefix(
             game.requiresLauncher!,
             expandHome(game.executablePath!),
             runnerConfig.args ?? [],
             runnerConfig.cwd,
+            id,
           )
-        : game.store === 'Epic Games'
+        : (game.store === 'Epic Games' && !bypassStoreAuthChain)
           ? await launchEpicViaLegendary(game, runner, runnerConfig)
           : await runner.launch(game, runnerConfig);
       if (result.success) {

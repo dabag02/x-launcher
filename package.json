@@ -1,7 +1,7 @@
 {
   "name": "x-launcher",
   "private": true,
-  "version": "1.5.20-dev.28",
+  "version": "1.5.20-dev.40",
   "type": "module",
   "scripts": {
     "dev": "bash scripts/with-env.sh tsx server.ts",

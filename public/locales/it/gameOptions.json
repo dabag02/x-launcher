@@ -23,6 +23,8 @@
   "sharedLauncherNone": "Nessuno",
   "umuLauncher": "Umu-launcher",
   "umuLauncherDesc": "Container Steam Linux Runtime",
+  "bypassStoreAuthChain": "Bypass store",
+  "bypassStoreAuthChainDesc": "Container pieno, salta legendary",
   "configured": "✓ configurato",
   "requiredToLaunch": "⚠ richiesto per avviare",
   "libretroCorePathManual": "Libretro Core Path (manuale)",

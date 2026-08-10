@@ -401,10 +401,31 @@
             "files": [
                 "src/backend/runners/implementations.ts"
             ]
+        },
+        {
+            "id": "focus-navigation-static-check-tool",
+            "description": "Nuovo strumento scripts/check-focus-ids.cjs (estensione .cjs perché package.json ha \"type\": \"module\", serve esplicito per require): analisi statica di App.tsx che estrae ogni id dichiarato su un Focusable e ogni riferimento in neighbors={{...}}/sequentialChain (gestisce variabili intermedie, template literal, ternari anche annidati), segnalando riferimenti a id mai dichiarati e catene sequentialChain dichiarate da un solo elemento — con riconoscimento delle dichiarazioni dentro un .map() (dove la reale cardinalità a runtime dipende dai dati, non verificabile staticamente). Eseguito sul vero App.tsx durante lo sviluppo stesso: individuate e poi confermate come falsi positivi (verificate manualmente) due sequentialChain apparentemente orfane, in realtà corrette perché dentro un ciclo — lo strumento è stato corretto di conseguenza. Non sostituisce un test dal vivo col controller, ma intercetta in automatico refusi e riferimenti dimenticati.",
+            "appliedAt": "2026-07-28T09:00:00.000Z",
+            "files": [
+                "scripts/check-focus-ids.cjs"
+            ]
+        },
+        {
+            "id": "app-tsx-modularization-five-hooks",
+            "description": "Primo passo concreto di modularizzazione di App.tsx (~8.946 righe di partenza), discusso e concordato con l'utente: nessuno split del JSX (rischio reale sui collegamenti di navigazione, id testuali mai verificati dal compilatore), solo estrazione di stato e logica pura in hook dedicati sotto src/hooks/, quando la funzione lo permette. Cinque hook estratti, ciascuno verificato con tsc --noEmit (zero errori nuovi) e scripts/check-focus-ids.cjs (zero differenze nella struttura di navigazione) prima di procedere al successivo: useCloudBackupProviders (stato Cloud Backup, OAuth, polling), useNotifications (pannello Notifiche — canale SSE lasciato deliberatamente in App.tsx perché gestisce anche altri eventi non di notifica), useAiAdvisorProviders (Ollama + provider cloud AI), useInputDevices (dispositivi controller), useStorePluginRegistry (registro plugin store). Un sesto candidato (useDownloadTasks) scartato dopo investigazione: downloads risultato intrecciato con logs in un unico polling condiviso, estrarlo avrebbe richiesto toccare quel meccanismo per un beneficio minimo. App.tsx sceso a 8.592 righe. Criteri di selezione ed esito documentati in X-Launcher-Roadmap.md per applicarli anche agli sviluppi futuri.",
+            "appliedAt": "2026-07-28T10:00:00.000Z",
+            "files": [
+                "src/hooks/useCloudBackupProviders.ts",
+                "src/hooks/useNotifications.ts",
+                "src/hooks/useAiAdvisorProviders.ts",
+                "src/hooks/useInputDevices.ts",
+                "src/hooks/useStorePluginRegistry.ts",
+                "src/App.tsx"
+            ]
         }
     ],
-    "version": "1.5.7-Venus",
-    "milestone": "v1.5.7-Venus — MILESTONE STABILE. Terza della serie Venus, precede v1.5.3-Venus. Contiene un audit di qualità del codice completo, richiesto esplicitamente dall'utente: riepilogo di tutte le criticità presentato prima di ogni correzione, poi risolto a step confermati uno alla volta (punti A-E). Tre bug funzionali reali corretti (ripristino download interrotti, log silenzioso, verb Known Fixes non validati), un rischio di sicurezza reale eliminato (injection nel comando di autenticazione Epic) e uno mitigato (verb esterni non sanificati), due tipi TypeScript scorretti risolti, codice morto ripulito, tre punti di duplicazione (FSR/MangoHud/EAC/BattlEye/GameMode fra i tre punti di lancio) consolidati in funzioni condivise. Errori TypeScript pre-esistenti ridotti da 23 a 18, zero nuovi introdotti in ciascuno degli step, verificato con tsc --noEmit ad ogni singola correzione.",
-    "date": "2026-07-27",
-    "notes": "Terza milestone stabile della serie Venus, congelata su richiesta esplicita dell'utente dopo un giro completo di audit qualità del codice. Metodologia seguita: riepilogo di tutte le criticità presentato PRIMA di applicare qualunque correzione, poi risolto punto per punto con conferma esplicita dell'utente prima di ogni gruppo di fix, sempre verificato con tsc --noEmit contro lo zip originale intatto. Vedi CHANGELOG.md per il dettaglio v1.5.4-dev.1 → v1.5.7-dev.1."
+    "version": "1.5.14-Venus",
+    "milestone": "v1.5.14-Venus — MILESTONE STABILE. Quarta della serie Venus, precede v1.5.7-Venus. Introduce un nuovo strumento di analisi statica per la navigazione controller (scripts/check-focus-ids.cjs) e il primo passo concreto di modularizzazione di App.tsx: cinque hook estratti (Cloud Backup, Notifiche, AI Advisor, Input Devices, Registro plugin store) sotto src/hooks/, ciascuno verificato con una doppia procedura (tsc --noEmit + lo strumento di navigazione) prima di procedere al successivo. App.tsx sceso da 8.946 a 8.592 righe senza mai toccare un id/neighbors/sequentialChain. Criteri di selezione dei candidati (cosa estrarre, cosa lasciare, come verificare) documentati in X-Launcher-Roadmap.md come convenzione permanente per i futuri sviluppi.",
+    "date": "2026-07-28",
+    "notes": "Quarta milestone stabile della serie Venus, congelata su richiesta esplicita dell'utente. Segna l'inizio di un percorso di modularizzazione di App.tsx guidato da una checklist esplicita (vedi X-Launcher-Roadmap.md, sezione \"Architettura App.tsx: quando estrarre in hooks/\") — non uno split del JSX, che resta deliberatamente monolitico per il rischio sui collegamenti di navigazione, ma estrazione sistematica di stato e logica pura quando è a rischio pressoché nullo. Vedi CHANGELOG.md per il dettaglio v1.5.8-dev.1 → v1.5.14-dev.1."
 }

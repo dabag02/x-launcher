@@ -23,6 +23,8 @@
   "sharedLauncherNone": "None",
   "umuLauncher": "Umu-launcher",
   "umuLauncherDesc": "Steam Linux Runtime container",
+  "bypassStoreAuthChain": "Bypass store",
+  "bypassStoreAuthChainDesc": "Full container, skips legendary",
   "configured": "✓ configured",
   "requiredToLaunch": "⚠ required to launch",
   "libretroCorePathManual": "Libretro Core Path (manual)",

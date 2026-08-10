@@ -123,7 +123,11 @@ db.exec(`
     -- solo ignorato in silenzio (nessun crash che lo segnalasse). Risultato:
     -- lo switch sembrava funzionare in overlay ma non veniva mai scritto su
     -- disco, azzerato alla chiusura. Vedi CHANGELOG.md.
-    umu_run INTEGER NOT NULL DEFAULT 0
+    umu_run INTEGER NOT NULL DEFAULT 0,
+    -- v1.5.20-dev.32 — stessa identica lezione di umu_run appena sopra,
+    -- applicata subito: colonna aggiunta QUI, non solo in types.ts,
+    -- proprio per non ripetere quel bug.
+    bypass_store_auth_chain INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS runners (
@@ -360,6 +364,12 @@ if (!compatCols.includes('known_fixes_notes')) {
 // sopra quando furono aggiunti.
 if (!compatCols.includes('umu_run')) {
   db.exec("ALTER TABLE compat_profiles ADD COLUMN umu_run INTEGER NOT NULL DEFAULT 0");
+}
+// v1.5.20-dev.32 — stessa identica migrazione esplicita di umu_run appena
+// sopra, per lo stesso motivo (installazioni già esistenti non vedono le
+// nuove colonne del solo CREATE TABLE IF NOT EXISTS).
+if (!compatCols.includes('bypass_store_auth_chain')) {
+  db.exec("ALTER TABLE compat_profiles ADD COLUMN bypass_store_auth_chain INTEGER NOT NULL DEFAULT 0");
 }
 
 // v0.99.35 — correzione storica: giochi installati con status='Not Installed'
@@ -879,8 +889,8 @@ export function updateGameConfig(id: string, config: {
 
 export function upsertCompatProfile(gameId: string, profile: CompatibilityProfile): void {
   db.prepare(`
-    INSERT INTO compat_profiles (game_id, fsr, game_mode, mangohud, eac, battleye, custom_env, winetricks_verbs, disable_wine_sync, use_known_fixes, known_fixes_notes, umu_run)
-    VALUES (@gameId, @fsr, @gameMode, @mangohud, @eac, @battleye, @customEnv, @winetricksVerbs, @disableWineSync, @useKnownFixes, @knownFixesNotes, @umuRun)
+    INSERT INTO compat_profiles (game_id, fsr, game_mode, mangohud, eac, battleye, custom_env, winetricks_verbs, disable_wine_sync, use_known_fixes, known_fixes_notes, umu_run, bypass_store_auth_chain)
+    VALUES (@gameId, @fsr, @gameMode, @mangohud, @eac, @battleye, @customEnv, @winetricksVerbs, @disableWineSync, @useKnownFixes, @knownFixesNotes, @umuRun, @bypassStoreAuthChain)
     ON CONFLICT(game_id) DO UPDATE SET
       fsr               = excluded.fsr,
       game_mode         = excluded.game_mode,
@@ -892,7 +902,8 @@ export function upsertCompatProfile(gameId: string, profile: CompatibilityProfil
       disable_wine_sync = excluded.disable_wine_sync,
       use_known_fixes   = excluded.use_known_fixes,
       known_fixes_notes = excluded.known_fixes_notes,
-      umu_run           = excluded.umu_run
+      umu_run           = excluded.umu_run,
+      bypass_store_auth_chain = excluded.bypass_store_auth_chain
   `).run({
     gameId,
     fsr:             profile.fsr       ? 1 : 0,
@@ -906,6 +917,7 @@ export function upsertCompatProfile(gameId: string, profile: CompatibilityProfil
     useKnownFixes:   profile.useKnownFixes   ? 1 : 0,
     knownFixesNotes: profile.knownFixesNotes ? JSON.stringify(profile.knownFixesNotes) : null,
     umuRun:          profile.umuRun ? 1 : 0,
+    bypassStoreAuthChain: profile.bypassStoreAuthChain ? 1 : 0,
   });
 }
 
@@ -924,6 +936,7 @@ export function getCompatProfile(gameId: string): CompatibilityProfile | undefin
     useKnownFixes:   row.use_known_fixes   === 1,
     knownFixesNotes: row.known_fixes_notes ? JSON.parse(row.known_fixes_notes) : undefined,
     umuRun:          row.umu_run === 1,
+    bypassStoreAuthChain: row.bypass_store_auth_chain === 1,
   };
 }
 

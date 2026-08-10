@@ -13,7 +13,7 @@
  * gestire qui, a differenza dei prefix per-gioco esistenti.
  */
 
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, openSync } from 'fs';
 import path from 'path';
 import { execSync, execFileSync } from 'child_process';
 import { spawn } from 'child_process';
@@ -26,7 +26,7 @@ import {
   SharedLauncherPrefixRow,
 } from './db';
 import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
-import { ProtonRunner, resolveProtonBin } from './runners/implementations';
+import { ProtonRunner, resolveProtonBin, gameLaunchLogPath } from './runners/implementations';
 import { Game } from '../types';
 import * as db from './db';
 
@@ -254,7 +254,7 @@ export async function closeSharedLauncher(launcherId: string): Promise<{ success
   }
 }
 
-export async function launchSharedLauncher(launcherId: string): Promise<{ success: boolean; message: string }> {
+export async function launchSharedLauncher(launcherId: string): Promise<{ success: boolean; message: string; logPath?: string }> {
   const def = getThirdPartyLauncherDefinition(launcherId);
   if (!def) {
     return { success: false, message: `Launcher terzo sconosciuto: ${launcherId}` };
@@ -311,7 +311,55 @@ export async function launchSharedLauncher(launcherId: string): Promise<{ succes
     umuRun: db.getCompatProfile(`${launcherId}-launcher`)?.umuRun ?? false,
   });
   writeLog('launch', `[SharedLauncher] Avvio ${def.displayName}: ${result.message ?? '(nessun messaggio)'}`);
-  return { success: result.success, message: result.message ?? '' };
+  // v1.5.20-dev.30 — richiesta utente: invece di indovinare un tempo di
+  // attesa, restituiamo anche `logPath` (già calcolato da spawnDetached
+  // dentro ProtonRunner.launch(), prima scartato qui) — permette al
+  // chiamante di verificare un segnale REALE ("la NOSTRA specifica
+  // invocazione ha finito di preparare il container"), non un timer.
+  return { success: result.success, message: result.message ?? '', logPath: result.logPath };
+}
+
+/**
+ * v1.5.20-dev.30 — richiesta utente: invece di un'attesa a tempo (dev.29,
+ * comunque mantenuta come rete di sicurezza finale — vedi gameManager.ts),
+ * un segnale REALE legato specificamente al processo che ABBIAMO avviato
+ * noi, non a "una finestra con quel nome, chiunque l'abbia aperta"
+ * (proposta scartata: il titolo della finestra risulta identico anche
+ * quando è nera/rotta, l'utente l'ha verificato di persona — non
+ * distinguerebbe affatto i due casi).
+ *
+ * `umu-run` scrive (verificato: presente in OGNI log reale raccolto in
+ * questa sessione, non solo al primo avvio) una sequenza riconoscibile
+ * mentre prepara il container — l'ultima riga distintiva prima che il
+ * controllo passi all'app vera e propria è sempre una riga `pv-adverb`.
+ * Se compare, sappiamo con certezza che QUESTA specifica invocazione ha
+ * finito la propria fase di preparazione — non ancora garanzia che
+ * l'app sia internamente pronta (login completato ecc., limite dichiarato
+ * e accettato, fuori portata senza reverse-engineering specifico), ma un
+ * segnale reale, non un tempo indovinato.
+ *
+ * Se il marcatore non compare entro `maxWaitMs` (formato diverso di una
+ * build Proton non ancora vista, o il file di log non si apre) si
+ * risolve comunque `false` — il chiamante ricade sul poll esistente
+ * (dev.29) come rete di sicurezza, mai un blocco indefinito.
+ */
+export async function waitForContainerReadyMarker(logPath: string, maxWaitMs = 15_000): Promise<boolean> {
+  const marker = 'pv-adverb';
+  const pollIntervalMs = 500;
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      if (existsSync(logPath)) {
+        const content = require('fs').readFileSync(logPath, 'utf-8');
+        if (content.includes(marker)) return true;
+      }
+    } catch {
+      // file non ancora scrivibile/leggibile in questo istante — ritenta
+      // al prossimo giro, non un errore fatale.
+    }
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
+  return false;
 }
 
 /**
@@ -424,6 +472,7 @@ export async function launchGameInSharedPrefix(
   exePath: string,
   args: string[] = [],
   cwd?: string,
+  gameId?: string,
 ): Promise<{ success: boolean; pid?: number; message: string; logPath?: string }> {
   // Stessa build Proton che il launcher condiviso sta già usando — MAI
   // una build diversa: è esattamente la causa di un mismatch di
@@ -460,7 +509,23 @@ export async function launchGameInSharedPrefix(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     WINEPREFIX: winePrefix,
-    WINEDEBUG:  '-all',
+    // v1.5.20-dev.38 — BUG REALE trovato indagando ACS con l'utente: il
+    // file di log appena aggiunto (dev.37) risultava sempre vuoto,
+    // anche a fronte di un processo che moriva subito — non perché non
+    // succedesse nulla, ma perché stavamo dicendo esplicitamente a Wine
+    // di sopprimere OGNI canale diagnostico, errori compresi. La stessa
+    // classe di informazione che ci era servita mesi fa (WINEDEBUG=+seh,
+    // trovò il crash di Xalia) restava tagliata fuori qui per
+    // costruzione. `err+all` mostra solo i messaggi di livello errore
+    // su tutti i canali — molto più silenzioso di un debug completo, ma
+    // non nasconde più un crash reale come faceva `-all`.
+    // v1.5.20-dev.39 — `err+all` (dev.38) non bastava: le due righe
+    // `NtRaiseHardError...stub` ottenute confermano lo stesso pattern
+    // già visto mesi fa investigando Xalia, ma senza la traccia SEH che
+    // allora ci aveva mostrato l'eccezione esatta — quella traccia vive
+    // su un canale a sé (`seh`), non incluso nella classe generica
+    // "err" per "tutti i canali". Aggiunto esplicitamente.
+    WINEDEBUG:  'err+all,+seh',
     // v1.5.20-dev.24 — BUG REALE CONFERMATO DALL'UTENTE: senza questa
     // variabile il lancio leggero restava bloccato in silenzio (nessun
     // errore visibile, semplicemente nessuna finestra) — impostando
@@ -485,15 +550,37 @@ export async function launchGameInSharedPrefix(
   };
 
   try {
+    // v1.5.20-dev.37 — BUG DIAGNOSTICO REALE: questo percorso di lancio
+    // scartava sempre stdout/stderr (`stdio: 'ignore'`), a differenza di
+    // ogni altro percorso di lancio del progetto (tutti scrivono un log
+    // reale via `gameLaunchLogPath`, già esistente e riusato qui invece
+    // di duplicato). Trovato indagando un caso reale con l'utente:
+    // Assassin's Creed Syndicate spariva in silenzio pochi secondi dopo
+    // l'avvio, senza mostrare mai una finestra — nessun modo di sapere
+    // perché, dato che l'unico output del processo veniva buttato via
+    // a prescindere. D'ora in poi qualunque crash/errore su questo
+    // percorso lascia una traccia reale da ispezionare, come già
+    // avviene per ogni altro tipo di lancio.
+    const logPath = gameId ? gameLaunchLogPath(gameId) : undefined;
+    let stdio: 'ignore' | [any, any, any] = 'ignore';
+    if (logPath) {
+      try {
+        mkdirSync(path.dirname(logPath), { recursive: true });
+        const fd = openSync(logPath, 'a');
+        stdio = ['ignore', fd, fd];
+      } catch (e) {
+        writeLog('warning', `[SharedLauncher] Impossibile aprire il log ${logPath}: ${e} — stdout/stderr non catturati per questo lancio.`);
+      }
+    }
     const child = spawn(wineBin, [exePath, ...args], {
       env,
       cwd: cwd ?? path.dirname(exePath),
       detached: true,
-      stdio: 'ignore',
+      stdio,
     });
     child.unref();
     writeLog('launch', `[SharedLauncher] Lancio leggero (sessione già attiva di "${launcherId}"): ${wineBin} "${exePath}"`);
-    return { success: true, pid: child.pid, message: `Avviato nella sessione condivisa già attiva di "${launcherId}"` };
+    return { success: true, pid: child.pid, message: `Avviato nella sessione condivisa già attiva di "${launcherId}"`, logPath };
   } catch (e) {
     return { success: false, message: `Lancio leggero fallito: ${e}` };
   }
