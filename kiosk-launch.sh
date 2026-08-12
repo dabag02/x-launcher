@@ -16,6 +16,28 @@ for arg in "$@"; do
 done
 echo "[KIOSK] Always-on-top: ${X_LAUNCHER_ALWAYS_ON_TOP}" 
 
+# --- v2.0.41-dev.7 — richiesta utente: rientro da Steam Big Picture.
+# X-Launcher è aggiunto come Non-Steam Game in Steam (scripts/setup-
+# steam-shortcut.cjs), il cui `Exe` in shortcuts.vdf punta esattamente a
+# QUESTO script — cliccare la card "X-Launcher" da dentro Big Picture
+# riesegue kiosk-launch.sh da capo, verificato leggendo setup-steam-
+# shortcut.cjs (mai assunto). Se il daemon è già su E una finestra
+# X-Launcher esiste già (nascosta da tray.py durante il lancio di Big
+# Picture, vedi POST /api/system/steam-bigpicture in server.ts), questa
+# non è una prima esecuzione — è un rientro: NON va avviata una seconda
+# istanza del browser (produrrebbe una seconda finestra sopra quella già
+# nascosta, mai richiusa). Ci si ferma qui, PRIMA di qualunque rilevamento
+# DE/browser sottostante, che per un semplice rientro è tutto lavoro
+# sprecato. `wmctrl -a` per mostrare la finestra è lo stesso, identico
+# comando già usato da show_window() in tray.py — non una nuova
+# assunzione, lo stesso meccanismo già collaudato per ogni gioco.
+if curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null && command -v wmctrl &>/dev/null && wmctrl -l 2>/dev/null | grep -q "X-Launcher HTPC"; then
+  echo "[KIOSK] Daemon e finestra già attivi — rientro da Steam Big Picture, nessun nuovo avvio."
+  curl -s -X POST "${LAUNCHER_URL}/api/system/steam-bigpicture-closed" &>/dev/null
+  wmctrl -a "X-Launcher HTPC" 2>/dev/null
+  exit 0
+fi
+
 # Step 19a (v1.1.80) — FIX: il rilevamento precedente controllava SOLO
 # `pgrep -x xfwm4` per decidere "sessione dedicata sì/no" — su MATE/
 # GNOME/Plasma quel processo non esiste mai, quindi lo script avrebbe

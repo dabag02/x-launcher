@@ -2,6 +2,36 @@
 
 Continua da **`CHANGELOG.md`**, che copre tutto lo sviluppo fino alla milestone **v1.5.20-Venus** (8 agosto) inclusa — quella parte 1 resta il riferimento completo per qualunque decisione architetturale presa fino a qui, non solo un archivio. In particolare, prima di implementare qualunque nuova funzione che assomigli a qualcosa già discusso, vale la pena rileggere lì per non reinventare un meccanismo che potrebbe già esistere:
 
+---
+
+## MILESTONE v2.0.40-Mercury (10 agosto) — prima Mercury, salto di versione maggiore
+
+Prima milestone della nuova serie "Mercury" (non più una satellite Venus — salto a un nuovo pianeta, coerente con la portata delle novità: supporto ai launcher condivisi ormai generico e verificato su due giochi reali distinti, container Steam Linux Runtime esteso a ogni lancio Proton, file manager nativo integrato). Precede v1.5.20-Venus.
+
+### Cosa contiene, in sintesi (dettaglio completo voce per voce qui sotto, v1.5.20-dev.29→40)
+
+**Attesa "intelligente" e segnali reali invece di tempi indovinati** (dev.29-30): l'attesa fissa dopo l'avvio del launcher condiviso causava sia notifiche premature sia avvii falliti al primo caricamento in assoluto — sostituita da un poll reale sullo stato del launcher, poi ulteriormente rifinita con un segnale legato al processo specifico avviato (marcatore nel log di preparazione del container), non a una finestra generica che potrebbe appartenere a chiunque.
+
+**Xalia disattivato di default per ogni lancio Proton** (dev.31): un bug diagnosticato mesi prima ma mai cablato nel codice reale — lo strumento di accessibilità di Proton può agganciare processi nella stessa sessione Wine e innescare protezioni anti-manomissione di giochi terzi.
+
+**Saga Assassin's Creed Syndicate — il secondo caso reale del supporto ai launcher condivisi**, la più lunga e istruttiva di questa milestone: partita da un'ipotesi (bypassare `legendary`), corretta più volte fino alla causa reale confermata con una traccia completa dell'eccezione (un controllo anti-manomissione dentro il gioco stesso che fallisce senza il container Steam Linux Runtime). Il risultato finale: **due strategie di lancio generiche e coesistenti** per un gioco con launcher condiviso, scelte con uno switch esplicito per singolo gioco (mai un automatismo, comportamento non standardizzato fra launcher diversi) —
+- **leggero**: il gioco si aggancia alla sessione Wine già attiva del launcher condiviso (Watch Dogs 2)
+- **container pieno**: il gioco avvia la propria sessione container e si tira dietro il launcher condiviso come proprio processo figlio (Assassin's Creed Syndicate)
+
+Entrambe verificate funzionanti su hardware reale, entrambe generiche per costruzione (non specifiche a un titolo).
+
+**Miglioramenti diagnostici permanenti, non solo per questo caso**: il percorso di lancio leggero ora cattura sempre stdout/stderr in un log reale (prima scartato del tutto — il buco che aveva reso questa indagine molto più lunga del necessario), con un livello di dettaglio Wine (`err+all,+seh`) che mostra errori reali e tracce di eccezioni strutturate senza il rumore di un debug completo.
+
+### Verificato
+
+`tsc --noEmit`: 8 (baseline invariata dall'inizio della sessione precedente). `check-focus-ids.cjs`: 103 id, stesso singolo falso positivo di sempre. **Confermato dall'utente su hardware reale**: sia Watch Dogs 2 sia Assassin's Creed Syndicate funzionano end-to-end con lo switch "Bypass store" appropriato per ciascuno.
+
+### Prossimi passi (vedi X-Launcher-Roadmap.md e CHANGELOG-3.md per lo sviluppo successivo a questa milestone)
+
+Fase B (EA App/Battle.net/Rockstar Games Launcher) non ancora iniziata — l'infrastruttura e il pattern delle due strategie di lancio sono ora generici e pronti, da popolare con dati reali un launcher alla volta, mai un valore indovinato.
+
+---
+
 - **Launcher terzi condivisi** (Ubisoft Connect e l'infrastruttura generica per EA App/Battle.net/Rockstar) — l'intera sezione "Step 19d" in `CHANGELOG.md` e in `X-Launcher-Roadmap.md`. Copre: creazione/gestione della prefix condivisa, bootstrap, riconoscimento automatico dell'installazione avvenuta tramite il launcher invece che tramite lo store d'origine, avvio automatico del launcher condiviso, lancio "leggero" di un gioco dipendente nella sessione già attiva (senza un secondo container), eredità obbligatoria di runner/prefix/Umu-launcher dal launcher condiviso verso ogni gioco che ne dipende. Se un giorno serve estendere questa logica (es. Fase B con EA App/Battle.net/Rockstar), **quell'architettura è già pensata per essere generica** — non serve ricostruirla da zero, solo popolarla con i dati reali del nuovo launcher (stesso principio già seguito per Ubisoft Connect: mai un valore indovinato, sempre verificato con un'installazione di prova).
 - **Umu-launcher** (`umu-run`) — perché esiste, cosa risolve (il container Steam Linux Runtime mancante), come si invoca, come si differenzia da un runner Proton/GE-Proton (sono ortogonali, qualunque build funziona da PROTONPATH).
 - **Convenzione "verificare prima di assumere"** — la sezione permanente in cima a `CHANGELOG.md`/`X-Launcher-Roadmap.md` elenca le lezioni pagate care in questo progetto (sintassi CLI sbagliate, pacchetti con nomi diversi dall'atteso, comportamenti plausibili ma mai confermati). Vale ancora, si applica a qualunque nuova integrazione esterna.

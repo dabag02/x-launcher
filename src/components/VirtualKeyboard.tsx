@@ -2,7 +2,7 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { useTranslation } from 'react-i18next';
 import { Focusable, useFocus } from './FocusProvider';
-import { Delete, Space, CornerDownLeft, ArrowBigUp, Languages, ClipboardPaste, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Delete, Space, CornerDownLeft, ArrowBigUp, Languages, ClipboardPaste, ChevronLeft, ChevronRight, FolderOpen } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Theme } from '../types';
 import { InputManager } from '../input/InputManager';
@@ -78,6 +78,18 @@ interface VirtualKeyboardProps {
   // (retrocompatibile con ogni altro campo — Launch Arguments, Custom
   // Env, Executable Path — che non passano questa prop).
   topRowExternalUpId?: string;
+  // v2.0.41-dev.1 — richiesta utente: richiamo al file manager nativo
+  // integrato (già esistente per la selezione installer, vedi App.tsx),
+  // per correggere l'Executable Path quando l'exe rilevato dal processo
+  // di installazione è sbagliato. Stesso principio di topRowExternalUpId
+  // sopra: VirtualKeyboard non deve sapere "perché" esiste un file
+  // manager, solo che — se il chiamante passa questa prop — esiste un
+  // tasto in più da disegnare e una neighborMap da aggiornare di
+  // conseguenza. Assente (undefined) → tasto non renderizzato, barra
+  // spaziatrice alla larghezza originale: retrocompatibile con ogni
+  // altro campo (Launch Arguments, Custom Env, ricerca, ecc.) che non
+  // passa questa prop, esattamente come per topRowExternalUpId.
+  onOpenFileManager?: () => void;
 }
 
 /**
@@ -236,6 +248,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
   onSuggestionFocus,
   onCursorChange,
   topRowExternalUpId,
+  onOpenFileManager,
 }) => {
   const { focusedId, setFocusedId } = useFocus();
   // Step 19b (v1.1.61) — namespace 'dashboard', per le sole etichette UI
@@ -286,7 +299,13 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
     // tasti fisici a fianco della barra spaziatrice: fanno parte della
     // stessa riga logica ai fini della mappa dei vicini, cosi sx/dx e
     // su/giù restano deterministici come per ogni altro tasto.
-    const rowSpace = ['key-lang', 'key-cursor-left', 'key-space', 'key-cursor-right', 'key-paste'];
+    // v2.0.41-dev.1 — tasto file manager inserito tra freccia dx e
+    // Incolla SOLO se il chiamante lo richiede (onOpenFileManager): la
+    // riga logica cambia forma, ma buildNeighborMap sotto è già generico
+    // rispetto al contenuto dell'array — nessun altro calcolo da toccare.
+    const rowSpace = onOpenFileManager
+      ? ['key-lang', 'key-cursor-left', 'key-space', 'key-cursor-right', 'key-filemanager', 'key-paste']
+      : ['key-lang', 'key-cursor-left', 'key-space', 'key-cursor-right', 'key-paste'];
     // Richiesta utente — i suggerimenti (chip Shift) entrano anche loro
     // nel ciclo su/giù, come qualunque altra riga: dalla riga numeri si
     // sale ai suggerimenti, dai suggerimenti si scende ai numeri, e il
@@ -314,7 +333,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
       }
     }
     return map;
-  }, [layout, activeSuggestions, topRowExternalUpId]);
+  }, [layout, activeSuggestions, topRowExternalUpId, !!onOpenFileManager]);
 
   // Spostata qui da App.tsx (che puntava a un pulsante "Fatto" rimosso da
   // tempo, quindi non più realmente in funzione — vedi il commento su
@@ -830,7 +849,17 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
             ITALIANO attivo: la riga 4 inglese ha un tasto in meno (manca
             "ù", esclusivo IT) — passando a EN i bordi non coincidono più
             con altrettanta precisione, limite intrinseco della richiesta
-            così come formulata (ancorata esplicitamente al layout IT). */}
+            così come formulata (ancorata esplicitamente al layout IT).
+
+            v2.0.41-dev.1 — richiesta utente: tasto file manager fra
+            freccia dx e Incolla, dimensione standard di un tasto (44px,
+            stesso trattamento delle frecce), SOLO quando onOpenFileManager
+            è passato dal chiamante (oggi solo Executable Path). Per non
+            rompere il totale di 594px calcolato sopra, la spaziatrice si
+            restringe di altri 50px (44px del nuovo tasto + 6px del gap in
+            più) SOLO in questa modalità: 294px→244px. Quando
+            onOpenFileManager è assente il totale resta 594px esatti,
+            invariato rispetto a prima. */}
         <div className="flex justify-center items-stretch gap-1 md:gap-1.5 mt-0.5">
           <Focusable group="keyboard" id="key-lang" onEnter={() => setLayout(layoutId === 'it' ? 'en' : 'it')} neighbors={neighborMap['key-lang']} className="flex-1 max-w-[94px]">
             {(isFocused: boolean) => (
@@ -868,7 +897,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               </div>
             )}
           </Focusable>
-          <Focusable group="keyboard" id="key-space" onEnter={handleSpace} neighbors={neighborMap['key-space']} className="flex-1 max-w-[294px]">
+          <Focusable group="keyboard" id="key-space" onEnter={handleSpace} neighbors={neighborMap['key-space']} className={cn('flex-1', onOpenFileManager ? 'max-w-[244px]' : 'max-w-[294px]')}>
             {(isFocused: boolean) => (
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
@@ -896,6 +925,25 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               </div>
             )}
           </Focusable>
+          {/* v2.0.41-dev.1 — richiamo file manager, solo se il chiamante
+              lo fornisce (vedi commento sulla prop onOpenFileManager più
+              sopra e sul calcolo dimensioni prima di questa riga). */}
+          {onOpenFileManager && (
+            <Focusable group="keyboard" id="key-filemanager" onEnter={onOpenFileManager} neighbors={neighborMap['key-filemanager']} className="flex-1 max-w-[44px]">
+              {(isFocused: boolean) => (
+                <div className={cn(
+                  'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
+                  isFocused
+                    ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
+                    : isLight
+                      ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
+                      : 'bg-white/5 opacity-80'
+                )}>
+                  <FolderOpen size={16} />
+                </div>
+              )}
+            </Focusable>
+          )}
           <Focusable group="keyboard" id="key-paste" onEnter={handlePaste} neighbors={neighborMap['key-paste']} className="flex-1 max-w-[94px]">
             {(isFocused: boolean) => (
               <div className={cn(

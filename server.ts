@@ -25,7 +25,7 @@ import {
 } from './src/backend/sharedLauncherManager';
 import fs from 'fs';
 import os from 'os';
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, execFileSync } from 'child_process';
 
 // Stesso pattern già usato in altri moduli backend (downloadManager.ts,
 // runners/implementations.ts, plugins/gogPlugin.ts, plugins/epicPlugin.ts)
@@ -97,8 +97,17 @@ async function startServer() {
     // "completed" significa solo "installer individuato", non "app
     // installata" — una notifica "Completato!" qui sarebbe fuorviante,
     // l'utente deve ancora eseguire il setup lanciando la card.
+    //
+    // v2.0.41-dev.11 — generalizzato da "solo Ubisoft" (hardcoded) a
+    // "qualunque launcher condiviso presente nel registro" — stesso
+    // principio già seguito in downloadManager.ts (dispatch installer) e
+    // gameManager.ts (getGames filtro per store): un nuovo launcher
+    // (EA App, Battle.net, Rockstar) non richiede più toccare questo
+    // punto, basta comparire in thirdPartyLaunchers.ts con lo storeId
+    // giusto.
     const task = downloadManager.getTasks().find(t => t.gameId === gameId);
-    const pendingSharedLauncher = task?.store === 'Ubisoft' && !isLauncherBootstrapped('ubisoft-connect');
+    const thirdPartyDef = task ? THIRD_PARTY_LAUNCHERS.find(l => l.storeId === task.store) : undefined;
+    const pendingSharedLauncher = !!thirdPartyDef && !isLauncherBootstrapped(thirdPartyDef.id);
     if (!pendingSharedLauncher) {
       notificationEngine.emit({ type: 'download-completed', gameId, gameTitle });
     }
@@ -1446,9 +1455,89 @@ async function startServer() {
   // comportamento già sufficiente — non serve bloccare la richiesta prima.
   app.post('/api/system/steam-bigpicture', (_req, res) => {
     writeLog('system', '[SYSTEM] Switch to Steam Big Picture requested.');
+    // v2.0.41-dev.7 — richiesta utente: X-Launcher deve minimizzarsi al
+    // lancio di Big Picture, esattamente come per un gioco reale. Riusa
+    // il meccanismo già esistente e funzionante (tray.py fa polling su
+    // /api/system/game-running e nasconde/ripristina la finestra in base
+    // al booleano `running`) invece di introdurre un secondo meccanismo
+    // di hide/show — vedi bigPictureActive in gameManager.ts.
+    gameManager.notifyBigPictureLaunched();
     res.json({ success: true, message: 'Apertura Steam Big Picture in corso.' });
     const proc = spawn('steam', ['steam://open/bigpicture'], { stdio: 'ignore' });
     proc.on('error', (e) => writeLog('error', `[SYSTEM] Failed to launch Steam Big Picture: ${e.message} — is Steam installed?`));
+  });
+
+  // POST /api/system/steam-bigpicture-closed — punto di rientro da Big
+  // Picture a X-Launcher (v2.0.41-dev.7/8, richiesta utente). Chi la
+  // invoca: kiosk-launch.sh (v2.0.41-dev.8) — X-Launcher è aggiunto come
+  // Non-Steam Game in Steam (scripts/setup-steam-shortcut.cjs), il cui
+  // `Exe` in shortcuts.vdf punta esattamente a kiosk-launch.sh, verificato
+  // leggendo quel file (mai assunto) — cliccare la card "X-Launcher" da
+  // dentro Big Picture riesegue kiosk-launch.sh da capo, che ora rileva
+  // "daemon+finestra già attivi" come segnale di rientro (non una prima
+  // esecuzione) e chiama questo endpoint prima di mostrare la finestra
+  // già esistente.
+  //
+  // v2.0.41-dev.9 — BUG UTENTE: nascondere solo la FINESTRA di Big
+  // Picture (`wmctrl :ACTIVE: -b add,hidden`, v2.0.41-dev.8) non basta —
+  // Big Picture Mode intercetta l'input del controller a un livello più
+  // basso della finestra in primo piano (Steam Input), quindi restava a
+  // "combattere" con la Dashboard per gli stessi input anche da nascosta.
+  // Ipotesi dell'utente, plausibile e non ancora verificata su hardware
+  // reale: serve un'uscita "vera" da Big Picture in due passi — (1) far
+  // tornare Steam alla modalità client desktop (`steam://open/main`,
+  // protocollo documentato da Valve — NON `steam://exit-bigpicture-mode`,
+  // che non risulta un protocollo Steam reale), che dovrebbe rilasciare
+  // l'hook Steam Input; (2) SOLO DOPO, nascondere la finestra del client
+  // desktop risultante. Se Steam Input continuasse comunque a
+  // intercettare l'input anche in modalità client (non solo Big
+  // Picture), questo fix da solo non basterebbe — da confermare con un
+  // nuovo test, non assunto qui.
+  //
+  // v2.0.41-dev.10 — BUG UTENTE (dev.9): un'attesa fissa (1200ms) +
+  // `:ACTIVE:` non bastava — log conferma che entrambe le chiamate
+  // partivano correttamente, ma "Big Picture sembra ridursi alla
+  // finestra di Steam, poi torna in primo piano": la transizione
+  // Big Picture→client desktop non ha una durata fissa prevedibile (system
+  // apparentemente più lento di 1200ms in quel test), quindi la finestra
+  // ATTIVA in quel preciso istante non era ancora quella giusta — nascosta
+  // una finestra transitoria, poi la vera finestra client è comparsa DOPO
+  // senza nulla a nasconderla. Sostituito con un polling per WM_CLASS
+  // (non per timing): cerca ripetutamente una finestra la cui classe
+  // contenga "steam" (`wmctrl -lx`, WM_CLASS è stabile qualunque sia la
+  // durata reale della transizione), fino a un massimo di 10 tentativi
+  // ogni 300ms (3s totali) — nasconde quella specifica appena la trova,
+  // per id (`wmctrl -i -r <id>`), invece dell'ambigua `:ACTIVE:`.
+  app.post('/api/system/steam-bigpicture-closed', (_req, res) => {
+    writeLog('system', '[SYSTEM] Return from Steam Big Picture requested.');
+    gameManager.notifyBigPictureClosed();
+    res.json({ success: true });
+    const exitProc = spawn('steam', ['steam://open/main'], { stdio: 'ignore' });
+    exitProc.on('error', (e) => writeLog('warning', `[SYSTEM] steam://open/main failed to spawn (non-blocking): ${e.message}`));
+
+    const pollForSteamWindow = (attemptsLeft: number) => {
+      if (attemptsLeft <= 0) {
+        writeLog('warning', '[SYSTEM] Steam window not found via wmctrl -lx after polling (3s) — giving up (non-blocking).');
+        return;
+      }
+      try {
+        const out = execFileSync('wmctrl', ['-lx'], { encoding: 'utf-8' });
+        const line = out.split('\n').find(l => {
+          const wmClass = l.trim().split(/\s+/)[2] ?? '';
+          return /steam/i.test(wmClass);
+        });
+        if (line) {
+          const winId = line.trim().split(/\s+/)[0];
+          execFileSync('wmctrl', ['-i', '-r', winId, '-b', 'add,hidden'], { stdio: 'pipe' });
+          writeLog('system', `[SYSTEM] Steam window hidden (id=${winId}).`);
+          return;
+        }
+      } catch (e: any) {
+        writeLog('warning', `[SYSTEM] wmctrl -lx poll failed (non-blocking): ${e?.message ?? e}`);
+      }
+      setTimeout(() => pollForSteamWindow(attemptsLeft - 1), 300);
+    };
+    setTimeout(() => pollForSteamWindow(10), 300);
   });
 
   app.listen(PORT, "0.0.0.0", () => {

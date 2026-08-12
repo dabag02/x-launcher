@@ -1690,7 +1690,23 @@ class DownloadManager {
     this.log(task, 'system', `${logTag} Step 1 OK — prefix pronta.`);
 
     // Step 2 — dipendenze winetricks: stesso meccanismo di runGOG/runEpic.
-    const verbs = filterVerbsForEnv(task.winetricksVerbs);
+    //
+    // v2.0.41-dev.12 — BUG UTENTE (EA App): installer fallito con
+    // INST-14-1603 ("errore fatale generico"), ampiamente documentato —
+    // causa più ricorrente citata anche nelle guide ufficiali EA:
+    // Visual C++ Redistributable mancanti/corrotti. Causa reale trovata:
+    // `def.requiredWinetricksVerbs` (thirdPartyLaunchers.ts) esiste nel
+    // registro ma non veniva MAI letto qui — task.winetricksVerbs arriva
+    // dal frontend (Game Options > Winetricks Dependencies), che per un
+    // launcher appena seedato è un array vuoto reale (non `undefined`),
+    // quindi il parametro di default di addTask() (DEFAULT_WINETRICKS_VERBS)
+    // non scattava mai: nessun verb veniva installato prima
+    // dell'installer, indipendentemente da cosa dichiarato nel registro.
+    // Fallback SOLO quando l'utente non ha esplicitamente scelto nulla —
+    // se in futuro personalizza i verb dall'overlay, quella scelta vince
+    // sempre, invariato.
+    const requestedVerbs = task.winetricksVerbs.length > 0 ? task.winetricksVerbs : def.requiredWinetricksVerbs;
+    const verbs = filterVerbsForEnv(requestedVerbs);
     if (verbs.length > 0 && binaryExists('winetricks')) {
       this.log(task, 'system', `${logTag} Step 2 — Verbs: ${verbs.join(', ')}`);
       this.update(task, { status: 'installing_deps', progress: 0 });
@@ -1709,10 +1725,15 @@ class DownloadManager {
         }, winetrickTimeoutFor(verb));
         this.log(task, 'system', `${logTag} Step 2 — ${verb}: OK`);
       }
-    } else if (task.winetricksVerbs.length > 0) {
+    } else if (requestedVerbs.length > 0) {
       this.log(task, 'error', `${logTag} winetricks non trovato — dipendenze saltate`);
     }
-    persistWinetricksVerbs(task.gameId, task.winetricksVerbs);
+    // v2.0.41-dev.12 — persiste requestedVerbs (quello REALMENTE
+    // applicato, incluso l'eventuale fallback al registro), non
+    // task.winetricksVerbs: altrimenti l'overlay Winetricks Dependencies
+    // di Game Options mostrerebbe un elenco vuoto anche dopo
+    // un'installazione che ha davvero applicato dei verb.
+    persistWinetricksVerbs(task.gameId, requestedVerbs);
 
     // Step 3 — individua l'installer scaricato: nessun tool CLI
     // scriptabile come legendary/lgogdownloader/nile, l'utente lo scarica

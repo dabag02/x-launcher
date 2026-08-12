@@ -76,6 +76,17 @@ export type EngineEvent =
   | { type: 'runner-error';       runnerId: string; error: string }
   | { type: 'validation-prompt';  gameId: string; gameTitle: string }
   | { type: 'shared-launcher-idle'; gameId: string; gameTitle: string; launcherId: string; launcherName: string }
+  // v2.0.41-dev.4 — richiesta utente: uno scanner di libreria di un
+  // launcher condiviso (Ubisoft Connect, in futuro altri in Fase B) ha
+  // trovato un gioco installato DIRETTAMENTE al suo interno che sembra
+  // corrispondere (match per titolo normalizzato) a un gioco già
+  // presente in libreria da un altro store. MAI un collegamento
+  // automatico — filosofia già stabilita per shared-launcher-idle sopra
+  // (nessuna automazione silenziosa su una scelta con impatto reale):
+  // qui l'impatto è scrivere requiresLauncher sulla riga sbagliata se il
+  // match per titolo fosse un falso positivo (es. un remaster con nome
+  // quasi identico), quindi si chiede sempre conferma esplicita.
+  | { type: 'shared-launcher-native-game-found'; launcherId: string; launcherName: string; nativeTitle: string; targetGameId: string; targetGameTitle: string; targetStore: string }
   | { type: 'system';             message: string; level: 'info' | 'warning' | 'error' };
 
 // ---------------------------------------------------------------------------
@@ -625,6 +636,30 @@ class NotificationEngine {
           }),
           secondary_action: JSON.stringify({
             label: lang === 'en' ? 'Keep open' : 'Tieni aperto',
+          }),
+        };
+
+      // v2.0.41-dev.4 — vedi commento sul tipo in EngineEvent sopra.
+      // `game_id`/`game_title` puntano al gioco ESISTENTE da collegare
+      // (non a una riga nuova che ancora non esiste finché l'utente non
+      // conferma) — coerente con ogni altra notifica legata a un gioco
+      // già in libreria.
+      case 'shared-launcher-native-game-found':
+        return {
+          id: this.mkId(), type: 'info', status: 'pending',
+          title: lang === 'en' ? `${event.launcherName}: game detected` : `${event.launcherName}: gioco rilevato`,
+          body: lang === 'en'
+            ? `"${event.nativeTitle}" is installed directly in ${event.launcherName} and looks like the same game as "${event.targetGameTitle}" (${event.targetStore}) already in your library. Link them to avoid a duplicate entry.`
+            : `"${event.nativeTitle}" risulta installato direttamente in ${event.launcherName} e sembra corrispondere a "${event.targetGameTitle}" (${event.targetStore}) già nella tua libreria. Collegali per evitare una riga duplicata.`,
+          game_id: event.targetGameId, game_title: event.targetGameTitle,
+          source: 'shared-launcher-scan', created_at: this.now(),
+          primary_action: JSON.stringify({
+            label: lang === 'en' ? 'Link' : 'Collega',
+            handler: 'link_shared_launcher_game',
+            params: { targetGameId: event.targetGameId, launcherId: event.launcherId },
+          }),
+          secondary_action: JSON.stringify({
+            label: lang === 'en' ? 'Not the same game' : 'Non è lo stesso gioco',
           }),
         };
 

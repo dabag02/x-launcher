@@ -11,6 +11,7 @@ import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
 import { UbisoftConnectPlugin } from './plugins/ubisoftConnectPlugin';
+import { EAAppPlugin } from './plugins/eaAppPlugin';
 import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath, waitForContainerReadyMarker } from './sharedLauncherManager';
 import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
@@ -63,6 +64,7 @@ class GameManager {
     new AmazonPlugin(),
     new BattlenetPlugin(),
     new UbisoftConnectPlugin(),
+    new EAAppPlugin(),
     new ClassicPlugin(),
   ];
 
@@ -76,6 +78,36 @@ class GameManager {
   // ancora vivo è controllare /proc/<pid> a richiesta (vedi
   // isLastLaunchedGameRunning), non un listener passivo.
   private lastLaunchedGame: { gameId: string; gameTitle: string; pid: number; launchedAt: number; logPath?: string; processNameHint?: string; processNameSeenAtLeastOnce?: boolean } | null = null;
+
+  // v2.0.41-dev.7 — richiesta utente: la card "Steam Big Picture" deve
+  // minimizzare X-Launcher al lancio (stesso comportamento di qualunque
+  // gioco reale) e farlo ritornare in primo piano al rientro — ma Big
+  // Picture NON è un gioco lanciato da questo daemon (non c'è alcun
+  // processo figlio nostro da tracciare: `steam steam://open/bigpicture`
+  // si limita a segnalare a un client Steam che potrebbe già essere in
+  // esecuzione, vedi endpoint in server.ts). Stato dedicato, del tutto
+  // separato da lastLaunchedGame sopra — niente notifiche di validazione/
+  // "did it work", niente polling di uscita per nome processo: quella
+  // macchina è pensata per un vero gioco lanciato da noi, riusarla qui
+  // produrrebbe prompt/notifiche senza senso per un semplice switch di
+  // modalità del client Steam. isLastLaunchedGameRunning() sotto la
+  // combina con lastLaunchedGame SOLO ai fini del booleano `running` che
+  // tray.py legge per nascondere/ripristinare la finestra — tray.py non
+  // usa gameId/gameTitle per quella decisione (solo per il suo menu
+  // "giochi recenti", che non riguarda comunque questo caso).
+  private bigPictureActive: boolean = false;
+
+  /** Chiamato da POST /api/system/steam-bigpicture — vedi bigPictureActive sopra. */
+  notifyBigPictureLaunched(): void {
+    this.bigPictureActive = true;
+    this.addLog('[SYSTEM] Steam Big Picture: tracciato come attivo — la finestra Dashboard verrà nascosta dal tray.', 'system');
+  }
+
+  /** Chiamato dal punto di rientro da Big Picture — vedi bigPictureActive sopra. */
+  notifyBigPictureClosed(): void {
+    this.bigPictureActive = false;
+    this.addLog('[SYSTEM] Steam Big Picture: tracciato come chiuso — la finestra Dashboard verrà ripristinata dal tray.', 'system');
+  }
 
   // v1.1.32 — quanto tempo dare al processo del gioco per comparire la
   // PRIMA volta prima di trattare "non trovato" come un vero fallimento
@@ -116,6 +148,16 @@ class GameManager {
    * insieme all'elaborazione della transizione, non prima.
    */
   isLastLaunchedGameRunning(): { running: boolean; gameId?: string; gameTitle?: string } {
+    // v2.0.41-dev.7 — vedi bigPictureActive sopra: controllato PRIMA di
+    // lastLaunchedGame, indipendente da esso — i due stati non si
+    // escludono a vicenda nel modello dati, ma nella pratica non possono
+    // essere entrambi rilevanti insieme (o si sta guardando un gioco
+    // reale in corso, o si è passati a Big Picture), quindi l'ordine non
+    // cambia il risultato per l'unico consumatore reale (tray.py, che
+    // legge solo il booleano `running`).
+    if (this.bigPictureActive) {
+      return { running: true, gameId: 'steam-bigpicture-launcher', gameTitle: 'Steam Big Picture' };
+    }
     if (!this.lastLaunchedGame) return { running: false };
 
     // v1.1.31 — bug reale confermato: per i giochi Epic (lanciati via
@@ -1055,7 +1097,22 @@ class GameManager {
     let games = db.getAllGames();
 
     if (query?.store && query.store !== 'All' && (query.store as any) !== 'undefined') {
-      games = games.filter(g => g.store === query.store);
+      // v2.0.41-dev.6 — richiesta utente: un gioco comprato/riscattato su
+      // uno store (es. Watch Dogs 2 su Epic) ma installato/gestito
+      // tramite un launcher condiviso (requiresLauncher) deve comparire
+      // ANCHE nella scheda di quel launcher condiviso — stesso principio
+      // già seguito per Steam: la card resta un punto d'accesso in più
+      // allo STESSO gioco, mai una riga duplicata nel DB (che infatti
+      // resta una sola, sotto lo store d'acquisto originale — vedi
+      // ubisoftConnectPlugin.ts/scanInstalledUbisoftGames, che per lo
+      // stesso motivo evita di crearne una seconda quando trova un match).
+      // getThirdPartyLauncherByStoreId traduce lo store filtrato
+      // nell'id del suo eventuale launcher condiviso (es. 'Ubisoft' →
+      // 'ubisoft-connect') — generico, vale già anche per Fase B senza
+      // altro codice da scrivere quando EA App/Battle.net/Rockstar
+      // avranno lo stesso trattamento.
+      const launcherDef = getThirdPartyLauncherByStoreId(query.store);
+      games = games.filter(g => g.store === query.store || (!!launcherDef && g.requiresLauncher === launcherDef.id));
     }
     if (query?.search) {
       const s = query.search.toLowerCase();

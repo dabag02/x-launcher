@@ -723,18 +723,21 @@ function MainApp() {
   // v1.5.20-dev.12 — Fase A.4: file manager nativo controller-navigabile,
   // sostituisce zenity/kdialog quando inputDevice === 'controller' (quei
   // dialog nativi non rispondono affatto al gamepad). fileBrowserContext
-  // porta il gameId e il filtro estensioni di CHI ha aperto l'overlay
-  // (oggi solo "Sfoglia" per un installer in attesa, in futuro qualunque
-  // altro chiamante che sappia passare gameId+extensions) — VirtualKeyboard
-  // insegna che tenere il "chi/perché" fuori dal componente generico
-  // paga, stesso principio qui.
+  // porta il gameId e il filtro estensioni di CHI ha aperto l'overlay —
+  // VirtualKeyboard insegna che tenere il "chi/perché" fuori dal
+  // componente generico paga, stesso principio qui.
+  // v2.0.41-dev.1 — richiesta utente: SECONDO chiamante reale (prima
+  // "Sfoglia" per un installer in attesa era l'unico) — richiamo dalla
+  // tastiera virtuale per correggere Executable Path. `purpose` distingue
+  // cosa fare alla conferma di un file (vedi confirmFileBrowserSelection
+  // e closeFileBrowser sotto): 'installer' invariato, 'executable' nuovo.
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [fileBrowserPath, setFileBrowserPath] = useState<string | null>(null);
   const [fileBrowserParentPath, setFileBrowserParentPath] = useState<string | null>(null);
   const [fileBrowserEntries, setFileBrowserEntries] = useState<{ name: string; isDirectory: boolean; sizeBytes: number | null; mtimeMs: number | null }[]>([]);
   const [fileBrowserFilterOn, setFileBrowserFilterOn] = useState(true);
   const [fileBrowserQuickLinks, setFileBrowserQuickLinks] = useState<{ home: string; downloads: string | null; removableMedia: string | null }>({ home: '', downloads: null, removableMedia: null });
-  const [fileBrowserContext, setFileBrowserContext] = useState<{ gameId: string; extensions: string[] } | null>(null);
+  const [fileBrowserContext, setFileBrowserContext] = useState<{ purpose: 'installer' | 'executable'; gameId: string; extensions: string[] } | null>(null);
   const [fileBrowserError, setFileBrowserError] = useState<string | null>(null);
 
   // Plugin manager
@@ -799,7 +802,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v1.5.20-dev.40');
+  const [appVersion, setAppVersion] = useState('v2.0.41-dev.14');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1443,40 +1446,85 @@ function MainApp() {
       .catch(() => setFileBrowserError(t('dashboard:fileBrowser.communicationError')));
   }, [t]);
 
-  const openFileBrowser = useCallback((context: { gameId: string; extensions: string[] }) => {
+  // v2.0.41-dev.1 — startPath opzionale: quando fornito (richiamo da
+  // Executable Path), l'overlay parte SEMPRE da lì invece che da
+  // Download/Home — richiesta esplicita dell'utente. Se il percorso non
+  // esiste/non è una cartella, /api/filesystem/list lo segnala già con
+  // fileBrowserError (vedi listDirectory in fileManager.ts), e i
+  // quick-link nell'header restano comunque la via d'uscita — nessuna
+  // gestione speciale in più necessaria qui.
+  // v2.0.41-dev.1 — BUG UTENTE: navigazione/selezione impossibili
+  // nell'overlay, anche a z-index corretto. Causa reale: openFileBrowser
+  // non ha MAI impostato activeGroup('file-browser') né chiamato
+  // focusFirstInGroup — manca il pattern che ogni altro overlay del
+  // progetto segue (vedi openGameOptions poco sotto: setShowX(true) +
+  // setActiveGroup('x') + focusFirstInGroup('x') via setTimeout).
+  // moveFocus in FocusProvider naviga SOLO nel pool di
+  // `activeGroup ?? 'dashboard'` (vedi targetGroup lì) — con
+  // activeGroup ancora su 'game-options'/'keyboard'/'downloads', i
+  // Focusable group="file-browser" restavano irraggiungibili da
+  // D-pad/stick indipendentemente dallo z-index, che risolveva solo la
+  // sovrapposizione visiva. Bug preesistente anche per purpose
+  // 'installer' (mai notato: richiede controller + stato
+  // awaiting_installer insieme, combinazione stretta) — fix unico in
+  // questo punto condiviso, corregge entrambi i chiamanti.
+  const openFileBrowser = useCallback((context: { purpose: 'installer' | 'executable'; gameId: string; extensions: string[] }, startPath?: string) => {
     setFileBrowserContext(context);
     setFileBrowserFilterOn(true);
+    setActiveGroup('file-browser');
     fetch('/api/filesystem/quick-links')
       .then(r => r.json())
       .then((links: { home: string; downloads: string | null; removableMedia: string | null }) => {
         setFileBrowserQuickLinks(links);
         setShowFileBrowser(true);
-        loadFileBrowserDir(links.downloads ?? links.home, context.extensions, true);
+        loadFileBrowserDir(startPath ?? (links.downloads ?? links.home), context.extensions, true);
+        setTimeout(() => focusFirstInGroup('file-browser'), 80);
       })
       .catch(() => {
         // Anche senza quick-link risolti, l'overlay può ancora aprirsi
         // sulla home — meglio di un fallimento silenzioso.
         setShowFileBrowser(true);
-        loadFileBrowserDir('~', context.extensions, true);
+        loadFileBrowserDir(startPath ?? '~', context.extensions, true);
+        setTimeout(() => focusFirstInGroup('file-browser'), 80);
       });
-  }, [loadFileBrowserDir]);
+  }, [loadFileBrowserDir, setActiveGroup, focusFirstInGroup]);
 
+  // v2.0.41-dev.1 — purpose 'executable': il chiamante è stato la
+  // tastiera virtuale (nascosta esplicitamente da openExecutableFileBrowser
+  // prima di aprire questo overlay) — va fatta ricomparire alla chiusura,
+  // non tornare al pannello Download come per 'installer'.
   const closeFileBrowser = useCallback(() => {
     setShowFileBrowser(false);
+    if (fileBrowserContext?.purpose === 'executable') {
+      setShowKeyboard(true);
+      setActiveGroup('keyboard');
+    } else {
+      setActiveGroup('downloads');
+    }
     setFileBrowserContext(null);
-    setActiveGroup('downloads');
-  }, [setActiveGroup]);
+  }, [fileBrowserContext, setActiveGroup]);
 
   const confirmFileBrowserSelection = useCallback((fileName: string) => {
     if (!fileBrowserContext || !fileBrowserPath) return;
     const fullPath = joinFsPath(fileBrowserPath, fileName);
-    fetch('/api/downloads/installer-select', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gameId: fileBrowserContext.gameId, path: fullPath }),
-    }).finally(() => {
+    if (fileBrowserContext.purpose === 'executable') {
+      // Nessun PATCH diretto qui: aggiorna solo il valore in editing
+      // nella tastiera (che sta per ricomparire, vedi closeFileBrowser) —
+      // il salvataggio reale resta quello già esistente alla chiusura
+      // della tastiera (onCommit di openKeyboardForField per questo
+      // campo, vedi field-executablePath), stesso identico percorso di
+      // una digitazione manuale, nessuna persistenza duplicata.
+      setActiveField(prev => (prev ? { ...prev, value: fullPath } : prev));
       closeFileBrowser();
-    });
+    } else {
+      fetch('/api/downloads/installer-select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gameId: fileBrowserContext.gameId, path: fullPath }),
+      }).finally(() => {
+        closeFileBrowser();
+      });
+    }
   }, [fileBrowserContext, fileBrowserPath, closeFileBrowser]);
 
   useEffect(() => {
@@ -1770,6 +1818,31 @@ function MainApp() {
   const selectedGame = selectedGameId === STEAM_BIG_PICTURE_ID
     ? makeSteamBigPictureCard()
     : games.find(g => g.id === selectedGameId);
+
+  // v2.0.41-dev.1 — richiesta utente: apre il file manager per correggere
+  // Executable Path, partendo SEMPRE dalla cartella che contiene il path
+  // già scritto nel campo in editing (activeField.value — il "campo di
+  // testo dell'overlay", live, non ancora committato), mai da Download/
+  // Home. Path sempre assoluti per questo campo (placeholder/esempi
+  // nell'overlay: "/home/.../Game.exe") — dirname manuale a stringhe,
+  // senza bisogno del modulo 'path' di Node lato frontend. Se il campo è
+  // vuoto o non assoluto, nessun punto di partenza noto: openFileBrowser
+  // ricade sul comportamento esistente (Download/Home), stesso default
+  // già in uso per l'installer. Deve vivere DOPO la dichiarazione di
+  // selectedGame qui sopra, non prima — stessa categoria di errore
+  // (TS2448) già documentata più sotto per keyboardAltSuggestions/
+  // overlayNavAnchors in questo stesso file.
+  const openExecutableFileBrowser = useCallback(() => {
+    if (!activeField || activeField.id !== 'field-executablePath' || !selectedGame) return;
+    const current = activeField.value.trim();
+    let startPath: string | undefined;
+    if (current.startsWith('/')) {
+      const idx = current.lastIndexOf('/');
+      startPath = idx > 0 ? current.slice(0, idx) : '/';
+    }
+    setShowKeyboard(false); // riappare alla chiusura del file browser, vedi closeFileBrowser
+    openFileBrowser({ purpose: 'executable', gameId: selectedGame.id, extensions: ['exe'] }, startPath);
+  }, [activeField, selectedGame, openFileBrowser]);
 
   // Richiesta utente — dimensione prevista di installazione, on-demand per
   // un solo gioco alla volta (solo GOG/Epic — il backend ritorna null per
@@ -2252,7 +2325,7 @@ function MainApp() {
     // senza un vero concetto di login (Steam, Amazon, Battle.net, Classic
     // Console), per cui isConnected non implica una sessione da poter
     // perdere nello stesso senso.
-    const NO_LOGIN_STORES = new Set(['Steam', 'Battle.net', 'Classic Console', 'Ubisoft']);
+    const NO_LOGIN_STORES = new Set(['Steam', 'Battle.net', 'Classic Console', 'Ubisoft', 'EA App']);
     result = result.filter(g => {
       const store = g.store as string;
       if (NO_LOGIN_STORES.has(store)) return true;
@@ -2369,7 +2442,7 @@ function MainApp() {
     // come sopra — il gioco potrebbe comunque funzionare (cache locale,
     // modalità offline), ma l'utente deve sapere del rischio prima di
     // procedere, dato che la sessione non è più valida.
-    const NO_LOGIN_STORES_HANDLEPLAY = new Set(['Steam', 'Battle.net', 'Classic Console', 'Ubisoft']);
+    const NO_LOGIN_STORES_HANDLEPLAY = new Set(['Steam', 'Battle.net', 'Classic Console', 'Ubisoft', 'EA App']);
     if (ps && !ps.drmFree && !NO_LOGIN_STORES_HANDLEPLAY.has(game.store as string)) {
       const connected = storeConnectedMapRef.current.get(game.store as string);
       if (connected === false) {
@@ -2815,22 +2888,21 @@ Vuoi provare ad avviarlo comunque?`);
   // usato per il fallback automatico (priorità + posizione), selezionando
   // il primo controllo di contenuto reale invece del bottone di chiusura.
   const openGameOptions = useCallback((gameId: string) => {
-    // v0.99.32 — La card "Steam Big Picture" non ha un overlay di
-    // configurazione sensato (niente winetricks, env vars, runner — non è
-    // un gioco installabile). X/click destro su di essa esegue la stessa
-    // azione di Invio/click sinistro: passa a Big Picture. Un solo
-    // significato per qualunque interazione, coerente con lo scopo della
-    // card.
-    if (gameId === STEAM_BIG_PICTURE_ID) {
-      handlePlay(gameId);
-      return;
-    }
+    // v2.0.41-dev.7 — richiesta utente: la card "Steam Big Picture" deve
+    // rispondere SOLO ad A (Invio/click sinistro), come qualunque altra
+    // card risponde solo alla propria azione primaria — X/click destro
+    // devono restare senza effetto, non un'azione alternativa che porta
+    // comunque allo stesso risultato. Prima (v0.99.32) X reindirizzava a
+    // handlePlay con la motivazione "un solo significato per qualunque
+    // interazione" — esattamente il comportamento anomalo segnalato:
+    // ora X/click destro su questa card non fanno letteralmente nulla.
+    if (gameId === STEAM_BIG_PICTURE_ID) return;
     setSelectedGameId(gameId);
     setShowGameOptions(true);
     setActiveGroup('game-options');
     play('select');
     setTimeout(() => focusFirstInGroup('game-options'), 80);
-  }, [play, focusFirstInGroup, setActiveGroup, handlePlay]);
+  }, [play, focusFirstInGroup, setActiveGroup]);
 
   // Chiude l'overlay Game Options e ripristina lo scope Dashboard.
   // La card è sempre montata sotto l'overlay (che è sovrapposto, non la
@@ -2928,7 +3000,7 @@ Vuoi provare ad avviarlo comunque?`);
         });
         const first = visibleAccountStores[0];
         if (!first) return null;
-        const noLogin = ['Battle.net', 'Classic Console', 'Ubisoft'].includes(first.id);
+        const noLogin = ['Battle.net', 'Classic Console', 'Ubisoft', 'EA App'].includes(first.id);
         if (noLogin) return null; // nessun controllo interattivo su questa card
         return first.isConnected ? `store-unlink-${first.id}` : `store-connect-${first.id}`;
       }
@@ -4007,8 +4079,13 @@ Vuoi provare ad avviarlo comunque?`);
 
       {/* v1.5.20-dev.12 — Fase A.4: file manager nativo controller-navigabile,
           sostituisce zenity/kdialog quando inputDevice === 'controller'.
-          z-[95]: sopra il pannello Download (z-50) che oggi è l'unico
-          chiamante — deve sempre restare visibile sopra di esso. */}
+          v2.0.41-dev.1 — BUG UTENTE: z-[95] bastava solo per il chiamante
+          originario (sopra il pannello Download, z-50), ma con purpose
+          'executable' l'overlay Game Options resta aperto SOTTO (z-[150],
+          vedi più sotto) — il file manager ci finiva dietro, invisibile
+          in primo piano. z-[160]: sopra Game Options, sotto la tastiera
+          virtuale (z-[200], comunque nascosta mentre questo overlay è
+          aperto — vedi openExecutableFileBrowser/closeFileBrowser). */}
       <AnimatePresence>
         {showFileBrowser && (() => {
           const formatFileSize = (bytes: number | null): string => {
@@ -4029,7 +4106,7 @@ Vuoi provare ad avviarlo comunque?`);
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
             className={cn(
-              "absolute inset-0 z-[95] flex flex-col pt-[80px] pl-[80px] pr-[80px] pb-[64px]",
+              "absolute inset-0 z-[160] flex flex-col pt-[80px] pl-[80px] pr-[80px] pb-[64px]",
               theme === 'dark' ? "bg-[#0b0c0f]/98" : "bg-gray-100/98"
             )}
           >
@@ -4158,6 +4235,39 @@ Vuoi provare ad avviarlo comunque?`);
             </div>
 
             {/* Corpo — lista verticale */}
+            {/* v2.0.41-dev.2 — BUG UTENTE: barra grigio scura che
+                lampeggia in basso ad ogni input di navigazione (fra
+                pulsanti header e lista file). Stessa causa già
+                documentata e corretta altrove nel progetto (v1.1.4/
+                v1.1.7, vedi settingsBodyRef più sotto): un figlio flex
+                con overflow-y-auto ma SENZA min-h-0 non si comprime mai
+                sotto l'altezza del proprio contenuto — il contenitore
+                cresce con la lista invece di restare vincolato
+                all'altezza disponibile del genitore (motion.div
+                `absolute inset-0`), e il colore piatto del fondo sotto
+                traspare per un frame ad ogni scroll manuale innescato
+                da FocusProvider (setFocusedId→scrollIntoView custom).
+                min-h-0 aggiunto qui, stesso fix identico.
+
+                v2.0.41-dev.3 — BUG UTENTE (persiste dopo min-h-0): barra
+                grigio scura che lampeggia durante lo SCROLL della lista
+                (non solo al passaggio focus header↔lista). Causa reale
+                diversa e più sottile — stesso bug ESATTO già
+                diagnosticato e corretto una volta nel pannello
+                notifiche (CHANGELOG.md, sezione "Polish interfaccia"):
+                `overflow-x-visible` insieme a `overflow-y-auto` non
+                resta "visible" — per spec CSS il browser lo promuove
+                silenziosamente ad `auto` quando l'altro asse non è
+                `visible`. .custom-scrollbar (index.css) stila solo
+                `width` (lo spessore della scrollbar VERTICALE) — una
+                scrollbar ORIZZONTALE nativa non stilizzata, grigia,
+                appare/scompare a ogni ricalcolo di scroll innescato da
+                FocusProvider durante la navigazione nella lista:
+                esattamente la barra riportata. Fix identico a quello
+                già in uso per il pannello notifiche e il pannello
+                Download (vedi overflow-x-hidden altrove in questo
+                file): overflow-x-visible → overflow-x-hidden sul
+                contenitore della lista qualche riga più sotto. */}
             {fileBrowserError ? (
               <div className="flex-1 flex flex-col items-center justify-center opacity-30">
                 <Folder size={64} className="mb-6" />
@@ -4169,7 +4279,7 @@ Vuoi provare ad avviarlo comunque?`);
                 <h3 className="text-xl font-black italic uppercase tracking-widest">{t('dashboard:fileBrowser.emptyFolder')}</h3>
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto overflow-x-visible custom-scrollbar">
+              <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden custom-scrollbar">
                 <div className="flex flex-col gap-1.5 px-2 pb-4 pt-2">
                   {fileBrowserEntries.map((entry, idx) => (
                     <Focusable
@@ -5211,7 +5321,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     // tastiera resta il dialog nativo di
                                     // sempre, nessun cambiamento per loro.
                                     if (inputDevice === 'controller') {
-                                      openFileBrowser({ gameId: task.gameId, extensions: ['exe', 'msi', 'cab'] });
+                                      openFileBrowser({ purpose: 'installer', gameId: task.gameId, extensions: ['exe', 'msi', 'cab'] });
                                       return;
                                     }
                                     fetch('/api/downloads/installer-browse', {
@@ -5477,6 +5587,27 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         const launcherId = notif.primaryAction.params?.launcherId;
                                         if (launcherId) {
                                           fetch(`/api/shared-launchers/${launcherId}/close`, { method: 'POST' }).catch(() => {});
+                                        }
+                                        dismissNotification(notif.id);
+                                        return;
+                                      }
+                                      // v2.0.41-dev.4 — richiesta utente: conferma di
+                                      // collegamento fra un gioco rilevato nativamente in
+                                      // un launcher condiviso (Ubisoft Connect, oggi) e la
+                                      // riga già esistente in libreria da un altro store.
+                                      // Riusa lo stesso endpoint generico già usato da
+                                      // Runner Bridge in Game Options (PATCH config) — un
+                                      // solo punto di scrittura per requiresLauncher, sia
+                                      // manuale che proposto da notifica.
+                                      if (notif.primaryAction?.handler === 'link_shared_launcher_game') {
+                                        const targetGameId = notif.primaryAction.params?.targetGameId;
+                                        const launcherId = notif.primaryAction.params?.launcherId;
+                                        if (targetGameId && launcherId) {
+                                          fetch(`/api/games/${targetGameId}/config`, {
+                                            method: 'PATCH',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ requiresLauncher: launcherId }),
+                                          }).catch(() => {});
                                         }
                                         dismissNotification(notif.id);
                                         return;
@@ -5797,7 +5928,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       const isWaiting = authPolling === store.id;
                       const msg       = authMessage[store.id];
                       const url       = authUrl[store.id];
-                      const noLogin   = ['Battle.net', 'Classic Console', 'Ubisoft'].includes(store.id);
+                      const noLogin   = ['Battle.net', 'Classic Console', 'Ubisoft', 'EA App'].includes(store.id);
                       // Steam ha login (rileva il client locale) ma nessun
                       // vero concetto di logout — non è un account OAuth.
                       // Il backend già risponde success:false di default per
@@ -5843,7 +5974,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       // Amazon, più a destra, lo scoring trovava lo switch
                       // per puro allineamento orizzontale, da cui il
                       // percorso "funzionante" scoperto dall'utente).
-                      const NO_LOGIN_GRID_STORES = ['Battle.net', 'Classic Console', 'Ubisoft'];
+                      // v2.0.41-dev.11 — EA App aggiunto agli store
+                      // "noLogin" (Fase B, stesso trattamento di Ubisoft
+                      // Connect sopra): stesso identico ragionamento,
+                      // renderizza anch'esso un div statico non
+                      // Focusable, va incluso qui per la stessa ragione.
+                      const NO_LOGIN_GRID_STORES = ['Battle.net', 'Classic Console', 'Ubisoft', 'EA App'];
                       const belowStore = arr[idx + 2];
                       const noElementBelowInGrid = !belowStore || NO_LOGIN_GRID_STORES.includes(belowStore.id);
                       const storeDownNeighbor = noElementBelowInGrid ? 'cloud-backup-toggle-google-drive' : undefined;
@@ -8511,8 +8647,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     come GOG/Epic, mancava solo qui il permesso di
                     mostrarlo/modificarlo dall'overlay. Step 19d: Ubisoft
                     Connect aggiunto — bug reale trovato due volte,
-                    verificato di nuovo qui per essere certi che regga. */}
-                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games' || selectedGame.store === 'Ubisoft') && (
+                    verificato di nuovo qui per essere certi che regga.
+                    v2.0.41-dev.11: EA App aggiunto, stesso trattamento
+                    (Fase B). */}
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games' || selectedGame.store === 'Ubisoft' || selectedGame.store === 'EA App') && (
                   <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Package size={16} className="text-blue-400" />
@@ -9341,6 +9479,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 altSuggestions={keyboardAltSuggestions}
                 onSuggestionFocus={setSuggestionTip}
                 topRowExternalUpId={topRowExternalUpId}
+                onOpenFileManager={activeField?.id === 'field-executablePath' ? openExecutableFileBrowser : undefined}
               />
             </div>
           </div>

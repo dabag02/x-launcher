@@ -107,27 +107,93 @@ export const THIRD_PARTY_LAUNCHERS: ThirdPartyLauncherDefinition[] = [
     storeId: 'Ubisoft',
     installerUrl: 'https://www.ubisoft.com/en-us/ubisoft-connect/download',
     executableRelPathHint: 'Program Files (x86)/Ubisoft/Ubisoft Game Launcher/UbisoftConnect.exe',
-    libraryReader: 'unknown',
+    // v2.0.41-dev.6 — da 'unknown' a 'registry': scanInstalledUbisoftGames
+    // (ubisoftConnectPlugin.ts) legge la libreria interna dal registro
+    // Wine (system.reg, chiavi Software\Ubisoft\Launcher\Installs\<id>),
+    // verificato su hardware reale con due giochi (Watch Dogs 2,
+    // Assassin's Creed Syndicate).
+    libraryReader: 'registry',
     directLaunchUriTemplate: 'uplay://launch/{id}/0',
     requiredWinetricksVerbs: [],
     installerFilenameHints: ['*ubisoft*', '*uplay*'],
-    verified: false,
+    // v2.0.41-dev.6 — da false a true: bootstrap, lancio (leggero e
+    // container pieno) e ora anche lettura libreria interna, tutti
+    // confermati dall'utente su hardware reale con due giochi distinti.
+    verified: true,
   },
   {
     id: 'ea-app',
     displayName: 'EA App',
     storeId: 'EA App',
-    // Da compilare quando affrontato — nessun URL/path indovinato ora.
-    installerUrl: '',
-    executableRelPathHint: '',
+    // v2.0.41-dev.11 — verificato con web_fetch: link diretto presente
+    // come <a href> semplice nell'HTML della pagina ufficiale
+    // (ea.com/ea-app, sezione "Download the EA app" → "Windows"), NON
+    // dietro un trigger JavaScript come la pagina Ubisoft Connect —
+    // risolve direttamente a binary/octet-stream, nessun redirect verso
+    // login/HTML, final_url identico a destination_url. Confermato anche
+    // da una seconda fonte indipendente (script di installazione del
+    // pacchetto Chocolatey "ea-app", stesso identico URL).
+    installerUrl: 'https://origin-a.akamaihd.net/EA-Desktop-Client-Download/installer-releases/EAappInstaller.exe',
+    // v2.0.41-dev.13 — CONFERMATO su hardware reale (era solo un'ipotesi
+    // in dev.11): questo percorso funziona davvero, ma con una premessa
+    // fondamentale — l'installer EA usa CreateSymbolicLinkW per popolare
+    // "EA Desktop/EA Desktop/" (la cartella "stabile" che questo path
+    // referenzia) come collegamento simbolico verso la vera cartella
+    // versionata (es. "13.768.x.xxxx-.../EA Desktop/"). Quella funzione
+    // è uno STUB VUOTO in Wine (ritorna sempre successo senza creare
+    // nulla, verificato leggendo il sorgente Wine) — quindi dopo
+    // l'installazione questa cartella "stabile" resta vuota/incompleta
+    // finché non si copia a mano il contenuto reale da quella versionata
+    // (ricorrerà a ogni aggiornamento di EA Desktop, non solo alla prima
+    // installazione — comportamento noto e documentato anche altrove per
+    // lo stesso identico limite Wine). Vedi ipotesi di automazione
+    // discussa con l'utente, non ancora implementata.
+    executableRelPathHint: 'Program Files/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe',
     libraryReader: 'unknown',
     // origin2://game/launch?offerIds={id} segnalato in community
     // (BoilR/Steam launch options), mai verificato per questo progetto —
     // lasciato null finché non testato, non copiato per assunzione.
     directLaunchUriTemplate: null,
-    requiredWinetricksVerbs: [],
-    installerFilenameHints: [],
-    verified: false,
+    // v2.0.41-dev.12 — richiesta utente: installer fallito con
+    // INST-14-1603 ("errore fatale generico"). Causa più ricorrente
+    // secondo fonti multiple, incluse le guide di risoluzione ufficiali
+    // EA (help.ea.com/en-tr/help/pc/troubleshoot-vc-dll-errors/,
+    // citata in un thread di supporto EA per questo stesso codice
+    // errore): Visual C++ Redistributable mancanti o corrotti.
+    // vcrun2022 (superset, stessa scelta già in uso come default
+    // generico del progetto — DEFAULT_WINETRICKS_VERBS in
+    // downloadManager.ts) + corefonts (baseline comune per qualunque
+    // app con UI, già nello stesso default). Deliberatamente NON copiati
+    // dxvk/vkd3d/dotnet48/mono/nine visti in un thread Arch Linux
+    // sull'installazione di EA App sotto Wine — quel thread riguardava
+    // un codice errore diverso (INST-14-12157) e l'autore non ha mai
+    // confermato quale dei tanti verb tentati risolvesse davvero il
+    // problema; aggiungerli qui sarebbe stata un'assunzione, non un
+    // dato verificato.
+    //
+    // v2.0.41-dev.13 — questi verb da soli NON bastavano: la causa reale
+    // del fallimento INST-14-1603 era altrove (custom action .NET
+    // "JunoInitializeSession" dell'installer, non i verb) — risolta
+    // dall'argomento EAX_LAUNCH_CLIENT=0 passato all'installer stesso
+    // (trovato negli script installer ufficiali Lutris per EA App,
+    // 24080 utenti — vedi Launch Arguments impostato a mano dall'utente
+    // nell'overlay, non ancora un default automatico qui). I verb
+    // restano comunque corretti/utili come base, solo non sufficienti da
+    // soli per questo specifico errore.
+    requiredWinetricksVerbs: ['vcrun2022', 'corefonts'],
+    installerFilenameHints: ['*eaapp*', '*ea-app*', '*ea_app*', '*origin*'],
+    // v2.0.41-dev.13 — CONFERMATO dall'utente su hardware reale:
+    // bootstrap, installazione (con EAX_LAUNCH_CLIENT=0 nei Launch
+    // Arguments), fix manuale della cartella simlink, login e interfaccia
+    // EA App tutti funzionanti con runner GE-Proton11-3. Necessario anche
+    // l'interruttore "Umu-launcher" attivo in Compatibility Layer per
+    // questo gioco/launcher — senza, l'interfaccia resta congelata dopo
+    // il login (stesso identico problema già risolto una volta per
+    // Ubisoft Connect, container Steam Linux Runtime mancante — vedi
+    // MILESTONE v1.5.20-Venus in CHANGELOG.md). Non forzato per codice,
+    // stessa scelta già fatta per Ubisoft Connect: resta un interruttore
+    // per l'utente, non un default automatico.
+    verified: true,
   },
   {
     id: 'battlenet',
