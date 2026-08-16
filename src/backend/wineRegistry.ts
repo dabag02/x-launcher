@@ -34,9 +34,17 @@ export interface WineRegKey {
 }
 
 function unescapeRegValue(raw: string): string {
-  // Ordine importante: prima le coppie \\ , poi \" — altrimenti \\"
-  // (backslash seguito da virgoletta escaped) verrebbe letto male.
-  return raw.replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+  // v2.0.41-dev.17 — BUG REALE trovato con dati EA App: "Dead Space™ 2"
+  // veniva scritto come "Dead Space\x2122 2" — \xHHHH è un escape
+  // Unicode per caratteri fuori dall'ASCII stampabile (qui il simbolo
+  // ™), diverso da \\ e \" e mai visto prima con i dati Ubisoft (nomi
+  // tutti ASCII puro). Va risolto PRIMA di \\ /\": una sequenza \xHHHH
+  // non contiene mai una coppia di backslash al suo interno, quindi
+  // l'ordine è sicuro anche processando tutto in un solo passaggio.
+  return raw
+    .replace(/\\x([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\\\/g, '\\')
+    .replace(/\\"/g, '"');
 }
 
 /**

@@ -87,6 +87,17 @@ export type EngineEvent =
   // match per titolo fosse un falso positivo (es. un remaster con nome
   // quasi identico), quindi si chiede sempre conferma esplicita.
   | { type: 'shared-launcher-native-game-found'; launcherId: string; launcherName: string; nativeTitle: string; targetGameId: string; targetGameTitle: string; targetStore: string }
+  // v2.0.41-dev.15 — richiesta utente: "Non ha funzionato" su una
+  // validation-prompt (vedi caso 'validation-prompt' sotto) per un
+  // launcher condiviso con troubleshootingTips noti (thirdPartyLaunchers.ts)
+  // non deve lasciare l'utente a sé stesso — propone i consigli concreti
+  // già accumulati per QUESTO launcher specifico, come semplice testo
+  // informativo (nessuna action_type/Apply automatico: sono consigli da
+  // valutare, non fix a un click che rischierebbero di sovrascrivere una
+  // configurazione che l'utente ha già personalizzato di proposito).
+  // `tips` arriva già nella lingua corretta (localizzato dal chiamante,
+  // non qui — stesso principio di localizedSolution in knowledgeBase.ts).
+  | { type: 'launcher-troubleshooting-tips'; launcherName: string; gameId: string; gameTitle: string; tips: string[] }
   | { type: 'system';             message: string; level: 'info' | 'warning' | 'error' };
 
 // ---------------------------------------------------------------------------
@@ -210,6 +221,17 @@ class NotificationEngine {
   /** Aggiunge un listener interno (per estensioni future) */
   on(listener: EventListener) {
     this.listeners.push(listener);
+  }
+
+  /**
+   * v2.0.41-dev.35 — richiesta implicita: `on()` sopra non aveva mai un
+   * corrispondente `off()` — chi si registra (es. l'orchestrazione della
+   * splash di lancio, un listener per gioco lanciato) deve poter
+   * rimuoversi quando non serve più, altrimenti l'array cresce senza
+   * limite per l'intera durata della sessione.
+   */
+  off(listener: EventListener) {
+    this.listeners = this.listeners.filter(l => l !== listener);
   }
 
   /** Punto centrale di ingresso eventi dal daemon */
@@ -662,6 +684,18 @@ class NotificationEngine {
             label: lang === 'en' ? 'Not the same game' : 'Non è lo stesso gioco',
           }),
         };
+
+      case 'launcher-troubleshooting-tips': {
+        const bulletPrefix = lang === 'en' ? '• ' : '• ';
+        const body = event.tips.map(t => `${bulletPrefix}${t}`).join('\n');
+        return {
+          id: this.mkId(), type: 'info', status: 'pending',
+          title: lang === 'en' ? `${event.launcherName}: suggestions` : `${event.launcherName}: suggerimenti`,
+          body,
+          game_id: event.gameId, game_title: event.gameTitle,
+          source: 'launcher-tips', created_at: this.now(),
+        };
+      }
 
       case 'system':
         if (event.level === 'info') return null; // i log info non diventano notifiche

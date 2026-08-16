@@ -192,3 +192,437 @@ Nuovo endpoint `POST /api/system/steam-bigpicture-closed`, pronto ma **non ancor
 Integrata in `onLauncherProcessClosed()`, chiamata **a ogni chiusura** del processo (non solo al primo bootstrap) — copre sia la primissima installazione (gira subito dopo che l'installer si chiude, PRIMA della ricerca dell'eseguibile reale già esistente — ordine corretto, la cartella è già popolata quando si cerca l'exe) sia ogni futuro aggiornamento di EA Desktop, che romperà di nuovo il collegamento per lo stesso identico motivo.
 
 **Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale — nessun aggiornamento EA Desktop ancora avvenuto per esercitare il ramo "post-bootstrap".**
+
+---
+
+## v2.0.41-dev.15 — Knowledge base proattiva per launcher condivisi
+
+**Richiesta utente**: capitalizzare tutta l'esperienza accumulata durante le sagge di Ubisoft Connect ed EA App — quando l'utente segnala "Non ha funzionato" alla notifica di verifica post-chiusura, la Dashboard non deve fermarsi lì: se il gioco è (o richiede) un launcher condiviso con difficoltà note e già superate, propone i consigli concreti trovati.
+
+**`thirdPartyLaunchers.ts`**: nuovo campo `troubleshootingTips` (bilingue, stesso pattern `text`/`textEn` già in uso per la Knowledge Base) su `ThirdPartyLauncherDefinition`. Popolato con l'esperienza reale documentata in questa sessione e nel changelog storico:
+- **Ubisoft Connect**: finestra nera dal secondo avvio → attivare "Umu-launcher" (MILESTONE v1.5.20-Venus, "saga finestra nera").
+- **EA App**: tre consigli — `EAX_LAUNCH_CLIENT=0` per l'errore INST-14-160x, GE-Proton + "Umu-launcher" per la schermata "Connessione a EA App" bloccata, e un promemoria sul fix automatico della cartella symlink (dev.14).
+
+Deliberatamente **solo testo informativo, nessun "Apply" a un click**: sono consigli da valutare, non un'automazione — evita di rischiare di sovrascrivere una configurazione che l'utente ha già personalizzato di proposito.
+
+**`notificationEngine.ts`**: nuovo evento `launcher-troubleshooting-tips`, corpo notifica costruito come elenco puntato (un consiglio per riga).
+
+**`server.ts`**: `PATCH /api/notifications/:id/status` esteso — quando lo stato diventa `'failed'` per una `validation-prompt` (source `'validation'`), risolve il gioco, determina il launcher condiviso pertinente (il gioco stesso è un launcher, o lo richiede tramite `requiresLauncher`), e se ha `troubleshootingTips` propone una nuova notifica coi consigli — un solo giro per gioco (dedup, stesso principio già in uso per la notifica di collegamento libreria nativa), fire-and-forget dopo la risposta.
+
+**Bug trovato scrivendo questa funzione**: il corpo delle notifiche non aveva mai avuto più di una riga prima d'ora — l'HTML collassava i miei `\n` in un unico paragrafo illeggibile. Corretto aggiungendo `whitespace-pre-line` al render (`App.tsx`) — un bug latente preesistente, non specifico a questa funzione, semplicemente mai emerso perché nessun corpo di notifica era mai stato multi-riga finora.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 103 id invariati. `esbuild server.ts` — nessun errore di bundling. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.16 — Due bug per i launcher condivisi (Disinstalla, traduzione)
+
+**Segnalati dall'utente**:
+
+**1) Disinstalla non cancellava davvero le cartelle/prefix in `shared-launchers/`.** Causa: `gameManager.uninstallGame()` calcolava la cartella da rimuovere con uno switch che copriva solo `'GOG Galaxy' | 'Epic Games' | 'Amazon Games'` — per `'Ubisoft'`/`'EA App'` restava sempre `null`, finendo nel ramo "store non gestito": nessun file veniva mai toccato, solo i campi DB. Trovata anche infrastruttura già scritta ma **mai collegata a nulla**: `canRemoveSharedPrefix()` (reference counting sui giochi che dipendono da un launcher condiviso) esisteva già in `sharedLauncherManager.ts` ma non veniva chiamata da nessuna parte del codebase.
+
+Fix: `storeDir` ora copre anche i launcher condivisi (l'intera cartella `shared-launchers/<id>/`, non solo `prefix/`), tramite lo stesso ponte `getThirdPartyLauncherByStoreId` già in uso altrove. Prima di cancellare: **blocca** se altri giochi installati richiedono ancora quel launcher (`canRemoveSharedPrefix`, ora davvero collegata) o se il launcher stesso è in esecuzione (`isSharedLauncherRunning`, stesso lock già esistente per un gioco in corso, mai esteso al launcher). Dopo la cancellazione riuscita, resetta anche il tracciamento del bootstrap (nuova `db.deleteSharedLauncherPrefix()`) — altrimenti `isLauncherBootstrapped()` avrebbe continuato a rispondere true puntando a un prefix ormai inesistente, rompendo qualunque reinstallazione successiva.
+
+**2) Info del launcher nella colonna destra mostrate solo in italiano.** Causa: la card-launcher seedata da ogni plugin (`ensureSeeded()` in `eaAppPlugin.ts`/`ubisoftConnectPlugin.ts`) scrive un `description` fisso in italiano nel DB una volta sola — mostrato tale e quale a prescindere dalla lingua corrente, perché letto direttamente dal DB, mai passato da `t()`. Trovato un pattern già stabilito per questo stesso problema (`translateStorePluginDescription`, per le descrizioni dei plugin in Impostazioni) — replicato identico per le righe gioco: nuova `translateLauncherGameDescription()`, nuove chiavi `dashboard:launcherDescriptions.*` (IT/EN), applicate solo alle due card-launcher note (`ea-app-launcher`, `ubisoft-connect-launcher`) — i giochi normali continuano a mostrare la propria `description` invariata.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 103 id invariati (stesso falso positivo noto). `esbuild server.ts` — nessun errore di bundling. JSON di localizzazione validati. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.17 — EA App: libreria nativa (Fase B "parte 2", stesso schema di Ubisoft Connect)
+
+**Verificato prima di scrivere codice** (Dead Space 2, installato realmente sul sistema dell'utente): a differenza di Ubisoft Connect (chiave `Installs` + incrocio con le voci Uninstall per il nome), EA App basta da sola una **singola voce Uninstall standard di Windows** — `DisplayName`, `InstallLocation`, e persino l'eseguibile già dentro `DisplayIcon` — filtrata su `Publisher="Electronic Arts"`. Confermato anche `map.eacrc` (formato binario proprietario, manifest dei file del pacchetto d'installazione) — scartato come fonte: non affidabile senza reverse-engineering di un formato non documentato, a fronte di un guadagno incerto quando la via Uninstall standard bastava da sola.
+
+**Bug reale trovato nel parser condiviso** (`wineRegistry.ts`, non specifico a EA App): `"DisplayName"="Dead Space\x2122 2"` — `\x2122` è un escape Unicode (il simbolo ™) mai gestito prima (i nomi Ubisoft erano tutti ASCII puro). Aggiunto il supporto a `unescapeRegValue()`, testato contro un fixture con i dati reali prima di considerarlo corretto.
+
+**`eaAppPlugin.ts` esteso**: `getLibrary()` ora scansiona `system.reg` (`scanInstalledEAGames`) per le voci Uninstall con `Publisher="Electronic Arts"`, escludendo esplicitamente i componenti propri di EA Desktop (legacyPM, `Common Files\EAInstaller`) — verificato che un vero gioco installa altrove (`Program Files\EA Games\<titolo>\`), un tool/redistribuibile EA no. Id stabile per ogni gioco nativo: il **GUID della chiave di registro** stessa (`{C549...}`), non un id derivato dal titolo — più robusto di un id numerico "Origin Games" visto solo per un titolo legacy specifico, non garantito presente per ogni gioco EA. Stesso identico matching cross-store, notifica di collegamento mai automatica, e schema di creazione riga nativa già stabiliti per Ubisoft Connect (nessuna riga duplicata; `prefixPath` proprio sulla riga nativa, non `requiresLauncher` — quel campo serve al DRM di un gioco comprato altrove, non a un gioco già nativo del launcher).
+
+**Confermato generico, nessuna modifica a `gameManager.ts`**: la catena di lancio (runner/prefix ereditati da `requiresLauncher`, percorso leggero vs container pieno, `bypassStoreAuthChain`, integrazione con `legendary` solo per lo store Epic) era già completamente generica — verificato leggendo il codice e con una query SQL reale sui dati salvati per Watch Dogs 2/Assassin's Creed Syndicate (entrambi Ubisoft Connect, ma con strutture diverse: Watch Dogs 2 vive interamente dentro la prefix condivisa — licenza Epic senza file propri — mentre Assassin's Creed Syndicate ha una prefix Epic propria e usa `bypassStoreAuthChain` per il proprio controllo anti-manomissione). Nessun codice nuovo necessario: basta impostare `requiresLauncher` correttamente sulle righe collegate, tutto il resto (riconciliazione `executablePath`/`prefixPath`, ereditarietà runner, UI Runner Bridge/Umu-launcher) è già generico per qualunque launcher condiviso.
+
+**Verificato**: parser testato contro un fixture con i dati reali dell'utente (escape Unicode incluso). `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 103 id invariati. **Non ancora testato su hardware reale** — nessun secondo gioco EA disponibile per verificare il matching cross-store con un titolo davvero posseduto anche su un altro store.
+
+---
+
+## v2.0.41-dev.18 — EA App ruba il focus al gioco dipendente (parte B, focus finestra)
+
+**Segnalato dall'utente**: lanciando Dead Space 2 (EA App come launcher condiviso, Umu-launcher attivo, runner ereditato), il gioco parte e carica correttamente fino al menu, ma va subito in background — la Dashboard torna in primo piano, ed EA App (avviato come dipendenza) si pone A SUA VOLTA sopra la Dashboard. Serve fare alt-tab per raggiungere il gioco già caricato.
+
+**Punto B (finestra EA App che ruba il focus) — fix applicato**: trovato un argomento REALE (non indovinato) nei dati di registro già raccolti dall'utente in questa sessione — la voce di avvio automatico di Windows per EA App (`Run\EADM`) usa `-silentOs`. Ragionevole, anche se non certificato da documentazione EA ufficiale, che serva a evitare che la finestra rubi il focus a un avvio automatico — esattamente lo scopo cercato qui. Nuovo campo `silentLaunchArgs` su `ThirdPartyLauncherDefinition` (vuoto finché non verificato per un dato launcher — mai un default indovinato), popolato per EA App con `['-silentOs']`. Collegato in `launchSharedLauncher()` (`sharedLauncherManager.ts`) — SOLO quando il launcher viene avviato come dipendenza automatica di un gioco, mai quando l'utente lo apre a mano dalla propria card (lì lo vuole visibile, per costruzione mai passato per questa funzione). Verificato che `RunnerConfig.args` viene davvero consumato da `ProtonRunner.launch()` in entrambi i rami (diretto e umu-run) — nessun collegamento mancante.
+
+**Punto A (Dashboard che torna in primo piano) — non ancora toccato**: esiste già un meccanismo di tolleranza per questa categoria di gioco (`QUICK_EXIT_THRESHOLD_MS × 3` per `requiresLauncher`, più un controllo `pgrep` sul processo reale, aggiunto durante la saga Ubisoft Connect/Watch Dogs 2 per un problema simile) — potrebbe non star scattando per questa catena specifica, ma senza un log reale della sessione non c'è abbastanza per intervenire senza rischiare un fix indovinato su un meccanismo già stratificato da più round di debug precedenti. In attesa di un estratto di log reale dall'utente prima di toccare questa parte.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.19 — La causa reale del problema focus/timing: giochi NATIVI esclusi da tutta la logica requiresLauncher
+
+**Segnalato dall'utente**: dopo aver testato `-silentOs` a mano nei Launch Arguments di Dead Space 2 (non ancora la mia patch di dev.18, mai ricompilata), EA App resta correttamente in tray — ma il gioco stesso va comunque in background, la Dashboard resta in primo piano, e compaiono sia la validation-prompt ("ha funzionato?") sia la notifica "chiudere EA App?" **mentre il gioco è ancora attivo**.
+
+**Causa reale trovata rileggendo `gameManager.ts`**: l'intera logica di gestione dei launcher condivisi in `launchGame()` — eredità obbligatoria di runner/prefix/umuRun dalla card del launcher, warm-start anticipato, soglia di tolleranza tripla alla chiusura, notifica "chiudere il launcher?" — è **sempre stata condizionata unicamente su `game.requiresLauncher`**. Quel campo, per design (stesso principio già stabilito per Ubisoft Connect), **non viene mai impostato su un gioco NATIVO** di un launcher condiviso (nessun match cross-store — Dead Space 2 è esattamente questo caso, comprato/installato direttamente su EA App). Conseguenza concreta: Dead Space 2 restava con il proprio `runner` scelto autonomamente da `resolveDefaultRunner()` nello scanner — **con ogni probabilità una build Proton diversa** da quella verificata/in uso sulla card di EA App (GE-Proton11-3) — due processi Proton di versione diversa in competizione sullo stesso wineserver/prefix condivisa, lo stesso identico mismatch già diagnosticato e risolto una volta per i giochi cross-store (dev.23, v1.5.20), mai esteso ai giochi nativi perché non erano mai stati esercitati fino a questo momento. La soglia di tolleranza alla chiusura restava quella breve (8s, pensata per un gioco standalone) invece di quella tripla — causa diretta della validation-prompt prematura mentre il gioco era ancora attivo.
+
+**Fix**: nuovo valore `effectiveSharedLauncherId` calcolato una sola volta (`game.requiresLauncher ?? getThirdPartyLauncherByStoreId(game.store)?.id` — "richiede questo launcher" e "vive dentro lo store di questo launcher" sono lo stesso identico bisogno pratico), sostituito a **ogni** occorrenza di `game.requiresLauncher` all'interno di `launchGame()` e del blocco di polling della chiusura (eredità runner/prefix/umuRun, warm-start, attesa "intelligente", soglia di tolleranza, percorso leggero, notifica "chiudere il launcher?"). Lasciato invariato solo il ciclo di riconciliazione per giochi non ancora installati (`syncExternalInstallStates`) — resta correttamente scoped a `requiresLauncher` esplicito, un gioco nativo è già `isInstalled: true` dallo scanner, quel ciclo non lo riguarda.
+
+**Punto B (dev.18, `-silentOs`)**: mai stato eseguito per Dead Space 2 fino a questo fix — `launchSharedLauncher()` (dove `silentLaunchArgs` viene applicato) veniva chiamata solo nel warm-start anticipato, anch'esso gated su `requiresLauncher`. Ora si applicherà correttamente anche ai giochi nativi.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 103 id invariati, stesso falso positivo noto. **Non ancora testato su hardware reale — questo è il fix da compilare, non quello di dev.18 da solo.**
+
+---
+
+## v2.0.41-dev.20 — La causa reale del ritorno prematuro a schermo intero: nessun margine per il PID handoff dei giochi con launcher condiviso
+
+**Chiarito dall'utente**: con dev.19 compilato, EA App parte correttamente come daemon (`-silentOs` funziona), ma la Dashboard torna a schermo intero **subito**, considerando il gioco chiuso — chiede "ha funzionato?" e mostra "EA App ancora in esecuzione" **mentre il gioco sta ancora caricando in background**. Solo dopo il gioco appare in primo piano, ma ormai la Dashboard ha già reclamato lo schermo intero e intercetta l'input del controller destinato al gioco. Comportamento confermato intenzionale e da NON toccare: senza il collegamento al launcher condiviso, il gioco semplicemente non parte (solo EA App) — evita ambiguità fra giochi di store diversi.
+
+**Causa reale**: `isLastLaunchedGameRunning()` ha già un meccanismo esattamente per questo scopo — `processNameHint` (introdotto per Epic/`legendary`, v1.1.31): invece di seguire il PID originariamente tracciato (che per Epic può terminare presto, delegando la supervisione più in basso nell'albero dei processi), cerca per **nome del processo**, con 30s di margine (`PROCESS_NAME_STARTUP_GRACE_MS`) prima di considerare un avvio davvero fallito. Questo hint era impostato **solo per `game.store === 'Epic Games'`** — mai per un gioco con launcher condiviso (`effectiveSharedLauncherId`, dev.19), che soffre esattamente della stessa dinamica: il gioco avvia/attende il launcher condiviso per il proprio controllo DRM, la finestra reale compare solo dopo, mentre il processo *originariamente* tracciato può terminare prima. Senza l'hint, valeva il semplice `process.kill(pid, 0)` — zero margine, Dashboard ripristinata all'istante in cui quel PID specifico termina, indipendentemente da cosa sta ancora succedendo per davvero.
+
+**Fix**: condizione estesa da `game.store === 'Epic Games'` a `game.store === 'Epic Games' || !!effectiveSharedLauncherId` — stesso identico meccanismo già collaudato, "un tempo come per tutti gli altri giochi" (Epic in questo caso), nessun'infrastruttura nuova inventata.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.21 — Percorso "leggero" disattivato: bypassava sempre Umu-launcher
+
+**Segnalato dall'utente con un log reale**: con dev.20 il rilevamento chiusura prematura era davvero risolto (log conferma: "processo tracciato chiuso dopo 4s, ma processi reali ancora attivi... trattato come lancio riuscito"), ma il gioco stesso falliva comunque — con Dead Space™ 2 lanciato tramite il percorso "leggero" (riuso della sessione Wine già attiva del launcher condiviso), l'utente ha verificato a mano con lo script di debug che la stessa identica riga di comando in modalità wine diretta fallisce con un DLL mancante (`ssleay32.dll`), mentre la stessa identica riga in modalità `umu` (container Steam Linux Runtime) funziona.
+
+**Causa**: `launchGameInSharedPrefix()` (il percorso "leggero") invoca `wine` **nudo**, bypassando interamente Proton/`umu-run` — quindi ignora completamente lo switch "Umu-launcher" della card, indipendentemente da come è impostato. L'ambiente di esecuzione risultante è diverso da quello che il gioco si aspetta (alcune DLL sono normalmente disponibili solo dentro il container SLR che `umu-run` fornisce).
+
+**Convenzione stabilita esplicitamente con l'utente**: un gioco con un launcher condiviso — nativo o comprato altrove, nessuna differenza — lancia sempre con la stessa sintassi dello script di debug in `--mode umu`, rispettando ogni switch attivo sulla card (Umu-launcher incluso) — mai un bypass diretto di wine.
+
+**Fix**: `useSharedPrefixLightLaunch` forzato a `false` — ogni gioco con `effectiveSharedLauncherId` passa ora sempre dal percorso standard (`runner.launch()`), che rispetta davvero `runnerConfig.umuRun` (ereditato dalla card del launcher, dev.19). Codice di `launchGameInSharedPrefix()` lasciato intatto, semplicemente non più raggiunto — nessuna riga cancellata, in caso servisse rivalutarlo in futuro. Verificato che i due casi reali già confermati funzionanti (Watch Dogs 2, Assassin's Creed Syndicate) hanno **entrambi** `bypassStoreAuthChain=1` sul proprio profilo — il percorso leggero era quindi già inutilizzato in pratica per tutto ciò che è stato verificato finora, rischio di regressione basso.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.22 — La causa reale del doppio lancio di EA App: impossibile attivare "Bypass store" per un gioco nativo
+
+**Segnalato dall'utente**: nella Dashboard il gioco si avvia correttamente, ma la card lancia EA App **due volte** — la prima istanza (il nostro pre-avvio anticipato, `-silentOs`) blocca il caricamento di tutto il resto; terminandola, ne parte una seconda insieme al gioco stesso.
+
+**Causa reale**: `forceFullContainerLaunch` (`gameManager.ts`) — che salta il nostro pre-avvio anticipato del launcher condiviso quando `bypassStoreAuthChain` è attivo, lasciando che sia il gioco stesso a trascinarsi dietro il proprio launcher come processo figlio (esattamente il meccanismo già verificato funzionante per Assassin's Creed Syndicate) — non poteva mai attivarsi per Dead Space 2, perché lo switch "Bypass store" nell'overlay **non compariva nemmeno**: `showBypassStoreAuthChain` era condizionato su `selectedGame?.store === 'Epic Games'`, mai vero per un gioco EA App nativo. A monte, anche `lockedToSharedLauncherForUmu`/`lockedToSharedLauncher` (Runner Bridge) erano condizionati solo su `localGameConfig.requiresLauncher` — MAI impostato per un gioco nativo per design (stesso principio già generalizzato lato backend con `effectiveSharedLauncherId`, dev.19, mai arrivato al frontend). Il lancio reale funzionava comunque (il backend eredita sempre, indipendentemente da cosa mostra l'overlay), ma l'utente non aveva alcun modo di attivare l'opzione che avrebbe evitato il doppio lancio.
+
+**Fix**:
+- `server.ts`: `/api/shared-launchers` ora include `storeId` per ogni launcher — necessario al frontend per sapere quale store corrisponde a quale launcher condiviso, esattamente come `getThirdPartyLauncherByStoreId` fa lato backend.
+- `App.tsx`: nuovo `effectiveSharedLauncherId` calcolato in entrambi i punti dell'overlay (Runner Bridge e Umu-launcher/Bypass store) — `requiresLauncher` esplicito oppure store nativo del gioco, stesso principio del backend. `lockedToSharedLauncher`/`lockedToSharedLauncherForUmu` ora lo usano al posto del solo `requiresLauncher`; `showBypassStoreAuthChain` non richiede più `store === 'Epic Games'` (quel vincolo restava valido solo per l'effetto "salta legendary", non per l'effetto — più importante qui — di evitare il pre-avvio anticipato, utile per qualunque launcher condiviso). Corretta anche la lettura di `inheritedUmuRun`, che leggeva ancora `requiresLauncher` diretto invece del valore generalizzato.
+- Descrizione del toggle (`gameOptions.json`, IT/EN) corretta: non parla più solo di "salta legendary" (fuorviante per un gioco non-Epic), ora descrive anche l'effetto principale.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 103 id invariati (stesso falso positivo noto). `esbuild server.ts` — nessun errore di bundling. JSON di localizzazione validati. **Non ancora testato su hardware reale — l'utente dovrà attivare manualmente "Bypass store" per Dead Space 2 una volta che il toggle compare.**
+
+---
+
+## v2.0.41-dev.23 — Rimosso il pre-avvio anticipato del launcher condiviso
+
+**Correzione di rotta esplicita dell'utente**: le ultime versioni (dev.19-22) avevano rincorso il sintomo — un interruttore manuale ("Bypass store") per evitare il doppio lancio di EA App — invece della causa. La richiesta chiara: nessun bypass, nessuna precondizione manuale. Il gioco (Dead Space 2, come qualunque altro con un launcher condiviso) è già perfettamente capace di avviare da solo la propria dipendenza quando serve — l'unico compito della Dashboard è garantire che runner/prefix/Umu-launcher risultino già corretti quando lo fa. L'argomento `-silentOs` va semplicemente nei Launch Arguments **del gioco stesso** (impostato dall'utente, salvato nel DB per ogni lancio successivo) — non è compito nostro avviare EA App separatamente in anticipo.
+
+**Fix**: rimosso interamente il blocco di pre-avvio anticipato del launcher condiviso in `launchGame()` (`gameManager.ts`) — nato in v1.5.20-dev.14, reso via via "più intelligente" nelle versioni successive (dev.29/30: attesa reale invece di un tempo fisso, marcatore di container pronto). Lo stesso blocco conteneva già, scritto mesi fa, il sintomo esatto che abbiamo rincorso in questi giorni: *"non trovando Ubisoft Connect ancora pronto, il gioco ne avvia una copia PROPRIA per conto suo"* — la soluzione adottata allora (farci vincere la corsa con un'attesa più lunga) curava il sintomo, non la causa. `effectiveSharedLauncherId` (dev.19, eredità di runner/prefix/Umu-launcher) resta invariato e continua a valere sia per i giochi nativi sia per quelli comprati altrove. `bypassStoreAuthChain` non controlla più nulla legato al pre-avvio (che non esiste più) — resta solo per la sua funzione originaria e indipendente: decidere se instradare un gioco Epic verso `legendary` o il lancio diretto.
+
+**CONFERMATO DALL'UTENTE**: con il pre-avvio rimosso, la Dashboard si riduce a icona correttamente e il gioco si carica in primo piano.
+
+**Verificato**: `tsc --noEmit` — 8 invariato.
+
+---
+
+## v2.0.41-dev.24 — Supporto Gamescope per-gioco (Roadmap usabilità, punto 1/3)
+
+**Richiesta utente**: switch nell'overlay per lanciare un gioco dentro Gamescope (micro-compositore Wayland), in linea con FSR/MangoHud/anticheat già esistenti.
+
+**Verificato prima di scrivere codice**: il rilevamento del binario `gamescope` esisteva già (`compatibilityManager.ts`, mostrato in Impostazioni > System Tools) — mancava solo il collegamento per-gioco. Trovato un pattern già pronto da imitare: `resolveGameModeWrapping()` (GameMode) avvolge già il comando reale con un binario esterno, esattamente il tipo di meccanismo che serve qui (a differenza di FSR/MangoHud, solo variabili d'ambiente).
+
+**Implementato**:
+- **`db.ts`**: nuova colonna `gamescope` su `compat_profiles` — aggiunta sia alla `CREATE TABLE` sia come migrazione esplicita per i DB già esistenti (stessa identica lezione già imparata con `umu_run`/`bypass_store_auth_chain`: una colonna dimenticata nella lista fissa di `upsertCompatProfile`/`getCompatProfile` viene ignorata in silenzio, nessun crash a segnalarlo — qui aggiunta subito in entrambi i punti).
+- **`types.ts`/`runners/base.ts`**: nuovo campo `gamescope?: boolean` su `CompatibilityProfile` e `RunnerConfig`.
+- **`runners/implementations.ts`**: nuova `resolveGamescopeWrapping()` — a differenza di GameMode (sostituzione di un solo binario), Gamescope deve restare sempre lo strato più **esterno** (`gamescope -- <tutto il resto>`, GameMode/umu-run inclusi se già attivi) — applicata appena prima dello spawn effettivo in tutti e tre i punti di lancio reale (`WineRunner`, `ProtonRunner`, `launchEpicViaLegendary`). Nessuna opzione di risoluzione/framerate esposta: senza argomenti, Gamescope usa già la risoluzione dello schermo.
+- **`gameManager.ts`**: `gamescope: profile?.gamescope ?? false` collegato alla costruzione di `runnerConfig`.
+- **`App.tsx`**: nuovo tile "Gamescope" nell'overlay Game Options, stesso trattamento semplice booleano di FSR/GameMode — nessun caso speciale necessario, la logica generica esistente gestisce già lettura/scrittura/disponibilità (legata al rilevamento reale già presente).
+
+**Verificato**: `tsc --noEmit` — 8 invariato (un errore di sintassi reale trovato e corretto nel percorso: un backtick nel commento SQL chiudeva in anticipo il template literal). `check-focus-ids.cjs` — 103 id invariati. `esbuild server.ts` — nessun errore di bundling. JSON di localizzazione validati. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.25 — Gamescope: 3 bug reali corretti su hardware reale, da booleano a 4 stati
+
+**Segnalato dall'utente** (LEGO Indiana Jones, Amazon Games, Gamescope attivo): dopo la chiusura del gioco resta attivo un processo `gamescopereaper` che non chiude mai la sessione e inibisce il ritorno a schermo intero della Dashboard; con Gamescope attivo il gioco parte in finestra, non a schermo intero, e non alla risoluzione del monitor. Proposta dell'utente, implementata: switch a più stati come `MangoHud` (spento | schermo intero a risoluzione monitor | override 4K | finestra) invece di un semplice on/off.
+
+**Causa #1 (processo che non chiude mai la sessione)**: quando Gamescope avvolge il lancio, il PID che otteniamo non è più quello del gioco ma di Gamescope stesso, che genera al suo interno un processo `gamescopereaper` per sorvegliare i propri figli — tracciare quel PID diretto smette di essere affidabile, esattamente come già successo con Epic/`legendary` (dev.20) e con i launcher condivisi (dev.19). Stesso `processNameHint` esteso anche a questo caso.
+
+**Causa #2 (il fix precedente da solo non bastava)**: verificato — `gamescopereaper` continua a mostrare la riga di comando ORIGINALE (compreso il nome dell'eseguibile del gioco) come proprio argomento anche dopo che il vero processo è terminato. Un semplice `pgrep -f <nome exe>` lo troverebbe comunque, riproponendo lo stesso identico blocco. Nuovo `pgrepGameStillRunning()` (`gameManager.ts`) — verifica il nome reale (`comm`) di ogni PID trovato da `pgrep`, un match che proviene solo da `gamescopereaper` non conta come "gioco ancora aperto". Riusato anche nel controllo esistente di tolleranza alla chiusura rapida (dev.29, stesso rischio, mai notato prima perché mai esercitato con Gamescope attivo).
+
+**Causa #3 (finestra invece di schermo intero, risoluzione sbagliata)**: verificato con ricerca mirata (mai assunto) — Gamescope senza argomenti parte IN FINESTRA per default, e senza `-W`/`-H` la risoluzione di **output** di default è 1280×720, non quella del monitor. Serve sempre `-f` esplicito per lo schermo intero, e `-W`/`-H` espliciti per la risoluzione reale.
+
+**Implementato**:
+- `runners/implementations.ts`: nuova `detectMonitorResolution()` — legge la risoluzione realmente attiva via `xrandr --current` (riga con l'asterisco), nessuna libreria aggiuntiva. `resolveGamescopeWrapping()` riscritta per i 4 stati: 0 spento; 1 schermo intero a risoluzione rilevata automaticamente (`-f -W <rilevata> -H <rilevata>`); 2 schermo intero con override fisso 4K (`-f -W 3840 -H 2160`, per il downsampling da un monitor più piccolo — stesso caso d'uso della guida ufficiale Gamescope); 3 in finestra, dimensionata alla risoluzione del monitor se nota, mai `-f`.
+- `db.ts`/`types.ts`/`runners/base.ts`: campo `gamescope` da booleano a `0 | 1 | 2 | 3`, stesso trattamento già riservato a `mangohud` (colonna DB già `INTEGER`, nessuna migrazione ulteriore necessaria).
+- `App.tsx`: tile "Gamescope" ora cicla `0→1→2→3→0` come `MangoHud` (`0→1→2→0`) — stessa didascalia dinamica, stesso indicatore visivo (cursore a 4 posizioni invece di 3).
+- Nuove chiavi di traduzione IT/EN per i 4 stati.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 103 id invariati (stesso falso positivo noto). `esbuild server.ts` — nessun errore di bundling. JSON di localizzazione validati. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.26 — Selettore Gamescope non persisteva (bug ricorrente, terza occorrenza)
+
+**Segnalato dall'utente**: scelto uno stato per Gamescope nell'overlay, chiudendo e riaprendo torna sempre alla posizione di default.
+
+**Causa**: `setLocalCompatProfile` (App.tsx, chiamata all'apertura dell'overlay) ricostruisce l'oggetto profilo da una lista di campi scritta a mano invece di fare merge col profilo ricevuto dal server — `gamescope` non era in quella lista. **Terza occorrenza esatta dello stesso bug**, già avvertito nei commenti del codice due volte in precedenza (per `umuRun` e per `bypassStoreAuthChain`) proprio con queste parole: *"qualunque nuovo campo booleano futuro aggiunto a CompatibilityProfile senza toccare anche questo punto"*. Il valore era salvato correttamente nel DB — scartato solo alla lettura, ogni volta che l'overlay si riapriva.
+
+**Fix**: aggiunto `gamescope: Number(profile.gamescope ?? 0)` alla lista. Verificati anche tutti gli altri campi di `CompatibilityProfile` per escludere che ce ne fossero altri dimenticati allo stesso modo — nessuno trovato (`disableWineSync`/`useKnownFixes` hanno una gestione a stato separato, corretta).
+
+**Segnalato anche un secondo problema, non ancora risolto**: con Gamescope attivo, il gioco lanciato dalla card non mostra alcuna finestra (né in modalità finestra né schermo intero) — Dashboard resta ridotta a icona, ma né Gamescope né il gioco diventano visibili, pur risultando entrambi in esecuzione (`gamescope`/`gamescopereaper` visibili fra i processi attivi). In attesa di due dati diagnostici dall'utente prima di intervenire: la risoluzione monitor reale rilevata da `xrandr` (il comando incollato mostrava `-W 2160 -H 1440`, una combinazione non standard che potrebbe indicare un rilevamento sbagliato) e il contenuto del log di lancio più recente.
+
+**Verificato**: `tsc --noEmit` — 8 invariato.
+
+---
+
+## v2.0.41-dev.27 — Gamescope apriva sul monitor sbagliato (setup multi-monitor)
+
+**Segnalato dall'utente**: nessuna finestra Gamescope visibile dopo il lancio, pur risultando il processo attivo. Rivelato un dettaglio decisivo: configurazione multi-monitor — principale 27" a 2560×1440, secondario 14" a 2160×1440.
+
+**Causa confermata**: `detectMonitorResolution()` prendeva il *primo* asterisco (modalità attiva) trovato in tutto l'output di `xrandr --current`, senza distinguere quale schermo fosse il principale — con due monitor collegati ha preso la risoluzione del secondario (2160×1440, combacia esattamente col comando osservato nel log reale dell'utente in un test precedente). Gamescope si è probabilmente aperto sul monitor secondario, non su quello che l'utente stava guardando.
+
+**Fix**: `detectMonitorResolution()` ora individua prima il blocco dell'output marcato `primary` da `xrandr` stesso (fallback al primo output `connected` trovato se nessuno è marcato primary — alcuni driver/window manager non lo riportano), e cerca l'asterisco solo dentro quel blocco specifico, non nell'intero testo. **Testato** contro un output `xrandr` multi-monitor simulato (primario 2560×1440 + secondario 2160×1440, stesso identico caso dell'utente) prima di consegnare — individua correttamente il primario.
+
+Aggiunto anche un log esplicito (`[PROTON] Gamescope: risoluzione monitor rilevata ...`) — un rilevamento sbagliato su un setup multi-monitor sarà visibile direttamente nel log della sessione, senza dover richiedere ogni volta `xrandr` a mano.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. Logica di rilevamento testata contro un fixture realistico. **Non ancora testato sul vero hardware multi-monitor dell'utente.**
+
+---
+
+## v2.0.41-dev.28 — Gamescope: la Dashboard non tornava mai in primo piano dopo la chiusura
+
+**Buona notizia prima**: con `pcconfig.txt` corretto dall'utente (risoluzione nativa del monitor invece del default 1024×768 disallineato — vedi causa reale della saga xvidmode), LEGO Indiana Jones si è avviato correttamente dentro Gamescope a schermo intero.
+
+**Segnalato dall'utente**: alla chiusura del gioco resta comunque attivo un processo Gamescope che non riporta mai la Dashboard in primo piano.
+
+**Causa**: `pgrepGameStillRunning()` (dev.25) escludeva dal conteggio "gioco ancora aperto" solo `gamescopereaper` — ma **`gamescope` stesso** (il compositore vero e proprio, non solo il suo processo di sorveglianza interno) ha la propria riga di comando che contiene anch'essa il nome dell'eseguibile del gioco (è lui a invocarlo: `gamescope ... -- proton run LEGOIndy.exe`) — e può restare vivo come guscio vuoto anche dopo che il gioco vero è terminato, senza chiudersi da solo. Il filtro non lo escludeva.
+
+**Fix**: esteso il filtro a entrambi i nomi processo (`gamescope` e `gamescopereaper`). In più — non solo un fix di tracciamento interno: se gli unici match trovati sono processi della famiglia Gamescope (il gioco vero è davvero finito), ora vengono **terminati esplicitamente** — altrimenti, anche correggendo solo il nostro bookkeeping interno, la finestra di Gamescope (spesso a schermo intero) sarebbe rimasta comunque visibile sopra la Dashboard ripristinata: un problema visivo reale, non solo di rilevamento.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.29 — gamescopereaper resisteva a SIGTERM
+
+**Segnalato dall'utente**: dopo dev.28, il compositore `gamescope` viene terminato correttamente, ma `gamescopereaper` resta comunque attivo in background.
+
+**Causa**: `SIGTERM` è un segnale che un processo può scegliere di ignorare — `gamescopereaper`, per la sua natura di processo "sorvegliante" (pensato per sopravvivere e ripulire correttamente i propri figli), è plausibilmente uno di questi casi.
+
+**Fix**: `SIGKILL` al posto di `SIGTERM` per la pulizia dei resti della famiglia Gamescope — non può essere ignorato. Sicuro in questo contesto: il processo del gioco vero è già escluso a monte (mai in questo elenco), qui si termina solo un residuo di wrapper, nessun rischio di dati non salvati.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.30 — La causa reale: il compositore si chiama "gamescope-wl", non "gamescope"
+
+**Segnalato dall'utente**: nemmeno `SIGKILL` (dev.29) termina `gamescopereaper`. Fornito un dato decisivo — `ps -eo pid,ppid,stat,comm` sul proprio sistema, sia all'avvio sia dopo la chiusura del gioco (righe identiche in entrambi i casi):
+
+```
+813814  778811  Ssl  gamescope-wl
+813851  813814  S    gamescopereaper
+```
+
+**Causa reale**: `STAT` è `S` (sleep normale), non `Z` (zombie) — l'ipotesi zombie del turno precedente era sbagliata, scartata con un dato reale. Il vero problema: il confronto esatto `comm === 'gamescope'` (dev.28) non corrispondeva mai — il nome di processo reale su questo sistema è **`gamescope-wl`** (backend Wayland), non `gamescope` nudo. La funzione incontrava `gamescope-wl`, non lo riconosceva come famiglia Gamescope, e restituiva subito "un processo reale è ancora attivo" — **senza mai arrivare a considerare `gamescopereaper`**, che restava quindi sempre fuori dal ciclo di pulizia. Non era mai stato un problema del segnale inviato (SIGTERM in dev.28, poi SIGKILL in dev.29, entrambi corretti da tenere) — il processo semplicemente non veniva mai raggiunto.
+
+**Fix**: confronto per `comm.startsWith('gamescope')` invece di un confronto esatto — cattura sia `gamescope-wl` sia `gamescopereaper` in un colpo solo, e resiste anche a varianti future del nome (es. un ipotetico backend X11 `gamescope-x11`), non solo al caso Wayland verificato qui.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.31 — Gamescope + Epic/legendary: causa architetturale reale trovata
+
+**Segnalato dall'utente**: "il lancio sembra fallire per i giochi che hanno attivo Umu-launcher" — testato con Death Stranding (Epic Games).
+
+**Diagnosi condotta interamente da terminale**, isolando una variabile alla volta:
+1. `umu-run` da solo dentro Gamescope → funziona (confermato all'inizio della sessione).
+2. `legendary`+`umu-run` senza Gamescope → funziona.
+3. `legendary` da solo dentro Gamescope (`--dry-run`) → funziona, risolve correttamente il percorso dell'eseguibile.
+4. `legendary`+`umu-run` **dentro** Gamescope → fallisce, in modo incoerente fra un tentativo e l'altro (a volte un errore esplicito, a volte un'uscita silenziosa) — ma sempre con lo stesso segnale: `[gamescope] launch: Primary child shut down!` subito dopo `"Launching Boga..."`, senza che Proton arrivi mai a scrivere il proprio log dettagliato.
+
+**Causa reale** (confermata con ricerca mirata — issue reali di Gamescope #1557/#1516/#1665, stesso identico sintomo "Primary child shut down!" con processi wine ancora vivi dopo; e con la documentazione ufficiale di Heroic Games Launcher, che usa `legendary` internamente esattamente come questo progetto): `legendary`, quando riceve `--wrapper`, avvia il wrapper come proprio **figlio** e poi **esce subito da solo** — comportamento normale, il suo compito finisce lì. Se Gamescope avvolge `legendary` dall'esterno (come facevamo), lo considera il proprio "figlio primario" e **si chiude nell'istante in cui `legendary` esce** — distruggendo la sessione nidificata mentre il vero gioco (nipote di Gamescope, non figlio diretto, generato da `umu-run`/Proton dentro il wrapper) sta ancora avviandosi al suo interno. Non un conflitto diretto fra Gamescope e Umu-launcher — un'incompatibilità fra come Gamescope sorveglia "il figlio primario" e come `legendary` gestisce il proprio wrapper.
+
+**Fix, guidato dalla documentazione ufficiale di Heroic** (stesso identico problema, già risolto da loro): Gamescope va incorporato **dentro** l'argomento `--wrapper` passato a `legendary` (`--wrapper "gamescope ... -- umu-run"`), non più come involucro esterno dell'intero comando `legendary`. Nuova `buildGamescopePrefixString()` in `runners/implementations.ts` — stessa logica di rilevamento risoluzione di `resolveGamescopeWrapping()`, ma restituisce una stringa da incorporare nel wrapper invece di una coppia bin/argomenti separata. Applicata a entrambi i sotto-rami Proton di `launchEpicViaLegendary` (con e senza `umu-run`). L'avvolgimento esterno tramite `resolveGamescopeWrapping()` ora si applica **solo** al ramo wine puro (mai verificato per questo bug specifico, lasciato invariato per prudenza) — per i rami Proton verrebbe applicato due volte, reintroducendo esattamente il problema appena corretto.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 103 id invariati (stesso falso positivo noto). **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.32 — Splash di lancio: prima parte del backend (roadmap punto 2/3)
+
+**Disegno concordato con l'utente** in questa sessione, dopo una discussione approfondita: splash a schermo intero, testo della fase corrente (sostituito, non accumulato) + barra di progresso globale; scompare quando rileviamo una finestra reale (gioco, o Gamescope/`gamescope-wl` se attivo per quel lancio); su fallimento mostra un messaggio proprio e torna alla Dashboard; timeout di sicurezza di 120s dal lancio *effettivo* del processo (escluse le fasi preliminari di verifica verb) che termina forzatamente il processo. La riduzione a icona della Dashboard resta **invariata**, legata al processo come oggi — la splash è un overlay indipendente, non ne governa il comportamento.
+
+**Implementato in questo passaggio (prima parte, solo backend)**:
+- Nuovo modulo `launchPhaseTracker.ts` — publish/subscribe leggero (diverso da `addLog`/Debug Console, che resta invariato): permette a una connessione SSE di "agganciarsi" a un lancio già in corso, non di guidarlo lei stessa (diverso da `/api/runners/install-stream`, che fa entrambe le cose in un'unica richiesta). Tiene anche l'ultima fase nota per gioco, per coprire il caso in cui la splash apra la propria connessione con un po' di ritardo rispetto all'inizio del lancio vero.
+- `gameManager.ts`: `launchGame()` ora emette due fasi reali — `verifying-env` (con indice/totale, per la barra di progresso, durante il ciclo di verifica dei verb) e `launching` (subito dopo l'avvio effettivo del processo — il punto esatto da cui parte il timeout dei 120s, verificato che non esistesse già nulla di simile da ereditare).
+- `server.ts`: nuovo endpoint `GET /api/games/:id/launch-stream` (SSE) che espone questo streaming.
+- L'intercettazione della notifica di fallimento (punto 2 del disegno) non richiede modifiche al backend: riuserà l'evento `launch-error` già esistente (con `game_id` incluso) tramite lo stream generico `/api/events` già in uso in tutta la Dashboard — filtrato lato frontend, nessun canale duplicato.
+
+**Ancora da fare**: rilevamento finestra (gioco/Gamescope), apertura/chiusura della finestra della splash (stesso schema `--app=<url>` già collaudato per la Dashboard, mai `--kiosk`), la pagina della splash stessa, e il timeout con terminazione forzata del processo.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `esbuild server.ts` — nessun errore di bundling.
+
+---
+
+## v2.0.41-dev.33 — "Carta d'identità" del gioco: window_class nel DB (idea dell'utente)
+
+**Proposta dell'utente**, durante la progettazione della splash di lancio: invece di indovinare pattern di nomi processo/finestra caso per caso (la fonte di quasi tutti i bug reali della saga Gamescope), registrare nel DB — una volta appreso — il WM_CLASS della finestra reale di ogni gioco, da riusare in modo diretto e inequivocabile a ogni lancio successivo.
+
+**Implementato**:
+- `db.ts`: nuova colonna `window_class` sulla tabella `games` (CREATE TABLE + migrazione esplicita, stesso trattamento già dato a `gamescope`), nuove funzioni dedicate `updateWindowClass()`/`getWindowClass()` — stesso schema già in uso per `last_launched_at` (mai esposto nel tipo `Game`/`rowToGame`, solo tramite funzioni dedicate).
+- `thirdPartyLaunchers.ts`: nuovo campo `knownWindowTitle` su `ThirdPartyLauncherDefinition` — popolato per EA App (`"EA"`) e Ubisoft Connect (`"Ubisoft Connect"`), osservazione diretta dell'utente, **da riverificare al primo utilizzo reale** con `wmctrl -lx`, non ancora confermato da noi.
+- Nuovo modulo `windowDetector.ts` — `listWindows()` (stesso comando/formato `wmctrl -lx` già in uso in `server.ts` per Steam Big Picture), `tryLearnWindowClass()`: confronta un elenco di finestre preso *prima* del lancio con uno preso *dopo* (chiamata a ritardo crescente — 15/30/60s — dato che il tempo di comparsa varia molto da gioco a gioco), **esclude esplicitamente** la finestra nota del launcher condiviso richiesto dal gioco (se presente) prima di valutare le candidate. Se resta **esattamente una** candidata dopo il filtro, la salva; se ne restano più di una anche dopo il filtro, non salva nulla quel giro — scelta deliberatamente prudente concordata con l'utente, un lancio futuro (magari col launcher già aperto in background, non più "nuovo") sarà più chiaro.
+- `gameManager.ts`: `launchGame()` cattura lo snapshot "prima" nel momento esatto dell'avvio effettivo (fase `launching`) e programma i tre tentativi ritardati — solo se `window_class` non è già noto per quel gioco (idempotente, costo pressoché nullo dopo il primo apprendimento riuscito).
+
+**Ricaduta pratica**: questo stesso meccanismo diventerà anche il modo con cui la splash di lancio (ancora da costruire) riconoscerà "la finestra del gioco è comparsa" — una volta noto il `window_class`, la ricerca sarà diretta (`wmctrl -lx` filtrato per quella classe esatta), non più basata su euristiche di processo come nella saga Gamescope.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale — prima verifica utile: lanciare un gioco mai lanciato prima e controllare che `window_class` compaia nel DB dopo circa 15-60s.**
+
+---
+
+## v2.0.41-dev.34 — window_class: da checkpoint fissi a ciclo continuo
+
+**Domanda dell'utente**, un buco reale nel disegno di dev.33: al primo lancio di un gioco (nessun `window_class` ancora noto), come si comporta la splash? Con l'apprendimento a tre checkpoint fissi (15/30/60s) di dev.33, la splash avrebbe dovuto aspettare il prossimo checkpoint programmato invece di sparire appena la finestra compare davvero.
+
+**Fix**: unificati apprendimento e rilevamento in un **solo ciclo di controllo continuo** (`waitForGameWindow`, ogni 2s di default) — un solo meccanismo serve entrambi gli scopi. Se `window_class` è già noto (lanci successivi al primo), la ricerca è diretta (cerca quella classe esatta). Se non ancora noto (primo lancio), il momento in cui compare esattamente una finestra nuova candidata salva il valore **e** segnala "trovata" nello stesso istante — nessun ritardo aggiuntivo rispetto a prima. Timeout parametrico, condiviso con `LAUNCH_WINDOW_TIMEOUT_MS` (120s) già introdotto in `launchPhaseTracker.ts`.
+
+`gameManager.ts` aggiornato di conseguenza — l'apprendimento in background (senza una splash ad ascoltare, per ora) usa lo stesso ciclo, senza `await` per non rallentare `launchGame()`.
+
+**Verificato**: `tsc --noEmit` — 8 invariato.
+
+---
+
+## v2.0.41-dev.35 — Splash di lancio: finestra reale, orchestrazione completa, pagina (roadmap punto 2/3)
+
+**Ultimo pezzo mancante della splash di lancio**, disegnata e discussa nei turni precedenti — finestra reale che appare/scompare, non solo la trasmissione delle fasi (dev.32) o il rilevamento finestra (dev.33/34).
+
+**`notificationEngine.ts`**: aggiunto `off()`, mancante — `on()` esisteva già ("per estensioni future") ma senza modo di rimuoversi, ogni lancio avrebbe accumulato un listener per sempre.
+
+**`splashWindow.ts`** (nuovo): apre/chiude la finestra reale della splash. Punto critico verificato leggendo `kiosk-launch.sh`: l'istanza Chromium della Dashboard non specifica un proprio `--user-data-dir` — usa il profilo di default. Una seconda istanza avviata allo stesso modo rischierebbe di aprirsi come una nuova finestra nello stesso processo esistente (comportamento normale di Chromium con lo stesso profilo) invece che come processo separato — chiudere "la splash" a quel punto rischierebbe di chiudere anche la Dashboard. Qui si passa sempre un `--user-data-dir` dedicato. Stesso schema `--app=<url>` già collaudato, **mai** `--kiosk` (lag verificato dall'utente sul proprio sistema). Chiusura: SIGTERM poi SIGKILL dopo 2s (stesso principio a due segnali già consolidato per Gamescope in questa sessione).
+
+**`splashOrchestrator.ts`** (nuovo): la vera corsa fra le tre condizioni concordate — apre la finestra, poi `Promise.race` fra rilevamento finestra (`windowDetector.ts`, dev.34) e intercettazione della notifica `launch-error` esistente (via il nuovo `notificationEngine.off()`, mai mostrata — solo per sapere che chiudere). Se nessuna delle due entro `LAUNCH_WINDOW_TIMEOUT_MS` (120s): timeout di sicurezza, termina forzatamente il processo di lancio tracciato. Mai un `await` bloccante su `launchGame()`.
+
+**`server.ts`**: nuova rotta `GET /splash?gameId=...` — pagina HTML leggera e autosufficiente (non la Dashboard React caricata due volte), un solo `EventSource` verso lo stream di fasi già esistente. **Nessuna logica di chiusura lato pagina** — la finestra viene aperta/chiusa dal backend stesso (process management), mai da `window.close()` (permessi del browser inaffidabili per una finestra non aperta via `window.open()`). Testo in italiano/inglese secondo la lingua configurata (`readAppConfig().language`), coerente col resto della Dashboard. Aggiunta anche `escapeHtml()` — il titolo del gioco viene interpolato in HTML, andava sempre passato da un escape.
+
+**`gameManager.ts`**: `launchGame()` ora avvia l'intera orchestrazione (non solo il rilevamento finestra in isolamento come in dev.33/34) subito dopo la fase `launching`.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `esbuild server.ts` — nessun errore di bundling. **Non ancora testato su hardware reale — questo è il primo momento in cui la splash appare davvero come finestra, non solo come streaming di dati.**
+
+---
+
+## v2.0.41-dev.36 — Splash: apertura in ritardo e chiusura prematura, due bug reali
+
+**Segnalato dall'utente**, primo test reale con finestra vera: la splash non appare subito al lancio, ma solo dopo la verifica dei verb (che può richiedere diversi secondi) — comparsa/scomparsa velocissime, molto prima della finestra di gioco vera. Comportamento incostante fra giochi diversi: per Bioshock 2 sparisce ben prima della finestra reale, per LEGO Indiana Jones (testato già molte volte in questa sessione) la transizione è lineare.
+
+**Causa #1 (apertura in ritardo)**: la finestra della splash veniva aperta nello stesso punto in cui partiva la corsa di chiusura — subito **dopo** lo spawn effettivo del processo, che a sua volta avviene **dopo** `reconcileWinetricksVerbs()` (verifica/installazione verb, un metodo separato chiamato prima nella funzione, ma la cui posizione testuale nel file — dopo il punto in cui avevo inserito l'apertura — aveva tratto in inganno la lettura iniziale). Fix: separate apertura (`openSplashForLaunch`) e corsa di chiusura (`raceSplashClose`, prima si chiamava `runSplashForLaunch`) in `splashOrchestrator.ts` — la finestra si apre ora **prima** della verifica verb, la corsa (timeout compreso) parte comunque solo al lancio effettivo, come richiesto esplicitamente dall'utente in un turno precedente. Aggiunta anche la chiusura esplicita della splash sui due rami di fallimento dello spawn (`else`/`catch`) — prima sarebbe rimasta orfana, dato che `raceSplashClose` non viene mai raggiunta in quei casi.
+
+**Causa #2 (chiusura prematura, incostante fra giochi)**: per un gioco senza `window_class` ancora noto (primo lancio), "esattamente una finestra nuova candidata" veniva presa per buona all'istante — ma alcuni giochi (Bioshock 2, presumibilmente) mostrano una propria finestra intermedia (caricamento, avviso) prima di quella reale, presa per errore come quella definitiva. Per LEGO Indiana Jones (`window_class` già noto da tutta la saga Gamescope di questa sessione) il problema non si presentava affatto — percorso diretto, nessuna ambiguità possibile lì, da cui l'incostanza osservata. Fix in `windowDetector.ts`: una candidata (solo nel ramo "non ancora noto") deve comparire **identica** (stesso id di finestra) su **due controlli consecutivi** prima di essere confermata — se nel frattempo sparisce o cambia, era probabilmente una finestra intermedia, non quella vera.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.37 — La splash chiudeva subito anche con window_class già noto
+
+**Segnalato dall'utente**: con l'apertura anticipata corretta (dev.36), la splash sparisce comunque prima della finestra di gioco vera — per LEGO Indiana Jones, che ha già un `window_class` noto (imparato durante tutta la saga Gamescope di questa sessione).
+
+**Causa**: il percorso "diretto" (usato quando `window_class` è già noto) non confrontava affatto con lo snapshot "prima" — cercava una finestra con quella classe **ovunque nel sistema, in qualunque momento**. Se una finestra con quella stessa classe esisteva già (residuo plausibile dopo tutti i test ripetuti di Gamescope in questi giorni), veniva trovata "vera" al primissimo controllo — ancora prima che il gioco avesse davvero aperto la propria finestra nuova per QUESTO lancio.
+
+**Fix**: il percorso diretto ora richiede, come già il percorso "non ancora noto", che la finestra sia **nuova** rispetto allo snapshot "prima" — non basta più che esista, deve essere comparsa durante questo specifico lancio.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.38 — 2s di persistenza della splash dopo il rilevamento finestra
+
+**Richiesta dell'utente**: la splash spariva esattamente nello stesso istante in cui la Dashboard si riduce a icona — ipotizzando che fosse l'intero processo browser a essere minimizzato insieme.
+
+**Verificato, non solo ipotizzato**: `tray.py`, `hide_window()` usa `wmctrl -r "X-Launcher HTPC" -b add,hidden` — agisce su **una finestra specifica**, individuata per titolo esatto ("X-Launcher HTPC"), non sull'intero processo browser. Il titolo della pagina della splash ("X-Launcher", senza " HTPC") non può corrispondere a quella ricerca. Non è lo stesso meccanismo — più probabile che sia una coincidenza di tempistica: il rilevamento "finestra trovata" della splash e il rilevamento "gioco in esecuzione" di `tray.py` reagiscono quasi insieme allo stesso segnale di fondo (la finestra vera del gioco).
+
+**Implementato comunque**, indipendentemente dalla causa esatta della coincidenza: 2 secondi di margine in `splashOrchestrator.ts` fra il rilevamento della finestra e la chiusura reale della splash — tempo per la finestra del gioco di diventare visibile e a fuoco prima che la splash sparisca.
+
+**Verificato**: `tsc --noEmit` — 8 invariato.
+
+---
+
+## v2.0.41-dev.39 — La splash aveva imparato se stessa come "finestra del gioco"
+
+**Verificato dall'utente con una query diretta al DB**: `window_class` di Bioshock 2 era `localhost__splash.Chromium` — il nome che Chromium deriva dall'URL `/splash` che le passiamo, cioè la finestra della **splash stessa**, non quella del gioco.
+
+**Causa reale**: `openSplashWindow()` restituiva l'handle subito dopo lo spawn del processo Chromium — ma Chromium impiega un tempo reale (mai istantaneo) a creare davvero la propria finestra X11. `gameManager.ts` cattura lo snapshot "prima" subito dopo aver ricevuto l'handle: se la finestra della splash non era ancora comparsa in quel momento, il ciclo di rilevamento della finestra del gioco la vedeva come "nuova" al proprio interno, e — non avendo ancora nulla con cui confonderla, essendo l'unica candidata — la confermava per errore.
+
+**Fix**: `openSplashWindow()` è ora `async` — attende realmente (fino a 5s, via `wmctrl`, non un'attesa fissa indovinata) che la propria finestra sia comparsa prima di restituire l'handle, garantendo che lo snapshot "prima" preso subito dopo la includa correttamente come "già esistente". Aggiunta anche una rete di sicurezza in `windowDetector.ts`: nessuna finestra riconoscibile come la splash stessa (classe/titolo contenenti "splash") può più essere confermata come finestra del gioco, indipendentemente dal tempismo — un fix alla causa vera, non due possibilità di sbagliare sullo stesso bug.
+
+**Azione richiesta all'utente**: il valore sbagliato già salvato per Bioshock 2 va azzerato a mano (query fornita) — nessuna migrazione automatica, un caso isolato dovuto al bug appena corretto, non un problema strutturale del DB.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.40 — Override manuale del window_class rilevato (idea dell'utente)
+
+**Richiesta dell'utente**: un modo per correggere o cancellare a mano il `window_class` rilevato automaticamente dalla splash, sullo stesso modello già in uso per l'override del titolo di ricerca metadati (`scrapeTitle`) — nella stessa sezione Game Config dove vivono già Executable Path e Launch Arguments.
+
+**Chiarimento durante l'implementazione**: il campo "xlaunch://" che l'utente ricordava si chiama in realtà `xlaunch://` (senza trattino) nel codice — cercato inizialmente con "x-launch://" (con trattino) senza trovarlo, poi correttamente localizzato con una ricerca più ampia. È un campo puramente informativo (id interno del gioco, usato da script esterni per testare un lancio diretto) — il nuovo campo va posizionato subito dopo, ma **fuori** dal suo ternario Steam/altri store (applicabile a qualunque gioco).
+
+**Implementato**:
+- `types.ts`/`db.ts`: `windowClass` esposto nel tipo `Game` condiviso col frontend (finora deliberatamente tenuto fuori, stesso trattamento di `last_launched_at` — ora serve mostrarlo/modificarlo nell'overlay). `updateGameConfig` (sia lato `db.ts` sia `gameManager.ts`) esteso allo stesso modo di `scrapeTitle`.
+- `App.tsx`: nuovo campo "Detected Window (Splash)" nella sezione Game Config, stesso pattern esatto di `scrapeTitle` — valore vuoto = cancella, torna al rilevamento automatico dal prossimo lancio (comportamento già naturale di tutti i campi di questa sezione, `val || null`). Aggiunto anche a `localGameConfig` all'apertura dell'overlay — stessa lezione già imparata con `gamescope` (dev.26): un campo dimenticato lì mostrerebbe sempre vuoto anche con un valore reale nel DB.
+- Chiavi di traduzione IT/EN aggiunte in `gameOptions.json` (etichetta, placeholder, testo esplicativo).
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 104 id (uno in più, corretto), stesso falso positivo noto, nessun nuovo problema di navigazione. Entrambi i JSON di traduzione validati.
+
+---
+
+## v2.0.41-dev.41 — Chiarito: l'override già guida la chiusura, mancava solo un log di conferma
+
+**Segnalato dall'utente**: con un override manuale (`archlinux Dead Space™ 2`, testo copiato da hostname+titolo invece che dalla colonna WM_CLASS), la splash sembrava sparire al momento giusto sia all'avvio sia alla chiusura del gioco — ma in realtà restava aperta, mai chiusa davvero, anche dopo la fine del gioco.
+
+**Chiarito, nessun bug nel confronto**: il confronto diretto (`wmClass === valore_salvato`) non può mai risultare vero con un valore nel formato hostname+titolo. Quello osservato era quasi certamente un'illusione di sovrapposizione — la splash restava aperta sotto qualunque finestra tornasse in primo piano sopra di lei (prima il gioco, poi la Dashboard), mai davvero terminata fino all'eventuale timeout dei 120s. Il campo di override condivide già lo stesso identico confronto usato per un valore appreso automaticamente — nessuna distinzione nel codice, nessun meccanismo nuovo da costruire.
+
+**Aggiunto**: un log mancante — prima confermavamo via log solo l'*apprendimento* di un valore, mai una *corrispondenza diretta* riuscita (valore già noto, appreso o inserito a mano). Senza quel log, impossibile distinguere "il rilevamento ha funzionato per davvero" da "sembrava funzionare per sovrapposizione" — esattamente l'ambiguità di questo caso.
+
+**Verificato**: `tsc --noEmit` — 8 invariato.
+
+---
+
+## v2.0.41-dev.42 — Filtro per titolo sulle classi WM_CLASS generiche (idea dell'utente)
+
+**Confermato dall'utente con osservazione diretta su hardware reale**: `steam_app_0.steam_app_0` è il WM_CLASS che riceve **qualunque** gioco lanciato con Umu-launcher attivo (verificato su due giochi/store completamente diversi — Dead Space 2 ed EA App, Watch Dogs 2 e Ubisoft Connect — stesso identico valore), e allo stesso modo `steam_proton.steam_proton` per qualunque gioco lanciato con Proton puro. Solo i lanci Wine diretti hanno un WM_CLASS che rispecchia davvero l'eseguibile (es. `bioshock2.exe.bioshock2.exe`).
+
+**Proposta dell'utente**: quando la classe salvata è una di queste generiche, non fidarsi della sola corrispondenza di classe — verificare anche che il **titolo** della finestra contenga il nome del gioco (tollerante a varianti: "Watch Dogs 2"/"WatchDogs2"/"watch_dogs_2").
+
+**Implementato** in `windowDetector.ts`:
+- Nuovo insieme `GENERIC_WM_CLASSES` con i due valori confermati.
+- Nuova `normalizeForMatch()` — stessa identica normalizzazione già in uso in `sharedLauncherManager.ts` per il matching cross-store dei titoli, replicata qui (una riga, non vale un import cross-modulo).
+- Ramo "già noto": se la classe salvata è generica, richiede ora **anche** che il titolo della finestra contenga il titolo del gioco normalizzato — altrimenti scarta la corrispondenza anche se la classe coincide.
+- Ramo "non ancora noto", caso ambiguo (più candidate nuove insieme): prima di arrendersi, prova a restringere alla sola candidata il cui titolo somiglia al nome del gioco — se ne resta esattamente una, la usa invece di scartare tutto.
+
+**Verificato**: `tsc --noEmit` — 8 invariato, stesse categorie note. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.43 — Navigazione col controller saltava il nuovo campo "Detected Window (Splash)"
+
+**Segnalato dall'utente**: scendendo dall'alto dopo `xlaunch:// App ID`, la selezione saltava direttamente a "Dipendenze Wine" — per selezionare l'override della splash bisognava tornare indietro con la levetta.
+
+**Causa**: stesso identico schema di un bug già corretto mesi fa (v1.1.109-dev.2) per lo stesso campo `xlaunch:// App ID` — allora lo scoring geometrico saltava "Dipendenze Wine" scendendo dall'alto, risolto con un collegamento esplicito (`neighbors.down`) direttamente a quel widget. L'aggiunta del nuovo campo "Detected Window (Splash)" (dev.40), inserito nel mezzo, veniva scavalcata da quello stesso collegamento esplicito — che continuava a puntare dritto a "Dipendenze Wine", ignorando tutto quello che nel frattempo era stato inserito fra i due.
+
+**Fix**: il collegamento di `xlaunch:// App ID` ora punta al nuovo campo invece di scavalcarlo; il nuovo campo stesso ha ricevuto i propri collegamenti espliciti in entrambe le direzioni (`up` verso `xlaunch://`/Steam App ID — stesso id per entrambi i rami, funziona per qualunque store; `down` verso "Dipendenze Wine"). La direzione opposta (salendo da "Dipendenze Wine") non aveva mai un collegamento esplicito — è geometrica, e con il nuovo campo inserito nel mezzo dovrebbe atterrarci naturalmente senza bisogno di un collegamento esplicito lì.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 104 id, 37 riferimenti (2 in più correttamente registrati), stesso falso positivo noto, nessun nuovo problema di navigazione.
+
+---
+
+## v2.0.41-dev.44 — La card del launcher condiviso risultava bloccata come se dipendesse da sé stessa
+
+**Segnalato dall'utente**: aprendo l'overlay della card di Ubisoft Connect o EA App (non un gioco, il launcher stesso), Runner e Layer di compatibilità risultavano bloccati sul valore ereditato, esattamente come per un gioco che dipende da quel launcher — impedendo di modificarli direttamente sulla card che dovrebbe essere la fonte di quei valori, non una dipendente.
+
+**Causa**: `effectiveSharedLauncherId` (calcolato in due punti distinti — Runner e Umu-launcher/Layer di compatibilità) ricade su `sharedLaunchers.find(sl => sl.storeId === selectedGame?.store)` quando non c'è un `requiresLauncher` esplicito. Quando la card selezionata **è** il launcher condiviso stesso, questo fallback trova **se stesso** (il proprio `store` combacia col proprio `storeId`), facendo risultare "bloccato su un launcher condiviso" — che poi risulta essere lui stesso — invece di "libero, è la fonte".
+
+Il blocco "Layer di compatibilità" aveva già la soluzione corretta per un problema gemello (`isThisGameASharedLauncher`, usato per nascondere lo switch "Launcher condiviso" sulla propria card), ma non la applicava al calcolo di `lockedToSharedLauncherForUmu` proprio sotto; il blocco Runner non aveva il controllo per niente.
+
+**Fix**: `isThisGameASharedLauncher` ora esclude esplicitamente `effectiveSharedLauncherId` in entrambi i punti — la card del launcher condiviso non risulta mai più bloccata su se stessa, riprendendo il controllo pieno di Runner e Layer di compatibilità come qualunque altra card indipendente.
+
+**Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 104 id invariati.

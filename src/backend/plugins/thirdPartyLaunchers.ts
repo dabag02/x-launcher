@@ -98,6 +98,54 @@ export interface ThirdPartyLauncherDefinition {
    * assunzioni sopra o deve ripartire da zero con verifica.
    */
   verified: boolean;
+
+  /**
+   * v2.0.41-dev.15 — richiesta utente: capitalizzare l'esperienza reale
+   * accumulata installando/avviando ogni launcher condiviso, per aiutare
+   * proattivamente un futuro utente che si trovi nelle stesse difficoltà
+   * già superate. Mostrati quando l'utente risponde "Non ha funzionato"
+   * alla notifica di verifica post-chiusura per QUESTO gioco/launcher (o
+   * per un gioco che lo richiede) — vedi resolveNotification() in
+   * useNotifications.ts e l'evento 'launcher-troubleshooting-tips' in
+   * notificationEngine.ts. Bilingue, stesso pattern di solution/
+   * solution_en già in uso per la Knowledge Base (knowledgeBase.ts) —
+   * `textEn` opzionale, ricade su `text` se assente. Un breve elenco di
+   * consigli concreti (runner collaudato, interruttore Umu-launcher,
+   * argomenti da passare), non un'automazione — l'utente resta libero di
+   * applicarli o meno, nessun "Apply" a un click per non rischiare di
+   * sovrascrivere una configurazione che l'utente ha già personalizzato
+   * di proposito. Vuoto/assente finché non c'è esperienza reale da
+   * riportare — mai un consiglio generico/indovinato scritto qui.
+   */
+  troubleshootingTips?: { text: string; textEn?: string }[];
+
+  /**
+   * v2.0.41-dev.18 — richiesta utente: quando un gioco lancia questo
+   * launcher come propria dipendenza (requiresLauncher, vedi
+   * launchSharedLauncher in sharedLauncherManager.ts), la SUA finestra
+   * non deve rubare il focus al gioco appena avviato — passati come
+   * argomenti extra al lancio SOLO in quel percorso automatico, mai
+   * quando l'utente apre il launcher a mano dalla propria card (lì
+   * l'utente lo vuole visibile, è esattamente quello che ha chiesto).
+   * Vuoto/assente finché non c'è un argomento verificato per quel
+   * launcher specifico — mai indovinato.
+   */
+  silentLaunchArgs?: string[];
+
+  /**
+   * v2.0.41-dev.33 — richiesta utente: nome noto del titolo della
+   * finestra di questo launcher (es. EA App → "EA", Ubisoft Connect →
+   * "Ubisoft Connect", sempre uguale secondo osservazione diretta
+   * dell'utente — da riverificare al primo utilizzo reale con
+   * `wmctrl -lx`, mai dato per scontato oltre quella prima conferma).
+   * Usato per due scopi distinti: (1) escludere la finestra del
+   * launcher dalla cattura del window_class di un gioco che lo
+   * richiede (evita l'ambiguità "sono comparse due finestre nuove
+   * insieme, quale delle due è il gioco?"); (2) lo stesso filtro
+   * applicato dalla splash di lancio quando "launcher condiviso" è
+   * attivo per il gioco in corso di avvio.
+   */
+  knownWindowTitle?: string;
 }
 
 export const THIRD_PARTY_LAUNCHERS: ThirdPartyLauncherDefinition[] = [
@@ -120,6 +168,24 @@ export const THIRD_PARTY_LAUNCHERS: ThirdPartyLauncherDefinition[] = [
     // container pieno) e ora anche lettura libreria interna, tutti
     // confermati dall'utente su hardware reale con due giochi distinti.
     verified: true,
+    // v2.0.41-dev.15 — esperienza reale accumulata (MILESTONE v1.5.20-Venus
+    // e sessioni successive, vedi CHANGELOG.md "saga finestra nera" e
+    // CHANGELOG-2.md): il problema storico più segnalato per Ubisoft
+    // Connect è la finestra completamente nera dal secondo avvio in poi
+    // — causa reale, confermata nel sorgente Proton: il container Steam
+    // Linux Runtime mancante quando Ubisoft Connect (o un gioco che lo
+    // richiede) parte senza passare da `umu-run`.
+    troubleshootingTips: [
+      {
+        text: 'Se Ubisoft Connect si apre con una finestra completamente nera (tipicamente dal secondo avvio in poi), attiva l\'interruttore "Umu-launcher" in Compatibility Layer per questo gioco/launcher — manca il container Steam Linux Runtime richiesto per il rendering corretto.',
+        textEn: 'If Ubisoft Connect opens with a completely black window (typically from the second launch onward), enable the "Umu-launcher" switch in Compatibility Layer for this game/launcher — it\'s missing the Steam Linux Runtime container needed for correct rendering.',
+      },
+    ],
+    // v2.0.41-dev.33 — richiesta utente, osservazione diretta: la
+    // finestra di Ubisoft Connect si chiama sempre "Ubisoft Connect" —
+    // da riverificare con wmctrl -lx al primo utilizzo reale, non
+    // ancora confermato da noi.
+    knownWindowTitle: 'Ubisoft Connect',
   },
   {
     id: 'ea-app',
@@ -194,6 +260,39 @@ export const THIRD_PARTY_LAUNCHERS: ThirdPartyLauncherDefinition[] = [
     // stessa scelta già fatta per Ubisoft Connect: resta un interruttore
     // per l'utente, non un default automatico.
     verified: true,
+    // v2.0.41-dev.15 — esperienza reale accumulata durante l'intera saga
+    // di bootstrap EA App (vedi CHANGELOG-3.md per il dettaglio completo
+    // di ogni causa/fix, tutti verificati su hardware reale in questa
+    // stessa sessione).
+    troubleshootingTips: [
+      {
+        text: 'Se l\'installazione fallisce con un codice INST-14-160x, aggiungi EAX_LAUNCH_CLIENT=0 nei Launch Arguments dell\'installer prima di riprovare — l\'installer EA usa una custom action .NET che senza questo argomento fallisce quasi sempre sotto Wine.',
+        textEn: 'If installation fails with an INST-14-160x code, add EAX_LAUNCH_CLIENT=0 to the installer\'s Launch Arguments before retrying — EA\'s installer uses a .NET custom action that almost always fails under Wine without this argument.',
+      },
+      {
+        text: 'Se l\'app resta bloccata sulla schermata "Connessione a EA App" dopo il login, prova un runner GE-Proton (es. GE-Proton11-3) con l\'interruttore "Umu-launcher" attivo in Compatibility Layer — senza il container Steam Linux Runtime, il controllo di connettività di rete di EA App non riceve mai risposta sotto Wine.',
+        textEn: 'If the app stays stuck on the "Connecting to EA App" screen after login, try a GE-Proton runner (e.g. GE-Proton11-3) with the "Umu-launcher" switch enabled in Compatibility Layer — without the Steam Linux Runtime container, EA App\'s network connectivity check never gets a response under Wine.',
+      },
+      {
+        text: 'Se l\'installazione sembra completarsi ma l\'app non parte più, la cartella "EA Desktop/EA Desktop" potrebbe essere vuota (bug noto di Wine: EA la popola con un collegamento simbolico che Wine non crea mai davvero) — X-Launcher prova a correggerla da solo a ogni chiusura, ma se il problema persiste segnalalo.',
+        textEn: 'If installation seems to complete but the app no longer starts, the "EA Desktop/EA Desktop" folder may be empty (known Wine bug: EA populates it via a symbolic link that Wine never actually creates) — X-Launcher tries to fix this automatically on every close, but let us know if the problem persists.',
+      },
+    ],
+    // v2.0.41-dev.18 — richiesta utente: quando un gioco EA lancia EA App
+    // come propria dipendenza, la finestra di EA App ruba il focus al
+    // gioco appena avviato (bisogna alt-tab per tornare al gioco).
+    // "-silentOs" NON è indovinato — è l'argomento REALE che Windows usa
+    // per avviare EA App silenziosamente al login (verificato nel
+    // registro dell'utente: chiave Run, valore "EADM" =
+    // "...\EALauncher.exe" -silentOs). Ragionevole (non certificato da
+    // documentazione EA ufficiale) che serva a evitare che la finestra
+    // rubi il focus a un avvio automatico — esattamente lo scopo di
+    // questo campo. Da confermare su hardware reale.
+    silentLaunchArgs: ['-silentOs'],
+    // v2.0.41-dev.33 — richiesta utente, osservazione diretta: la
+    // finestra di EA App si chiama sempre "EA" — da riverificare con
+    // wmctrl -lx al primo utilizzo reale, non ancora confermato da noi.
+    knownWindowTitle: 'EA',
   },
   {
     id: 'battlenet',

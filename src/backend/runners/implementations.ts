@@ -231,6 +231,115 @@ function resolveGameModeWrapping(config: RunnerConfig | undefined, logPrefix: st
   return useGameMode;
 }
 
+/**
+ * v2.0.41-dev.25 — legge la risoluzione REALMENTE attiva del monitor via
+ * `xrandr` (riga con l'asterisco accanto alla modalità corrente, sotto
+ * l'output connesso — verificato: xrandr è lo strumento standard su
+ * X11/XFCE, lo stack di questo progetto, nessuna libreria aggiuntiva
+ * richiesta). La riga "Screen 0: ... current 2560 x 1440 ..." in cima
+ * all'output NON viene confusa con questa: quella ha spazi attorno alla
+ * "x" ("2560 x 1440"), le righe di modalità no ("2560x1440") — il
+ * pattern usato richiede "x" senza spazi, quindi non serve escluderla
+ * esplicitamente. Nessuna cache: chiamata solo al momento del lancio,
+ * non in un ciclo caldo.
+ *
+ * v2.0.41-dev.27 — BUG REALE confermato su hardware reale dall'utente:
+ * con più monitor collegati (nel suo caso un 27" principale a
+ * 2560×1440 e un secondo schermo a 2160×1440), prendere il primo
+ * asterisco trovato in TUTTO l'output di xrandr non distingue quale
+ * sia il monitor principale — ha preso la risoluzione del secondario
+ * (2160×1440, combaciava esattamente col comando osservato dall'utente
+ * nel log reale), molto probabilmente aprendo Gamescope su uno schermo
+ * diverso da quello che l'utente stava guardando. Ora si individua
+ * prima il blocco dell'output marcato "primary" da xrandr stesso
+ * (fallback al primo output "connected" trovato se nessuno è marcato
+ * primary — alcuni driver/window manager non lo riportano), e si
+ * cerca l'asterisco SOLO dentro quel blocco, non nell'intero testo.
+ */
+function detectMonitorResolution(): { width: number; height: number } | null {
+  try {
+    const out = execSync('xrandr --current', { encoding: 'utf-8' });
+    const lines = out.split('\n');
+    let startIdx = lines.findIndex(l => /\bconnected\b/.test(l) && /\bprimary\b/.test(l));
+    if (startIdx === -1) {
+      startIdx = lines.findIndex(l => /\bconnected\b/.test(l) && !/\bdisconnected\b/.test(l));
+    }
+    if (startIdx === -1) return null;
+    let endIdx = lines.findIndex((l, i) => i > startIdx && /\b(dis)?connected\b/.test(l));
+    if (endIdx === -1) endIdx = lines.length;
+    const block = lines.slice(startIdx, endIdx).join('\n');
+    const match = block.match(/(\d+)x(\d+)\s+[\d.]+\*/);
+    if (match) {
+      return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) };
+    }
+  } catch {
+    // xrandr non disponibile o sessione non X11 — nessun dato, il
+    // chiamante ripiega sul default di Gamescope stesso.
+  }
+  return null;
+}
+
+/**
+ * v2.0.41-dev.24/25 — Gamescope: micro-compositore Wayland pensato per
+ * sessioni gaming/console, avvolge il comando FINALE (dopo un eventuale
+ * GameMode/umu-run già applicato) — va sempre lo strato più esterno,
+ * per costruzione: `gamescope [opzioni] -- <tutto il resto>`. Stesso
+ * principio di resolveGameModeWrapping sopra, ma restituisce
+ * direttamente la coppia bin/args finale invece di un solo booleano.
+ *
+ * 4 stati (0-3), non un semplice on/off — verificato su hardware reale
+ * dall'utente: Gamescope senza argomenti parte IN FINESTRA a 1280×720
+ * (default reale del programma, non la risoluzione del monitor) — un
+ * booleano da solo non copriva "voglio schermo intero alla risoluzione
+ * vera del mio monitor" in modo affidabile.
+ */
+function resolveGamescopeWrapping(
+  launchBin: string,
+  launchArgs: string[],
+  config: RunnerConfig | undefined,
+  logPrefix: string,
+): { bin: string; args: string[] } {
+  const level = config?.gamescope ?? 0;
+  if (!level) return { bin: launchBin, args: launchArgs };
+  if (!binaryExists('gamescope')) {
+    writeLog('warning', `[${logPrefix}] Gamescope requested but not found — install gamescope`);
+    return { bin: launchBin, args: launchArgs };
+  }
+
+  const gamescopeArgs: string[] = [];
+  if (level === 1) {
+    // Schermo intero, risoluzione rilevata automaticamente.
+    const res = detectMonitorResolution();
+    if (res) {
+      // v2.0.41-dev.27 — log esplicito della risoluzione realmente
+      // usata: unico modo per diagnosticare da remoto un rilevamento
+      // sbagliato su un setup multi-monitor come quello che ha appena
+      // rivelato il bug corretto sopra, senza dover chiedere ogni
+      // volta all'utente di lanciare xrandr a mano.
+      writeLog('launch', `[${logPrefix}] Gamescope: risoluzione monitor rilevata ${res.width}x${res.height}.`);
+      gamescopeArgs.push('-W', String(res.width), '-H', String(res.height));
+    } else {
+      writeLog('warning', `[${logPrefix}] Gamescope: risoluzione monitor non rilevata (xrandr) — uso il default di Gamescope stesso.`);
+    }
+    gamescopeArgs.push('-f');
+  } else if (level === 2) {
+    // Schermo intero, override fisso 4K (utile per il downsampling da
+    // un monitor più piccolo — stesso caso d'uso della guida ufficiale
+    // Gamescope).
+    gamescopeArgs.push('-W', '3840', '-H', '2160', '-f');
+  } else if (level === 3) {
+    // In finestra — dimensionata alla risoluzione del monitor se nota
+    // (altrimenti il default di Gamescope stesso), MAI -f.
+    const res = detectMonitorResolution();
+    if (res) {
+      writeLog('launch', `[${logPrefix}] Gamescope: risoluzione monitor rilevata ${res.width}x${res.height}.`);
+      gamescopeArgs.push('-W', String(res.width), '-H', String(res.height));
+    }
+  }
+
+  return { bin: 'gamescope', args: [...gamescopeArgs, '--', launchBin, ...launchArgs] };
+}
+
 export class WineRunner extends BaseRunner {
   readonly id = 'Wine-Lutris';
   readonly name = 'Wine (Lutris Build)';
@@ -280,10 +389,14 @@ export class WineRunner extends BaseRunner {
       ? [wineBin, exePath, ...(config?.args ?? [])]
       : [exePath, ...(config?.args ?? [])];
 
-    writeLog('launch', `[WINE] WINEPREFIX=${prefix} cwd=${cwd} ${launchBin} ${launchArgs.join(' ')}`);
+    // v2.0.41-dev.24 — Gamescope, sempre l'ultimo strato applicato
+    // (avvolge quello che c'è già, GameMode incluso se attivo).
+    const gamescopeWrap = resolveGamescopeWrapping(launchBin, launchArgs, config, 'WINE');
+
+    writeLog('launch', `[WINE] WINEPREFIX=${prefix} cwd=${cwd} ${gamescopeWrap.bin} ${gamescopeWrap.args.join(' ')}`);
     const logPath = gameLaunchLogPath(game.id);
-    const { pid } = spawnDetached(launchBin, launchArgs, { ...env, cwd } as any, undefined, logPath);
-    return { success: true, pid, message: `Launched via ${launchBin} (prefix: ${prefix})`, logPath };
+    const { pid } = spawnDetached(gamescopeWrap.bin, gamescopeWrap.args, { ...env, cwd } as any, undefined, logPath);
+    return { success: true, pid, message: `Launched via ${gamescopeWrap.bin === 'gamescope' ? `Gamescope + ${launchBin}` : launchBin} (prefix: ${prefix})`, logPath };
   }
 
   async isAvailable() { return binaryExists('wine-lutris') || binaryExists('wine'); }
@@ -446,9 +559,12 @@ export class ProtonRunner extends BaseRunner {
       /^(WINE|DXVK|VKD3D|PROTON|STEAM_COMPAT|D3D|DXGI)/i.test(k) || /^GAMEID$/i.test(k)
     ).sort();
     writeLog('launch', `[PROTON-ENV] ${envDebugKeys.map(k => `${k}=${env[k]}`).join(' | ')}`);
+    // v2.0.41-dev.24 — Gamescope, sempre l'ultimo strato applicato
+    // (avvolge quello che c'è già, umu-run/GameMode inclusi se attivi).
+    const gamescopeWrap = resolveGamescopeWrapping(launchBin, launchArgs, config, 'PROTON');
     const logPath = gameLaunchLogPath(game.id);
-    const { pid } = spawnDetached(launchBin, launchArgs, env, cwd, logPath);
-    return { success: true, pid, message: `Launched via ${this.name}`, logPath };
+    const { pid } = spawnDetached(gamescopeWrap.bin, gamescopeWrap.args, env, cwd, logPath);
+    return { success: true, pid, message: gamescopeWrap.bin === 'gamescope' ? `Launched via Gamescope + ${this.name}` : `Launched via ${this.name}`, logPath };
   }
 
   async isAvailable() { return this.findProtonBin() !== null || binaryExists('steam'); }
@@ -487,6 +603,58 @@ export class ProtonRunner extends BaseRunner {
  * eseguibile con lo stesso wine/proton, semplicemente passando anche gli
  * argomenti EOS che quei titoli ignorano se non li richiedono.
  */
+/**
+ * v2.0.41-dev.31 — richiesta utente, causa reale confermata: Gamescope
+ * NON deve avvolgere `legendary` dall'esterno per i giochi Epic —
+ * verificato con report reali (issue Gamescope #1557/#1516/#1665,
+ * stesso identico sintomo "Primary child shut down!" con processi wine
+ * ancora vivi dopo) e con la documentazione ufficiale di Heroic Games
+ * Launcher (usa `legendary` internamente esattamente come noi): il modo
+ * corretto è passare Gamescope COME wrapper a legendary
+ * (`--wrapper "gamescope ... -- <comando reale>"`), non come involucro
+ * esterno dell'intero comando legendary. Motivo verificato: `legendary`
+ * avvia il proprio wrapper come FIGLIO e poi esce subito da solo (il
+ * suo lavoro finisce lì, comportamento normale) — se Gamescope avvolge
+ * legendary dall'esterno, lo considera il proprio "figlio primario" e
+ * si chiude nell'istante in cui legendary esce, DISTRUGGENDO la
+ * sessione nidificata mentre il vero gioco (nipote di Gamescope, non
+ * figlio diretto) sta ancora avviandosi al suo interno.
+ *
+ * Restituisce una STRINGA pronta per essere incorporata dentro
+ * l'argomento --wrapper (non una coppia bin/args come
+ * resolveGamescopeWrapping, usata per gli altri runner) — stringa
+ * vuota se Gamescope non è attivo per questo lancio.
+ */
+function buildGamescopePrefixString(config: RunnerConfig | undefined, logPrefix: string): string {
+  const level = config?.gamescope ?? 0;
+  if (!level) return '';
+  if (!binaryExists('gamescope')) {
+    writeLog('warning', `[${logPrefix}] Gamescope requested but not found — install gamescope`);
+    return '';
+  }
+  const parts: string[] = ['gamescope'];
+  if (level === 1) {
+    const res = detectMonitorResolution();
+    if (res) {
+      writeLog('launch', `[${logPrefix}] Gamescope: risoluzione monitor rilevata ${res.width}x${res.height}.`);
+      parts.push('-W', String(res.width), '-H', String(res.height));
+    } else {
+      writeLog('warning', `[${logPrefix}] Gamescope: risoluzione monitor non rilevata (xrandr) — uso il default di Gamescope stesso.`);
+    }
+    parts.push('-f');
+  } else if (level === 2) {
+    parts.push('-W', '3840', '-H', '2160', '-f');
+  } else if (level === 3) {
+    const res = detectMonitorResolution();
+    if (res) {
+      writeLog('launch', `[${logPrefix}] Gamescope: risoluzione monitor rilevata ${res.width}x${res.height}.`);
+      parts.push('-W', String(res.width), '-H', String(res.height));
+    }
+  }
+  parts.push('--');
+  return parts.join(' ');
+}
+
 export async function launchEpicViaLegendary(game: Game, runner: BaseRunner, config?: RunnerConfig) {
   const legendaryBin = resolveBinaryPath('legendary');
   if (!legendaryBin) {
@@ -546,7 +714,13 @@ export async function launchEpicViaLegendary(game: Game, runner: BaseRunner, con
       // prependere questo wrapper davanti a <exe> [argomenti EOS] esattamente
       // come faceva finora con "'<proton>' run" (nessun'altra differenza
       // nel resto del flusso legendary/EOS sotto).
-      args.push('--no-wine', '--wrapper', umuRunBin);
+      //
+      // v2.0.41-dev.31 — Gamescope (se attivo) incorporato QUI, dentro
+      // la stringa --wrapper insieme a umu-run — vedi commento esteso
+      // su buildGamescopePrefixString sopra per il perché non va mai
+      // applicato come involucro esterno dell'intero comando legendary.
+      const gamescopePrefixEpic = buildGamescopePrefixString(config, 'EPIC');
+      args.push('--no-wine', '--wrapper', gamescopePrefixEpic ? `${gamescopePrefixEpic} ${umuRunBin}` : umuRunBin);
       env.WINEPREFIX = path.join(prefix, 'pfx');
       env.PROTONPATH = path.dirname(protonBin);
       env.GAMEID = `x-launcher-${game.id}`;
@@ -556,7 +730,12 @@ export async function launchEpicViaLegendary(game: Game, runner: BaseRunner, con
       // --wrapper delega l'intero avvio a "<proton> run", che si aspetta
       // STEAM_COMPAT_DATA_PATH nell'ambiente — non WINEPREFIX diretto,
       // stesso principio già scoperto per il bug prefix Proton in v1.0.0.
-      args.push('--no-wine', '--wrapper', `'${protonBin}' run`);
+      //
+      // v2.0.41-dev.31 — stesso identico principio del ramo umu-run
+      // sopra: Gamescope (se attivo) incorporato dentro questa stessa
+      // stringa --wrapper, mai come involucro esterno di legendary.
+      const gamescopePrefixEpic2 = buildGamescopePrefixString(config, 'EPIC');
+      args.push('--no-wine', '--wrapper', gamescopePrefixEpic2 ? `${gamescopePrefixEpic2} '${protonBin}' run` : `'${protonBin}' run`);
       env.STEAM_COMPAT_DATA_PATH = prefix;
       env.STEAM_COMPAT_CLIENT_INSTALL_PATH = `${homedir()}/.local/share/Steam`;
     }
@@ -591,9 +770,26 @@ export async function launchEpicViaLegendary(game: Game, runner: BaseRunner, con
   const launchArgs = useGameMode ? [legendaryBin, ...args] : args;
 
   writeLog('launch', `[EPIC] ${launchBin} ${launchArgs.join(' ')}`);
+  // v2.0.41-dev.31 — Gamescope: per i rami Proton (isProton===true) è
+  // già stato incorporato PIÙ SOPRA dentro l'argomento --wrapper (vedi
+  // buildGamescopePrefixString) — applicarlo ANCHE qui, come involucro
+  // esterno dell'intero comando legendary, lo farebbe scattare due
+  // volte e reintrodurrebbe esattamente il bug appena corretto (Gamescope
+  // tratterebbe di nuovo `legendary` come proprio figlio primario). Va
+  // saltato qui SOLO per quel motivo — resta invariato per il ramo wine
+  // puro (!isProton), mai verificato per questo bug specifico, nessuna
+  // modifica lì finché non c'è un caso reale da correggere.
+  const gamescopeWrap = isProton
+    ? { bin: launchBin, args: launchArgs }
+    : resolveGamescopeWrapping(launchBin, launchArgs, config, 'EPIC');
   const logPath = gameLaunchLogPath(game.id);
-  const { pid } = spawnDetached(launchBin, launchArgs, env, undefined, logPath);
-  return { success: true, pid, message: `Launched via legendary (${runner.name})`, logPath };
+  const { pid } = spawnDetached(gamescopeWrap.bin, gamescopeWrap.args, env, undefined, logPath);
+  // v2.0.41-dev.31 — gamescopeWrap.bin === 'gamescope' non basta più a
+  // rilevare Gamescope attivo per i rami Proton (ora incorporato dentro
+  // --wrapper, mai il binario esterno) — controllo diretto sul livello
+  // configurato invece.
+  const gamescopeActive = (config?.gamescope ?? 0) > 0;
+  return { success: true, pid, message: gamescopeActive ? `Launched via Gamescope + legendary (${runner.name})` : `Launched via legendary (${runner.name})`, logPath };
 }
 
 export class DOSBoxRunner extends BaseRunner {

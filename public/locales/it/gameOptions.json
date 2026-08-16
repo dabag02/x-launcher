@@ -24,7 +24,7 @@
   "umuLauncher": "Umu-launcher",
   "umuLauncherDesc": "Container Steam Linux Runtime",
   "bypassStoreAuthChain": "Bypass store",
-  "bypassStoreAuthChainDesc": "Container pieno, salta legendary",
+  "bypassStoreAuthChainDesc": "Container pieno, evita l'avvio anticipato del launcher condiviso (salta anche legendary per Epic)",
   "configured": "✓ configurato",
   "requiredToLaunch": "⚠ richiesto per avviare",
   "libretroCorePathManual": "Libretro Core Path (manuale)",
@@ -53,5 +53,13 @@
   "install": "INSTALLA",
   "pressEnterToCopy": "Invio per copiare",
   "scrapeTitleLabel": "Titolo per Ricerca Metadati",
-  "scrapeTitlePlaceholder": "es. Guardians (se il nome ROM non è riconoscibile)"
+  "scrapeTitlePlaceholder": "es. Guardians (se il nome ROM non è riconoscibile)",
+  "windowClassLabel": "Finestra Rilevata (Splash)",
+  "windowClassPlaceholder": "non ancora rilevata — comparirà dopo il primo lancio riuscito",
+  "windowClassHint": "Rilevata automaticamente al lancio. Correggi qui se sbagliata, o cancella per far ripetere il rilevamento automatico al prossimo avvio.",
+  "gamescopeDesc": "micro-compositore dedicato",
+  "gamescopeOff": "spento",
+  "gamescopeFullscreen": "schermo intero — risoluzione monitor",
+  "gamescope4k": "schermo intero — override 4K",
+  "gamescopeWindowed": "finestra"
 }

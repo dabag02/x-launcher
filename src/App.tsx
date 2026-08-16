@@ -802,7 +802,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v2.0.41-dev.14');
+  const [appVersion, setAppVersion] = useState('v2.0.41-dev.44');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -2195,6 +2195,17 @@ function MainApp() {
           // allora: salvato correttamente nel DB, scartato ad ogni
           // riapertura dell'overlay, switch sempre mostrato spento.
           bypassStoreAuthChain: !!profile.bypassStoreAuthChain,
+          // v2.0.41-dev.26 — BUG REALE segnalato dall'utente, TERZA
+          // occorrenza esatta dello stesso identico avvertimento
+          // lasciato scritto qui sopra da dev.3 ("qualunque nuovo campo
+          // futuro... senza toccare anche questo punto") — dimenticato
+          // di nuovo aggiungendo gamescope in dev.24/25. Stesso identico
+          // sintomo: salvato correttamente nel DB (verificato — la
+          // scrittura era già corretta), scartato ad ogni riapertura
+          // dell'overlay, selettore sempre tornato alla posizione
+          // "spento" di default. Numero, non booleano — coerente col
+          // ciclo a 4 stati (0|1|2|3).
+          gamescope: Number(profile.gamescope ?? 0),
         });
         setCustomEnvText(
           Object.entries(profile.customEnv ?? {})
@@ -2230,6 +2241,12 @@ function MainApp() {
       libretroCore:   selectedGame.libretroCore   ?? '',
       scummvmId:      selectedGame.scummvmId      ?? '',
       scrapeTitle:    selectedGame.scrapeTitle    ?? '',
+      // v2.0.41-dev.40 — override manuale del window_class rilevato
+      // automaticamente. Stessa lezione già imparata con gamescope
+      // (dev.26): ogni nuovo campo va aggiunto ESPLICITAMENTE qui,
+      // altrimenti l'overlay lo mostrerebbe sempre vuoto anche quando un
+      // valore esiste davvero nel DB.
+      windowClass:    selectedGame.windowClass    ?? '',
       // Step 19d — switch "Launcher condiviso". Stringa vuota = nessuna
       // dipendenza, stesso principio degli altri campi in questa mappa
       // (mai null/undefined qui, solo nel salvataggio verso il backend).
@@ -3113,6 +3130,20 @@ Vuoi provare ad avviarlo comunque?`);
   }, [t]);
   const translateInputPluginDescription = useCallback((pluginId: string, fallback: string) => {
     return t(`inputPluginDescriptions.${pluginId}`, fallback);
+  }, [t]);
+  // v2.0.41-dev.16 — BUG UTENTE: stesso identico problema di
+  // translateStorePluginDescription sopra, ma per il campo `description`
+  // della RIGA GIOCO (non del plugin) — la card "launcher" seedata da
+  // ogni StorePlugin di un launcher condiviso (Ubisoft Connect, EA App,
+  // vedi ensureSeeded() nei rispettivi file) scrive un testo fisso in
+  // italiano nel DB una volta sola, mostrato poi tale e quale nella
+  // colonna destra a prescindere dalla lingua corrente — non passa mai
+  // da t(). Stesso namespace 'dashboard' già usato per il resto della
+  // colonna destra (coerenza), non 'settings' come l'omonima funzione
+  // sopra (quella vive nella tab Impostazioni, questa nella Dashboard).
+  const translateLauncherGameDescription = useCallback((gameId: string, fallback: string) => {
+    const key = gameId.replace(/[^a-zA-Z0-9]/g, '_');
+    return t(`dashboard:launcherDescriptions.${key}`, fallback);
   }, [t]);
   // Solo il fallback "Controller Generico" ha un vero nome da tradurre —
   // gli altri (Xbox / XInput, DualShock 4, DualSense) sono nomi di
@@ -4795,7 +4826,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       "flex-1 min-h-0 max-h-[400px]"
                     )}
                   >
-                    <p className="text-xs opacity-70 leading-relaxed font-medium italic">{selectedGame.description}</p>
+                    <p className="text-xs opacity-70 leading-relaxed font-medium italic">
+                      {(selectedGame.id === 'ea-app-launcher' || selectedGame.id === 'ubisoft-connect-launcher')
+                        ? translateLauncherGameDescription(selectedGame.id, selectedGame.description)
+                        : selectedGame.description}
+                    </p>
                   </div>
                 )}
                 </motion.div>
@@ -5492,7 +5527,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             </Focusable>
                           )}
                         </div>
-                        <p className="text-[13px] leading-relaxed opacity-70 mb-3">{notif.body}</p>
+                        {/* v2.0.41-dev.15 — BUG trovato scrivendo i
+                            suggerimenti multi-riga (launcher-troubleshooting-tips,
+                            un "•" per riga separati da \n): senza
+                            whitespace-pre-line l'HTML collassa i newline in
+                            un unico paragrafo, illeggibile come elenco.
+                            Nessun corpo di notifica esistente aveva mai
+                            avuto più di una riga prima d'ora — bug latente
+                            mai emerso, non solo per questa nuova funzione. */}
+                        <p className="text-[13px] leading-relaxed opacity-70 mb-3 whitespace-pre-line">{notif.body}</p>
                         {notif.rawLog && (
                           <div className="mb-3">
                             <Focusable group="notifications" id={`notif-log-${notif.id}`} onEnter={() => setExpandedNotifId(prev => prev === notif.id ? null : notif.id)}>
@@ -7656,9 +7699,39 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // letta dalla riga `games` del launcher stesso
                         // (già caricata in `games`, nessuna chiamata in
                         // più) — stessa fonte di verità usata dal backend.
-                        const lockedToSharedLauncher = !!localGameConfig.requiresLauncher;
+                        // v2.0.41-dev.22 — richiesta utente, stesso
+                        // identico principio applicato poco sotto per
+                        // Umu-launcher/Bypass store: un gioco NATIVO di
+                        // un launcher condiviso (nessun requiresLauncher
+                        // per design) restava sempre "non bloccato" qui,
+                        // mostrando Runner Bridge come una scelta libera
+                        // anche se il lancio reale (gameManager.ts,
+                        // effectiveSharedLauncherId, dev.19) la ignora
+                        // comunque — fonte di confusione anche se non di
+                        // un lancio davvero sbagliato (il backend eredita
+                        // sempre, indipendentemente da cosa mostra qui
+                        // l'overlay).
+                        // v2.0.41-dev.44 — BUG UTENTE: la card del
+                        // launcher condiviso stesso (Ubisoft Connect, EA
+                        // App) risultava bloccata su runner/layer di
+                        // compatibilità come se "ereditasse" da sé stessa
+                        // — il fallback sotto trova un match quando
+                        // selectedGame.store combacia con lo storeId del
+                        // launcher, ma quando selectedGame È quel
+                        // launcher, sta trovando sé stesso, non una vera
+                        // dipendenza. Stesso principio già applicato
+                        // qualche riga più sotto (blocco Layer di
+                        // compatibilità, isThisGameASharedLauncher) per
+                        // nascondere lo switch "Launcher condiviso" —
+                        // qui mancava del tutto.
+                        const isThisGameASharedLauncher = sharedLaunchers.some(
+                          (sl: any) => selectedGame?.id === `${sl.id}-launcher`
+                        );
+                        const effectiveSharedLauncherId = isThisGameASharedLauncher ? undefined : (localGameConfig.requiresLauncher
+                          || sharedLaunchers.find((sl: any) => sl.storeId === selectedGame?.store)?.id);
+                        const lockedToSharedLauncher = !!effectiveSharedLauncherId;
                         const inheritedRunnerId = lockedToSharedLauncher
-                          ? games.find(g => g.id === `${localGameConfig.requiresLauncher}-launcher`)?.runner
+                          ? games.find(g => g.id === `${effectiveSharedLauncherId}-launcher`)?.runner
                           : undefined;
                         // Ripiego difensivo: se per qualche motivo la riga
                         // del launcher non è ancora nota, non nascondere
@@ -7958,22 +8031,48 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // verificato, generare una combinazione non
                         // testata (due container Steam Linux Runtime
                         // potenzialmente distinti sulla stessa prefix).
-                        const lockedToSharedLauncherForUmu = !!localGameConfig.requiresLauncher;
+                        //
+                        // v2.0.41-dev.22 — richiesta utente, bug reale
+                        // confermato su hardware reale (Dead Space 2/EA
+                        // App, gioco NATIVO di un launcher condiviso —
+                        // nessun requiresLauncher per design, stesso
+                        // principio già generalizzato lato backend in
+                        // gameManager.ts con effectiveSharedLauncherId,
+                        // dev.19, mai arrivato qui). Senza questa riga,
+                        // "bloccato all'eredità" restava sempre falso per
+                        // un gioco nativo — Runner/Umu-launcher
+                        // apparivano come scelte libere anche se in
+                        // pratica venivano comunque ignorate dal lancio
+                        // reale (che eredita sempre, backend dev.19).
+                        // sharedLaunchers arriva già con storeId per
+                        // ogni voce (server.ts, stesso giro di modifiche).
+                        const effectiveSharedLauncherId = isThisGameASharedLauncher ? undefined : (localGameConfig.requiresLauncher
+                          || sharedLaunchers.find((sl: any) => sl.storeId === selectedGame?.store)?.id);
+                        const lockedToSharedLauncherForUmu = !!effectiveSharedLauncherId;
                         // v1.5.20-dev.32 — richiesta esplicita dell'utente,
                         // switch per singolo gioco (mai un automatismo
                         // generalizzato — comportamento non standardizzato
                         // fra launcher condivisi diversi, verificato solo
-                        // per Ubisoft Connect+Epic finora). Significativo
-                        // SOLO per un gioco Epic con un launcher condiviso
-                        // già attivo — per ogni altro store/situazione non
-                        // c'è alcuna catena di autenticazione dello store
-                        // d'origine da poter bypassare, il tile va nascosto
-                        // del tutto (stesso principio già applicato al
-                        // tile "Launcher condiviso" sulla card del
-                        // launcher stesso in dev.28 — non un'opzione
-                        // priva di senso lasciata visibile per coerenza
-                        // grafica).
-                        const showBypassStoreAuthChain = selectedGame?.store === 'Epic Games' && lockedToSharedLauncherForUmu;
+                        // per Ubisoft Connect+Epic finora).
+                        //
+                        // v2.0.41-dev.22 — richiesta utente, bug reale:
+                        // il vincolo store==='Epic Games' impediva del
+                        // tutto a un gioco NATIVO di un launcher (es. Dead
+                        // Space 2/EA App) di mostrare questo switch — ma
+                        // l'effetto pratico più importante di
+                        // bypassStoreAuthChain (forceFullContainerLaunch
+                        // in gameManager.ts: salta il pre-avvio anticipato
+                        // del launcher condiviso) è utile per QUALUNQUE
+                        // gioco che si trascina dietro il proprio launcher
+                        // come processo figlio, non solo per uno Epic —
+                        // anzi, per un gioco nativo è esattamente questo
+                        // il problema osservato (il nostro pre-avvio
+                        // confligge con quello del gioco stesso,
+                        // risultando in due istanze del launcher). Il
+                        // "salta legendary" resta un effetto SECONDARIO,
+                        // rilevante solo se store è davvero Epic — non
+                        // più una condizione per mostrare il tile.
+                        const showBypassStoreAuthChain = lockedToSharedLauncherForUmu;
 
                         return ([
                         { key: 'fsr',      label: 'AMD FSR',       desc: 'WINE_FULLSCREEN_FSR=1', sysKey: 'fsr'      },
@@ -8002,6 +8101,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // sotto), sysKey vuoto (non dipende da systemTools,
                         // stesso principio di sharedLauncher sopra).
                         { key: 'bypassStoreAuthChain', label: t('gameOptions:bypassStoreAuthChain'), desc: t('gameOptions:bypassStoreAuthChainDesc'), sysKey: '' },
+                        // v2.0.41-dev.24 — 9° tile, richiesta utente:
+                        // stesso trattamento semplice booleano di fsr/
+                        // gameMode/mangohud/eac/battleye — sysKey
+                        // 'gamescope' lega la disponibilità al
+                        // rilevamento reale già esistente
+                        // (compatibilityManager.ts, binaryExists),
+                        // nessun filtro condizionale necessario (a
+                        // differenza di sharedLauncher/
+                        // bypassStoreAuthChain sopra, sempre rilevante
+                        // per qualunque gioco/runner).
+                        { key: 'gamescope', label: 'Gamescope', desc: t('gameOptions:gamescopeDesc'), sysKey: 'gamescope' },
                       ] as const)
                         .filter(({ key }) => !(key === 'sharedLauncher' && isThisGameASharedLauncher))
                         .filter(({ key }) => !(key === 'bypassStoreAuthChain' && !showBypassStoreAuthChain))
@@ -8009,6 +8119,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // v1.1.104-dev.1 — mangohud non è più booleano ma
                         // un livello 0/1/2 (spento/compatta/completa).
                         const mangohudLevel = key === 'mangohud' ? (Number((localCompatProfile as any).mangohud) || 0) : 0;
+                        // v2.0.41-dev.25 — richiesta utente: stesso
+                        // identico meccanismo di mangohudLevel sopra,
+                        // esteso a 4 stati invece di 3 (spento | fullscreen
+                        // a risoluzione monitor | override 4K | finestra).
+                        const gamescopeLevel = key === 'gamescope' ? (Number((localCompatProfile as any).gamescope) || 0) : 0;
                         // v1.5.20-dev.28 — richiesta utente: quando il
                         // gioco dipende da un launcher condiviso, il tile
                         // Umu-launcher mostra lo stato REALE del launcher
@@ -8020,15 +8135,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // caricato, esteso lato server per includere
                         // anche questo campo), non un valore indovinato.
                         const inheritedUmuRun = (key === 'umuRun' && lockedToSharedLauncherForUmu)
-                          ? sharedLaunchers.find((sl: any) => sl.id === localGameConfig.requiresLauncher)?.umuRun ?? false
+                          ? sharedLaunchers.find((sl: any) => sl.id === effectiveSharedLauncherId)?.umuRun ?? false
                           : undefined;
                         const enabled   = key === 'mangohud'
                           ? mangohudLevel > 0
-                          : key === 'sharedLauncher'
-                            ? (localGameConfig.requiresLauncher ?? '') !== ''
-                            : inheritedUmuRun !== undefined
-                              ? inheritedUmuRun
-                              : ((localCompatProfile as any)[key] ?? false);
+                          : key === 'gamescope'
+                            ? gamescopeLevel > 0
+                            : key === 'sharedLauncher'
+                              ? (localGameConfig.requiresLauncher ?? '') !== ''
+                              : inheritedUmuRun !== undefined
+                                ? inheritedUmuRun
+                                : ((localCompatProfile as any)[key] ?? false);
                         // v1.5.3-dev.1 — richiesta utente: EAC/BattlEye
                         // funzionano SOLO col runner Proton, mai con wine
                         // puro (verificato: le variabili
@@ -8093,7 +8210,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         // MangoHud tramite i18next (non stringhe hardcoded).
                         const tileDesc = key === 'mangohud'
                           ? (mangohudLevel === 0 ? t('gameOptions:mangohudOff') : mangohudLevel === 1 ? t('gameOptions:mangohudCompact') : t('gameOptions:mangohudFull'))
-                          : desc;
+                          : key === 'gamescope'
+                            ? (gamescopeLevel === 0 ? t('gameOptions:gamescopeOff') : gamescopeLevel === 1 ? t('gameOptions:gamescopeFullscreen') : gamescopeLevel === 2 ? t('gameOptions:gamescope4k') : t('gameOptions:gamescopeWindowed'))
+                            : desc;
                         return (
                           <Focusable
                             key={key}
@@ -8126,9 +8245,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               if (!available) { play('back'); return; }
                               // v1.1.104-dev.1 — MangoHud cicla 0→1→2→0 ad
                               // ogni conferma (stesso meccanismo già usato
-                              // da cycleDisplayMode), le altre 4 voci
-                              // restano un semplice toggle booleano.
-                              const next = key === 'mangohud' ? ((mangohudLevel + 1) % 3) : !enabled;
+                              // da cycleDisplayMode). v2.0.41-dev.25 —
+                              // Gamescope cicla 0→1→2→3→0, stesso principio,
+                              // un passo in più. Le altre voci restano un
+                              // semplice toggle booleano.
+                              const next = key === 'mangohud'
+                                ? ((mangohudLevel + 1) % 3)
+                                : key === 'gamescope'
+                                  ? ((gamescopeLevel + 1) % 4)
+                                  : !enabled;
                               setLocalCompatProfile(prev => ({ ...prev, [key]: next }));
                               const compatRes = await fetch(`/api/games/${selectedGame.id}/compat`);
                               const current = compatRes.ok ? await compatRes.json() : {};
@@ -8190,6 +8315,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     <div className={cn(
                                       "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
                                       mangohudLevel === 0 ? "left-0.5" : mangohudLevel === 1 ? "left-[14px]" : "left-[26px]"
+                                    )} />
+                                  </div>
+                                ) : key === 'gamescope' ? (
+                                  // v2.0.41-dev.25 — stesso identico cursore
+                                  // di mangohud sopra, un passo in più (4
+                                  // posizioni invece di 3) — pillola più
+                                  // larga per fare spazio al quarto stato.
+                                  <div className={cn("w-14 h-4 rounded-full transition-all relative shrink-0", gamescopeLevel > 0 ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
+                                    <div className={cn(
+                                      "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                                      gamescopeLevel === 0 ? "left-0.5" : gamescopeLevel === 1 ? "left-[13px]" : gamescopeLevel === 2 ? "left-[25px]" : "left-[37px]"
                                     )} />
                                   </div>
                                 ) : key === 'sharedLauncher' ? (
@@ -8442,11 +8578,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             // geometrico saltava del tutto lo switch
                             // "Dipendenze Wine" sotto, atterrando
                             // direttamente sulla prima checkbox — questo
-                            // campo è sempre l'ultimo prima del widget
+                            // campo era l'ultimo prima del widget
                             // Winetricks per GOG/Epic (unico caso in cui
-                            // quel widget esiste), quindi è il punto
+                            // quel widget esiste), quindi era il punto
                             // giusto per un collegamento esplicito.
-                            neighbors={{ down: 'wine-deps-expand-toggle' }}
+                            //
+                            // v2.0.41-dev.43 — BUG UTENTE: con l'aggiunta
+                            // del campo "Detected Window (Splash)" subito
+                            // sotto (dev.40), questo collegamento saltava
+                            // ANCHE quello, andando dritto a
+                            // wine-deps-expand-toggle — stesso identico
+                            // problema del 2025, stavolta causato da un
+                            // campo nuovo inserito fra i due invece che da
+                            // uno scroll. Corretto puntando al nuovo campo
+                            // invece di scavalcarlo.
+                            neighbors={{ down: 'field-windowClass' }}
                             onEnter={() => {
                               // Nessuna tastiera virtuale: non è un campo
                               // modificabile, è l'id reale del gioco —
@@ -8473,6 +8619,65 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           </Focusable>
                         </>
                       )}
+                    </label>
+                    {/* v2.0.41-dev.40 — richiesta utente: override
+                        manuale del window_class rilevato automaticamente
+                        dalla splash di lancio (windowDetector.ts). Stesso
+                        modello di scrapeTitle sopra — valore vuoto =
+                        cancella, torna al rilevamento automatico dal
+                        prossimo lancio (stesso comportamento già seguito
+                        da tutti gli altri campi di questa sezione:
+                        `val || null`). Applicabile a qualunque gioco,
+                        indipendentemente dallo store — a differenza del
+                        campo xlaunch:// sopra, non innestato nel suo
+                        ternario Steam/altri. */}
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">{t('gameOptions:windowClassLabel')}</span>
+                      <Focusable
+                        group="game-options"
+                        id="field-windowClass"
+                        // v2.0.41-dev.43 — richiesta utente: completa la
+                        // catena di navigazione in entrambe le direzioni,
+                        // vedi commento esteso sopra field-steamAppId.
+                        // "up" punta allo stesso id sia per il ramo Steam
+                        // sia per quello xlaunch:// (entrambi usano
+                        // "field-steamAppId" come identificativo, solo
+                        // comportamento diverso) — funziona per qualunque
+                        // store senza bisogno di un ternario qui.
+                        neighbors={{ up: 'field-steamAppId', down: 'wine-deps-expand-toggle' }}
+                        onEnter={() => openKeyboardForField(
+                          'field-windowClass',
+                          t('gameOptions:windowClassLabel'),
+                          localGameConfig.windowClass ?? '',
+                          async (val) => {
+                            setLocalGameConfig(prev => ({ ...prev, windowClass: val }));
+                            await fetch(`/api/games/${selectedGame.id}/config`, {
+                              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ windowClass: val || null })
+                            });
+                            setGames(prev => prev.map(g => g.id === selectedGame.id ? { ...g, windowClass: val || undefined } : g));
+                          }
+                        )}
+                      >
+                        {(isFocused) => (
+                          <input
+                            type="text"
+                            readOnly
+                            value={localGameConfig.windowClass ?? ''}
+                            placeholder={t('gameOptions:windowClassPlaceholder')}
+                            className={cn(
+                              "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
+                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              isFocused
+                                ? "border-2 border-blue-500"
+                                : localGameConfig.windowClass
+                                  ? "border border-green-500/40"
+                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                            )}
+                          />
+                        )}
+                      </Focusable>
+                      <p className="text-[10px] opacity-40 mt-1">{t('gameOptions:windowClassHint')}</p>
                     </label>
                     {selectedGame.runner === 'DOSBox' && (
                       <label className="block">

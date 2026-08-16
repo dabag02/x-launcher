@@ -309,6 +309,14 @@ export async function launchSharedLauncher(launcherId: string): Promise<{ succes
     // CompatibilityProfile — leggiamo lì lo switch che l'utente ha già
     // impostato (e verificato funzionante) per quella card.
     umuRun: db.getCompatProfile(`${launcherId}-launcher`)?.umuRun ?? false,
+    // v2.0.41-dev.18 — richiesta utente: la finestra del launcher
+    // condiviso rubava il focus al gioco appena avviato quando viene
+    // lanciato QUI come dipendenza (mai quando l'utente lo apre a mano
+    // dalla propria card — questa funzione non è mai chiamata in quel
+    // caso). Argomenti extra SOLO se dichiarati/verificati nel registro
+    // per questo launcher specifico (thirdPartyLaunchers.ts) — vuoto per
+    // ogni launcher non ancora verificato, nessun default indovinato.
+    args: def.silentLaunchArgs,
   });
   writeLog('launch', `[SharedLauncher] Avvio ${def.displayName}: ${result.message ?? '(nessun messaggio)'}`);
   // v1.5.20-dev.30 — richiesta utente: invece di indovinare un tempo di

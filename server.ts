@@ -26,6 +26,7 @@ import {
 import fs from 'fs';
 import os from 'os';
 import { spawn, execSync, execFileSync } from 'child_process';
+import { subscribeLaunchPhase, getLastLaunchPhase } from './src/backend/launchPhaseTracker';
 
 // Stesso pattern già usato in altri moduli backend (downloadManager.ts,
 // runners/implementations.ts, plugins/gogPlugin.ts, plugins/epicPlugin.ts)
@@ -34,6 +35,19 @@ import { spawn, execSync, execFileSync } from 'child_process';
 function binaryExists(bin: string): boolean {
   try { execSync(`which ${bin}`, { stdio: 'ignore' }); return true; }
   catch { return false; }
+}
+
+// v2.0.41-dev.35 — richiesta implicita: la rotta /splash interpola
+// direttamente il titolo del gioco in HTML — senza escape, un titolo
+// contenente caratteri come < o & romperebbe la pagina o, nel peggiore
+// dei casi, aprirebbe a un'iniezione HTML da un titolo malformato.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 async function startServer() {
@@ -642,6 +656,148 @@ async function startServer() {
     res.json({ runners });
   });
 
+  // v2.0.41-dev.32 — richiesta utente, roadmap usabilità punto 2/3
+  // (splash di lancio). Diverso dai due stream sopra: qui NON siamo noi
+  // a guidare l'operazione (il lancio parte dal normale POST
+  // /api/games/:id/launch, invariato) — questo endpoint si limita ad
+  // "agganciarsi" a un lancio già in corso o appena avviato, per questo
+  // motivo, non un semplice callback come per install/uninstall.
+  // Invia SUBITO l'ultima fase nota (getLastLaunchPhase) prima di
+  // restare in ascolto — copre il caso in cui la splash apra questa
+  // connessione con un po' di ritardo rispetto all'inizio del lancio
+  // vero, così non resta in attesa di un evento che potrebbe già essere
+  // passato.
+  app.get("/api/games/:id/launch-stream", (req, res) => {
+    const gameId = req.params.id;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const send = (event: ReturnType<typeof getLastLaunchPhase>) => {
+      if (!event) return;
+      try { res.write(`event: phase\ndata: ${JSON.stringify(event)}\n\n`); } catch {}
+    };
+
+    send(getLastLaunchPhase(gameId));
+    const unsubscribe = subscribeLaunchPhase(gameId, send);
+
+    req.on('close', () => { unsubscribe(); });
+  });
+
+  // v2.0.41-dev.35 — richiesta utente, roadmap usabilità punto 2/3: la
+  // pagina della splash stessa — leggera, non la Dashboard intera
+  // caricata due volte. Puramente un client di visualizzazione: ascolta
+  // /api/games/:id/launch-stream (SSE, già consegnato) e mostra la fase
+  // corrente sostituendola, mai accumulata, più una barra di progresso
+  // globale. Nessuna logica di chiusura qui — la finestra viene aperta
+  // e chiusa dal backend stesso (splashOrchestrator.ts/splashWindow.ts),
+  // mai da window.close() lato pagina (permessi del browser inaffidabili
+  // per una finestra non aperta via window.open()).
+  app.get("/splash", (req, res) => {
+    const gameId = (req.query.gameId as string) ?? '';
+    const game = gameId ? db.getGameById(gameId) : undefined;
+    const lang = readAppConfig().language;
+    const isEn = lang === 'en';
+
+    const T = {
+      launchingFrom: isEn ? 'Starting from' : 'Avvio da',
+      verifyingEnv: isEn ? 'Checking environment' : 'Verifica ambiente',
+      startingUp: isEn ? 'Starting up…' : 'Avvio in corso…',
+      failed: isEn ? 'Launch failed' : 'Avvio fallito',
+      timeout: isEn ? 'The game took too long to respond' : 'Il gioco non ha risposto in tempo',
+      returning: isEn ? 'Returning to the Dashboard…' : 'Ritorno alla Dashboard…',
+    };
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+<meta charset="utf-8">
+<title>X-Launcher</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0b0c0f; }
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #f3f4f6;
+  }
+  .wordmark {
+    font-size: 3.2vw; font-weight: 900; letter-spacing: 0.15em; text-transform: uppercase;
+    font-style: italic; color: #fff; margin-bottom: 3vh;
+  }
+  .wordmark span { color: #3b82f6; }
+  .game-title { font-size: 1.4vw; color: #9ca3af; margin-bottom: 6vh; text-align: center; max-width: 70vw; }
+  .phase-text {
+    font-size: 1.6vw; font-weight: 600; min-height: 2.4em; text-align: center;
+    transition: opacity 0.3s ease;
+  }
+  .phase-detail { font-size: 1vw; color: #9ca3af; margin-top: 0.6vh; min-height: 1.5em; }
+  .progress-track {
+    width: 32vw; height: 0.5vw; border-radius: 999px; background: rgba(255,255,255,0.1);
+    margin-top: 4vh; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; border-radius: 999px; background: #3b82f6; width: 0%;
+    transition: width 0.5s ease;
+  }
+  .state-failed .progress-fill, .state-timeout .progress-fill { background: #ef4444; }
+  .state-failed .phase-text, .state-timeout .phase-text { color: #f87171; }
+</style>
+</head>
+<body class="">
+  <div class="wordmark">X-<span>Launcher</span></div>
+  ${game ? `<div class="game-title">${escapeHtml(game.title)}</div>` : ''}
+  <div class="phase-text" id="phase-text">${escapeHtml(T.startingUp)}</div>
+  <div class="phase-detail" id="phase-detail"></div>
+  <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+
+<script>
+(function() {
+  var gameId = ${JSON.stringify(gameId)};
+  var T = ${JSON.stringify(T)};
+  var phaseTextEl = document.getElementById('phase-text');
+  var phaseDetailEl = document.getElementById('phase-detail');
+  var progressEl = document.getElementById('progress-fill');
+  var bodyEl = document.body;
+
+  function setProgress(pct) { progressEl.style.width = Math.max(0, Math.min(100, pct)) + '%'; }
+
+  function render(event) {
+    if (event.phase === 'verifying-env') {
+      phaseTextEl.textContent = T.verifyingEnv;
+      phaseDetailEl.textContent = event.detail ? (event.detail + (event.index && event.total ? ' (' + event.index + '/' + event.total + ')' : '')) : '';
+      var pct = (event.index && event.total) ? (event.index / event.total) * 70 : 10;
+      setProgress(pct);
+    } else if (event.phase === 'launching') {
+      phaseTextEl.textContent = event.detail ? (T.launchingFrom + ' ' + event.detail) : T.startingUp;
+      phaseDetailEl.textContent = '';
+      setProgress(90);
+    } else if (event.phase === 'done') {
+      setProgress(100);
+    } else if (event.phase === 'failed') {
+      bodyEl.className = 'state-failed';
+      phaseTextEl.textContent = T.failed;
+      phaseDetailEl.textContent = T.returning;
+    } else if (event.phase === 'timeout') {
+      bodyEl.className = 'state-timeout';
+      phaseTextEl.textContent = T.timeout;
+      phaseDetailEl.textContent = T.returning;
+    }
+  }
+
+  if (gameId) {
+    var es = new EventSource('/api/games/' + encodeURIComponent(gameId) + '/launch-stream');
+    es.addEventListener('phase', function(e) {
+      try { render(JSON.parse(e.data)); } catch (err) {}
+    });
+  }
+})();
+</script>
+</body>
+</html>`);
+  });
+
   // Step 2 — Apri Steam Big Picture (switcha fuori dalla dashboard)
   app.post("/api/steam/bigpicture", (req, res) => {
     const { openSteamBigPicture } = require('./src/backend/runners/implementations');
@@ -671,6 +827,20 @@ async function startServer() {
       return {
         id: def.id,
         displayName: def.displayName,
+        // v2.0.41-dev.22 — richiesta utente, bug reale confermato su
+        // hardware reale (Dead Space 2/EA App: la card lanciava EA App
+        // due volte, la prima bloccava tutto il resto). Causa: il
+        // frontend non aveva mai ricevuto l'equivalente di
+        // effectiveSharedLauncherId (gameManager.ts, dev.19) — l'unico
+        // modo per l'overlay di sapere "questo gioco è nativo di QUESTO
+        // launcher condiviso" (store === storeId, nessun requiresLauncher
+        // esplicito) era mancante, quindi lo switch "Bypass store" non
+        // poteva mai comparire per un gioco nativo, impedendo all'utente
+        // di attivare esattamente l'opzione che evita il pre-avvio
+        // anticipato del launcher condiviso (che confligge con il gioco
+        // stesso quando è LUI a trascinarsi dietro il launcher, stesso
+        // meccanismo già osservato per Assassin's Creed Syndicate).
+        storeId: def.storeId,
         verified: def.verified,
         bootstrapped: !!state?.bootstrappedAt,
         runner: state?.runner ?? null,
@@ -934,6 +1104,46 @@ async function startServer() {
     }
     notificationEngine.updateStatus(req.params.id, status as any);
     res.json({ success: true });
+
+    // v2.0.41-dev.15 — richiesta utente: capitalizzare l'esperienza reale
+    // accumulata installando/avviando i launcher condivisi (Ubisoft
+    // Connect, EA App) per aiutare proattivamente un futuro utente nelle
+    // stesse difficoltà. Quando l'utente segnala "Non ha funzionato"
+    // (status 'failed') su una validation-prompt (source 'validation',
+    // vedi notificationEngine.ts) per un gioco che È un launcher condiviso
+    // o che ne RICHIEDE uno con troubleshootingTips noti
+    // (thirdPartyLaunchers.ts), proponi quei consigli invece di lasciare
+    // l'utente a sé stesso. Fire-and-forget dopo la risposta, stesso stile
+    // già usato per steam-bigpicture-closed sopra — mai bloccante.
+    if (status === 'failed') {
+      const notif = notificationEngine.getRecent(50).find(n => n.id === req.params.id);
+      if (notif?.source === 'validation' && notif.game_id) {
+        const game = db.getGameById(notif.game_id);
+        if (game) {
+          const def = THIRD_PARTY_LAUNCHERS.find(l => l.storeId === game.store)
+            ?? (game.requiresLauncher ? getThirdPartyLauncherDefinition(game.requiresLauncher) : undefined);
+          if (def?.troubleshootingTips?.length) {
+            // Un solo giro di consigli per gioco — non ripetuto a ogni
+            // "Non ha funzionato" successivo, stesso principio di dedup
+            // già usato per la notifica di collegamento libreria nativa
+            // (vedi source 'shared-launcher-scan' in ubisoftConnectPlugin.ts).
+            const alreadyShown = notificationEngine.getRecent(200)
+              .some(n => n.source === 'launcher-tips' && n.game_id === game.id);
+            if (!alreadyShown) {
+              const lang = readAppConfig().language;
+              const tips = def.troubleshootingTips.map(t => (lang === 'en' && t.textEn) ? t.textEn : t.text);
+              notificationEngine.emit({
+                type: 'launcher-troubleshooting-tips',
+                launcherName: def.displayName,
+                gameId: game.id,
+                gameTitle: game.title,
+                tips,
+              });
+            }
+          }
+        }
+      }
+    }
   });
 
   // GET /api/version — versione/milestone da metadata.json.

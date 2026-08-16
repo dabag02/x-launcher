@@ -1,6 +1,9 @@
 import { Game, Store, LogEntry, StoreType, DownloadTask, CompatibilityProfile } from '../types';
 import { readFileSync } from 'fs';
-import { execFileSync, spawn } from 'child_process';
+import { execFileSync, execSync, spawn } from 'child_process';
+import { emitLaunchPhase } from './launchPhaseTracker';
+import { captureWindowSnapshot } from './windowDetector';
+import { openSplashForLaunch, raceSplashClose } from './splashOrchestrator';
 import path from 'path';
 import { MOCK_LOGS } from '../mockData';
 import { StorePlugin } from './plugins/base';
@@ -12,7 +15,7 @@ import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
 import { UbisoftConnectPlugin } from './plugins/ubisoftConnectPlugin';
 import { EAAppPlugin } from './plugins/eaAppPlugin';
-import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath, waitForContainerReadyMarker } from './sharedLauncherManager';
+import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath, waitForContainerReadyMarker, canRemoveSharedPrefix, SHARED_LAUNCHERS_DIR } from './sharedLauncherManager';
 import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
@@ -147,6 +150,82 @@ class GameManager {
    * è responsabilità esclusiva di startGameExitPolling, fatto atomicamente
    * insieme all'elaborazione della transizione, non prima.
    */
+  // v2.0.41-dev.25 — richiesta utente, bug reale confermato su hardware
+  // reale (LEGO Indiana Jones + Gamescope): un `pgrep -f <hint>` da solo
+  // trova ANCHE "gamescopereaper", il processo interno di Gamescope che
+  // sorveglia i propri figli — che continua a mostrare la riga di
+  // comando ORIGINALE (compreso il nome dell'eseguibile del gioco) come
+  // proprio argomento anche dopo che il vero processo di gioco è
+  // terminato (osservato dall'utente: gioco chiuso, ma
+  // "gamescopereaper -- .../LEGOIndy.exe" restava comunque in `ps`,
+  // Dashboard mai tornata a schermo intero). Un match che proviene SOLO
+  // da gamescopereaper non conta come "il gioco è ancora aperto" — si
+  // verifica il nome reale (comm) di ogni PID trovato, non ci si ferma
+  // al solo esito di pgrep.
+  // v2.0.41-dev.28 — richiesta utente, bug reale confermato su hardware
+  // reale (LEGO Indiana Jones + Gamescope, dopo che il gioco funzionava
+  // correttamente): dopo la chiusura del gioco resta attivo un processo
+  // Gamescope che non riporta mai la Dashboard in primo piano. Causa: il
+  // filtro qui sotto escludeva solo `gamescopereaper` (dev.25) — ma
+  // `gamescope` STESSO (il compositore vero e proprio, non solo il suo
+  // processo di sorveglianza interno) ha la propria riga di comando che
+  // contiene anch'essa il nome dell'eseguibile del gioco (è lui che lo
+  // invoca: `gamescope ... -- proton run LEGOIndy.exe`) — e può restare
+  // vivo come guscio vuoto anche dopo che il gioco vero è terminato,
+  // senza chiudersi da solo. `comm !== 'gamescopereaper'` da solo non
+  // bastava a escluderlo. Esteso a entrambi i nomi processo. In più: se
+  // gli UNICI match trovati sono processi della famiglia Gamescope (non
+  // il gioco vero), li termina esplicitamente qui — altrimenti anche
+  // correggendo solo il tracciamento interno, la SUA finestra (spesso a
+  // schermo intero) resterebbe comunque visibile sopra la Dashboard
+  // ripristinata, un problema visivo reale, non solo di bookkeeping.
+  private pgrepGameStillRunning(hint: string): boolean {
+    let pids: string[];
+    try {
+      pids = execSync(`pgrep -f -- "${hint}"`, { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n').filter(Boolean);
+    } catch {
+      return false; // pgrep non trova nulla — nessun processo, reale o Gamescope
+    }
+    const gamescopeFamilyPids: string[] = [];
+    for (const pid of pids) {
+      try {
+        const comm = execSync(`ps -o comm= -p ${pid}`, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        // v2.0.41-dev.30 — BUG UTENTE, causa reale trovata con un dato
+        // concreto (ps -eo pid,ppid,stat,comm sul sistema dell'utente):
+        // il confronto ESATTO `comm === 'gamescope'` non corrispondeva
+        // mai — il nome di processo reale sul suo sistema è
+        // `gamescope-wl` (backend Wayland), non `gamescope` nudo. La
+        // funzione incontrava `gamescope-wl`, non lo riconosceva come
+        // famiglia Gamescope, e restituiva SUBITO "un processo reale è
+        // ancora attivo" (riga sotto) — senza mai arrivare a considerare
+        // `gamescopereaper`, che restava quindi sempre fuori dal ciclo
+        // di pulizia. Non era un problema del segnale inviato (dev.29,
+        // SIGKILL — comunque corretto da tenere, non fa male): il
+        // processo semplicemente non veniva mai raggiunto. `startsWith`
+        // invece di un confronto esatto — resiste anche a varianti
+        // future del nome (es. un ipotetico backend X11 "gamescope-x11"),
+        // non solo al caso Wayland verificato qui.
+        if (comm.startsWith('gamescope')) {
+          gamescopeFamilyPids.push(pid);
+          continue;
+        }
+        if (comm) return true; // un processo reale, non della famiglia Gamescope
+      } catch {
+        // il processo è sparito fra pgrep e ps (race normale) — ignora
+        // e continua a controllare gli altri PID trovati.
+      }
+    }
+    // Solo processi Gamescope trovati (o nessuno) — il gioco vero è
+    // finito. Ripulisce gli eventuali resti invece di lasciarli appesi.
+    // SIGKILL (dev.29): non può essere ignorato, sicuro qui — sono solo
+    // resti di un wrapper (mai il processo del gioco vero, già escluso
+    // sopra), nessun rischio di dati non salvati.
+    for (const pid of gamescopeFamilyPids) {
+      try { process.kill(Number(pid), 'SIGKILL'); } catch { /* già terminato, ignora */ }
+    }
+    return false;
+  }
+
   isLastLaunchedGameRunning(): { running: boolean; gameId?: string; gameTitle?: string } {
     // v2.0.41-dev.7 — vedi bigPictureActive sopra: controllato PRIMA di
     // lastLaunchedGame, indipendente da esso — i due stati non si
@@ -175,14 +254,13 @@ class GameManager {
     // lento di un kill(pid,0) ma sopravvive a qualunque processo
     // intermedio (legendary/proton) che esca prima del gioco vero.
     if (this.lastLaunchedGame.processNameHint) {
-      try {
-        execFileSync('pgrep', ['-f', this.lastLaunchedGame.processNameHint], { stdio: 'pipe' });
+      if (this.pgrepGameStillRunning(this.lastLaunchedGame.processNameHint)) {
         // Trovato — segna che l'abbiamo visto almeno una volta, così un
         // futuro mancato match (chiusura reale) non viene più confuso
         // con "non ancora partito".
         this.lastLaunchedGame.processNameSeenAtLeastOnce = true;
         return { running: true, gameId: this.lastLaunchedGame.gameId, gameTitle: this.lastLaunchedGame.gameTitle };
-      } catch {
+      } else {
         // v1.1.32 — pgrep non trova corrispondenze: due letture
         // possibili, non distinguibili dal solo risultato del comando.
         // "Il gioco non è MAI partito" (vera assenza, es. dipendenza
@@ -355,6 +433,14 @@ class GameManager {
         const game = db.getGameById(before.gameId);
         if (!game) return;
 
+        // v2.0.41-dev.19 — stesso identico principio di
+        // effectiveSharedLauncherId in launchGame() qui sopra (vedi quel
+        // commento esteso per la causa completa) — necessario anche qui,
+        // scope separato (questo blocco gira nel poll periodico, non
+        // dentro launchGame()).
+        const effectiveSharedLauncherId = game.requiresLauncher
+          ?? getThirdPartyLauncherByStoreId(game.store)?.id;
+
         const elapsedMs = Date.now() - before.launchedAt;
 
         // Step 19d — bug reale trovato su hardware utente: Ubisoft
@@ -377,14 +463,7 @@ class GameManager {
           : null;
         let realProcessStillRunning = false;
         if (installDirName) {
-          try {
-            const { execSync } = require('child_process');
-            const match = execSync(`pgrep -af -- "${installDirName}" || true`, { encoding: 'utf-8' }).trim();
-            realProcessStillRunning = !!match;
-          } catch {
-            // ps/pgrep non disponibile o altro errore — non blocchiamo il
-            // resto della logica, ripieghiamo sul comportamento precedente.
-          }
+          realProcessStillRunning = this.pgrepGameStillRunning(installDirName);
         }
 
         // v1.5.20-dev.29 — BUG REALE segnalato dall'utente: un gioco con
@@ -400,7 +479,7 @@ class GameManager {
         // arriverebbe già fuori tempo massimo, scambiato per una
         // chiusura genuina invece che per un avvio riuscito. Soglia
         // estesa SOLO per questa categoria, non per ogni gioco.
-        const quickExitThresholdMs = game.requiresLauncher
+        const quickExitThresholdMs = effectiveSharedLauncherId
           ? GameManager.QUICK_EXIT_THRESHOLD_MS * 3
           : GameManager.QUICK_EXIT_THRESHOLD_MS;
 
@@ -491,14 +570,14 @@ class GameManager {
         // noi. Filosofia della Dashboard: mai un'automazione silenziosa
         // su una scelta che ha un impatto reale (RAM/CPU occupate vs.
         // sessione pronta per il prossimo gioco che ne dipende).
-        if (game.requiresLauncher && isSharedLauncherRunning(game.requiresLauncher)) {
-          const launcherDef = getThirdPartyLauncherDefinition(game.requiresLauncher);
+        if (effectiveSharedLauncherId && isSharedLauncherRunning(effectiveSharedLauncherId)) {
+          const launcherDef = getThirdPartyLauncherDefinition(effectiveSharedLauncherId);
           notificationEngine.emit({
             type: 'shared-launcher-idle',
             gameId: before.gameId,
             gameTitle: before.gameTitle,
-            launcherId: game.requiresLauncher,
-            launcherName: launcherDef?.displayName ?? game.requiresLauncher,
+            launcherId: effectiveSharedLauncherId,
+            launcherName: launcherDef?.displayName ?? effectiveSharedLauncherId,
           });
         }
 
@@ -1213,109 +1292,52 @@ class GameManager {
       return { success: false, message: `Plugin "${storePlugin.name}" disabilitato` };
     }
 
-    // v1.5.20-dev.14 — richiesta utente: requiresLauncher non veniva mai
-    // letto al momento del LANCIO (solo all'installazione, per condividere
-    // il prefix) — un buco reale trovato discutendo il caso Watch Dogs 2:
-    // molti giochi Ubisoft/EA verificano che il proprio launcher sia in
-    // esecuzione per DRM/funzioni online, ma nulla lo avviava mai in
-    // automatico. Solo se non già in esecuzione (isSharedLauncherRunning,
-    // stesso pattern pgrep -f già usato altrove in questo file).
-    //
-    // v1.5.20-dev.35/39 — RIPRISTINATO dopo essere stato ritirato per
-    // errore in dev.36. La causa reale è stata confermata con una
-    // traccia completa dell'eccezione (WINEDEBUG=+seh, vedi
-    // sharedLauncherManager.ts): Assassin's Creed Syndicate esegue un
-    // controllo anti-manomissione (NtQueryInformationProcess sul
-    // proprio processo, poi un EXCEPTION_SINGLE_STEP deliberato dentro
-    // ACS.exe stesso) che fallisce SENZA il container Steam Linux
-    // Runtime — non un'ipotesi, la traccia mostra l'eccezione partire
-    // da dentro l'eseguibile del gioco stesso. Per questa categoria di
-    // gioco (`bypassStoreAuthChain` attivo) il container pieno è
-    // obbligatorio, e il gioco stesso si tira dietro il launcher
-    // condiviso come proprio processo figlio (verificato a mano
-    // dall'utente da terminale) — il nostro avvio anticipato andrebbe
-    // in competizione con quella sessione, non in aiuto: due container
-    // Steam Linux Runtime separati sulla stessa prefix non convivono
-    // (verificato in una sessione precedente). Saltato SOLO per questa
-    // categoria di gioco — chiunque altro con requiresLauncher impostato
-    // continua a beneficiarne normalmente.
-    const forceFullContainerLaunch = !!game.requiresLauncher && !!db.getCompatProfile(id)?.bypassStoreAuthChain;
-    if (game.requiresLauncher && !forceFullContainerLaunch && !isSharedLauncherRunning(game.requiresLauncher)) {
-      this.addLog(`[LAUNCH] Avvio launcher condiviso "${game.requiresLauncher}" insieme a ${game.title}...`, 'system');
-      const launcherResult = await launchSharedLauncher(game.requiresLauncher).catch(err => {
-        this.addLog(`[LAUNCH] Avvio launcher condiviso fallito (non blocca ${game.title}): ${err}`, 'warning');
-        return null;
-      });
-      // v1.5.20-dev.29 — BUG REALE segnalato dall'utente con un avvio a
-      // freddo reale: un'attesa FISSA di 8s (dev.17) non basta al primo
-      // avvio in assoluto di un launcher condiviso — il container
-      // Steam Linux Runtime, alla prima esecuzione, deve ancora generare
-      // le locale e completare l'inizializzazione (visto nei log di
-      // sessioni precedenti: "pv-locale-gen: Generating locale..."), può
-      // richiedere più di 8s. Conseguenza doppia osservata dal vivo: (1)
-      // il gioco resta in attesa di Ubisoft Connect più a lungo della
-      // finestra di tolleranza "processo tracciato chiuso ma reale
-      // ancora attivo" (QUICK_EXIT_THRESHOLD_MS, la STESSA soglia usata
-      // lì) — scaduta quella tolleranza, il vero processo del gioco che
-      // subentra viene scambiato per una chiusura genuina, la Dashboard
-      // torna a schermo intero prima del tempo; (2) non trovando
-      // Ubisoft Connect ancora pronto, il gioco ne avvia una copia
-      // PROPRIA per conto suo (comportamento già scoperto testando lo
-      // script diagnostico da solo, mesi fa in questa stessa saga) — ma
-      // quella copia bypassa `umu-run` (il gioco non sa nulla del
-      // container), da cui la finestra nera osservata.
-      //
-      // Fix: invece di un'attesa fissa (indovinata), un ciclo che
-      // ricontrolla isSharedLauncherRunning() ogni secondo — procede
-      // SUBITO se il launcher risulta pronto prima (la maggioranza dei
-      // lanci successivi al primo, container già caldo), aspetta più a
-      // lungo SOLO quando serve davvero (fino a un tetto massimo, oltre
-      // il quale si procede comunque — nessuna API per sapere "è
-      // davvero pronto" con certezza assoluta, questo resta un margine
-      // ragionevole, non una garanzia).
-      if (launcherResult?.success) {
-        // v1.5.20-dev.30 — richiesta utente: prima del poll a tempo
-        // (dev.29, mantenuto sotto come rete di sicurezza finale), un
-        // segnale REALE legato specificamente al processo che ABBIAMO
-        // avviato — "il container Steam Linux Runtime della NOSTRA
-        // invocazione ha finito la preparazione" (marcatore pv-adverb
-        // nel suo stesso log, vedi waitForContainerReadyMarker). Non
-        // sostituisce il poll successivo, lo precede: anche se il gioco
-        // dovesse comunque avviare una propria copia del launcher non
-        // trovandolo ancora del tutto pronto (caso limite accettato,
-        // recuperabile chiudendo il duplicato), quella NOSTRA istanza
-        // avrà comunque il rendering corretto — il problema visibile
-        // (finestra nera) dipende dal container mancante, non da quale
-        // copia "vince".
-        if (launcherResult.logPath) {
-          this.addLog(`[LAUNCH] Attesa che il container del launcher condiviso completi la preparazione...`, 'system');
-          const containerReady = await waitForContainerReadyMarker(launcherResult.logPath);
-          this.addLog(containerReady
-            ? `[LAUNCH] Container del launcher condiviso pronto.`
-            : `[LAUNCH] Marcatore di container pronto non rilevato entro il tempo massimo — procedo comunque (rete di sicurezza sotto).`,
-            containerReady ? 'system' : 'warning');
-        }
+    // v2.0.41-dev.19 — richiesta utente, bug reale confermato su hardware
+    // reale (Dead Space 2/EA App): un gioco NATIVO di un launcher
+    // condiviso (nessun match cross-store, quindi requiresLauncher non è
+    // mai impostato per design — stesso identico principio già in uso
+    // per Ubisoft Connect, vedi ubisoftConnectPlugin.ts/eaAppPlugin.ts)
+    // restava fuori da OGNI meccanismo di questa funzione gestito su
+    // game.requiresLauncher: niente eredità runner/prefix dalla card del
+    // launcher (rischio concreto — e osservato — di due build Proton
+    // diverse in competizione sullo stesso wineserver/prefix condivisa,
+    // esattamente il mismatch già diagnosticato altrove in questa stessa
+    // funzione per i giochi cross-store), niente warm-start anticipato
+    // del launcher (avviato invece dal gioco stesso, senza i nostri
+    // argomenti come silentLaunchArgs), niente soglia di tolleranza
+    // estesa alla chiusura (causa diretta della validation-prompt
+    // prematura segnalata: il gioco viene giudicato "chiuso" con la
+    // soglia breve, pensata per un gioco standalone, non per uno che
+    // deve ancora aspettare l'intera inizializzazione del launcher).
+    // "Richiede questo launcher" (comprato altrove) e "vive dentro il
+    // prefix di questo launcher" (comprato/installato lì direttamente)
+    // sono lo stesso identico bisogno pratico per tutto quello che segue
+    // in questa funzione — unificati in un solo valore, usato ovunque
+    // sotto al posto della lettura diretta di game.requiresLauncher.
+    const effectiveSharedLauncherId = game.requiresLauncher
+      ?? getThirdPartyLauncherByStoreId(game.store)?.id;
 
-        const maxWaitMs = 25_000;
-        const pollIntervalMs = 1_000;
-        const waitStart = Date.now();
-        let becameReady = false;
-        this.addLog(`[LAUNCH] Attesa che il launcher condiviso "${game.requiresLauncher}" completi l'avvio (fino a ${maxWaitMs / 1000}s)...`, 'system');
-        while (Date.now() - waitStart < maxWaitMs) {
-          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-          if (isSharedLauncherRunning(game.requiresLauncher)) {
-            becameReady = true;
-            break;
-          }
-        }
-        const waitedMs = Date.now() - waitStart;
-        if (becameReady) {
-          this.addLog(`[LAUNCH] Launcher condiviso pronto dopo ${Math.round(waitedMs / 1000)}s.`, 'system');
-        } else {
-          this.addLog(`[LAUNCH] Launcher condiviso non risulta ancora rilevabile dopo ${Math.round(waitedMs / 1000)}s — procedo comunque col lancio di ${game.title}.`, 'warning');
-        }
-      }
-    }
+    // v2.0.41-dev.23 — RIMOSSO SU RICHIESTA ESPLICITA DELL'UTENTE: qui
+    // viveva il pre-avvio anticipato del launcher condiviso (dev.14,
+    // poi "intelligente" in dev.29/30) — causa diretta del problema
+    // osservato con EA App/Dead Space 2: una PRIMA istanza di EA App
+    // (la nostra, con -silentOs) blocca tutto il resto, seguita da una
+    // SECONDA istanza avviata dal gioco stesso quando non trova la
+    // nostra pronta in tempo. Lo stesso identico pattern era già
+    // documentato qui in un commento precedente per Watch Dogs 2 mesi
+    // fa ("il gioco ne avvia una copia PROPRIA per conto suo" se non
+    // trova la nostra pronta) — la soluzione adottata allora (farci
+    // vincere la corsa con un'attesa più lunga) curava il sintomo, non
+    // la causa. Il gioco è già perfettamente capace di avviare il
+    // proprio launcher da solo quando serve (verificato nel log reale:
+    // Core/Activation.dll carica correttamente prima ancora che questo
+    // blocco esistesse) — la nostra unica vera responsabilità è che
+    // runner/prefix/Umu-launcher risultino già corretti quando lo fa
+    // (garantito sotto tramite effectiveSharedLauncherId,
+    // indipendentemente da questo blocco). Mai più un avvio nostro
+    // anticipato, per nessun gioco con launcher condiviso — nativo o
+    // comprato altrove, nessuna differenza: lascia sempre che sia il
+    // gioco stesso a occuparsene, esattamente come chiesto.
 
     // Carica il profilo compat dal DB se esiste
     const profile = db.getCompatProfile(id);
@@ -1350,17 +1372,17 @@ class GameManager {
     // invece che del launcher — risultato: nessun container nemmeno nel
     // percorso "pieno" appositamente forzato per ottenerlo.
     let effectiveUmuRun = profile?.umuRun ?? false;
-    if (game.requiresLauncher) {
-      const launcherGame = db.getGameById(`${game.requiresLauncher}-launcher`);
+    if (effectiveSharedLauncherId) {
+      const launcherGame = db.getGameById(`${effectiveSharedLauncherId}-launcher`);
       if (launcherGame?.runner && launcherGame.runner !== game.runner) {
         this.addLog(
-          `[LAUNCH] ${game.title}: runner "${game.runner}" ignorato, ereditato "${launcherGame.runner}" dal launcher condiviso "${game.requiresLauncher}" — una prefix condivisa richiede la stessa build Proton per ogni gioco che la usa.`,
+          `[LAUNCH] ${game.title}: runner "${game.runner}" ignorato, ereditato "${launcherGame.runner}" dal launcher condiviso "${effectiveSharedLauncherId}" — una prefix condivisa richiede la stessa build Proton per ogni gioco che la usa.`,
           'system'
         );
       }
       effectiveRunnerId   = launcherGame?.runner ?? game.runner;
-      effectivePrefixPath = getSharedPrefixBasePath(game.requiresLauncher);
-      effectiveUmuRun     = db.getCompatProfile(`${game.requiresLauncher}-launcher`)?.umuRun ?? false;
+      effectivePrefixPath = getSharedPrefixBasePath(effectiveSharedLauncherId);
+      effectiveUmuRun     = db.getCompatProfile(`${effectiveSharedLauncherId}-launcher`)?.umuRun ?? false;
     }
 
     const runner = this.allRunners.get(effectiveRunnerId);
@@ -1419,8 +1441,22 @@ class GameManager {
     // della prefix condivisa resta comunque coperta: avviene già,
     // sequenziale e sicura, quando è IL LAUNCHER STESSO a essere
     // lanciato dalla sua card — un gioco dipendente non deve rifarla.
-    if (game.requiresLauncher) {
-      this.addLog(`[LAUNCH] ${game.title}: riconciliazione verb saltata — usa il launcher condiviso "${game.requiresLauncher}", la cui prefix viene riconciliata quando è lui stesso a essere lanciato, mai da un gioco dipendente (evita di disturbare una sessione già attiva).`, 'system');
+    // v2.0.41-dev.36/39 — BUG UTENTE: la splash appariva solo DOPO la
+    // verifica dei verb (che può richiedere diversi secondi), non
+    // subito al lancio — l'apertura della finestra era finora agganciata
+    // allo spawn effettivo, che avviene DOPO reconcileWinetricksVerbs
+    // sotto. Apertura spostata qui, PRIMA. `await` (dev.39): la funzione
+    // ora attende davvero che la finestra sia comparsa prima di
+    // restituire l'handle — altrimenti lo snapshot "prima" preso subito
+    // sotto rischia di non includerla ancora, facendola sembrare "nuova"
+    // al ciclo di rilevamento della finestra del gioco (bug reale
+    // confermato: window_class di Bioshock 2 era finito per essere
+    // quello della splash stessa).
+    const splashHandle = await openSplashForLaunch(id);
+    const windowSnapshotBefore = captureWindowSnapshot();
+
+    if (effectiveSharedLauncherId) {
+      this.addLog(`[LAUNCH] ${game.title}: riconciliazione verb saltata — usa il launcher condiviso "${effectiveSharedLauncherId}", la cui prefix viene riconciliata quando è lui stesso a essere lanciato, mai da un gioco dipendente (evita di disturbare una sessione già attiva).`, 'system');
     } else {
       await this.reconcileWinetricksVerbs(id, game, profile, effectiveRunnerId, effectivePrefixPath).catch(err => {
         this.addLog(`[LAUNCH] Riconciliazione verb fallita (si procede comunque col lancio): ${err}`, 'warning');
@@ -1457,6 +1493,7 @@ class GameManager {
         eac:      profile?.eac      ?? false,
         battleye: profile?.battleye ?? false,
         umuRun:   effectiveUmuRun,
+        gamescope: profile?.gamescope ?? 0,
       };
       // v1.5.20-dev.21 — richiesta utente, disegno esplicitamente discusso
       // e verificato a mano prima di scrivere codice: quando il gioco
@@ -1508,13 +1545,37 @@ class GameManager {
       // disattiva qui il percorso leggero per questa categoria di
       // gioco — resta invariato, e resta lo stesso identico meccanismo
       // di Watch Dogs 2, per ogni altro gioco con requiresLauncher.
-      const useSharedPrefixLightLaunch =
-        !!game.requiresLauncher &&
-        !!game.executablePath &&
-        !runnerConfig.eac &&
-        !runnerConfig.battleye &&
-        !forceFullContainerLaunch &&
-        isSharedLauncherRunning(game.requiresLauncher);
+      //
+      // v2.0.41-dev.21 — DISATTIVATO SU RICHIESTA ESPLICITA DELL'UTENTE,
+      // bug reale confermato su hardware reale (Dead Space 2/EA App):
+      // launchGameInSharedPrefix invoca `wine` NUDO, bypassando
+      // interamente Proton/umu-run — quindi ignora completamente lo
+      // switch "Umu-launcher" della card (mai passato, mai rispettato),
+      // a differenza del percorso standard sotto (runner.launch(),
+      // che legge davvero runnerConfig.umuRun). Risultato osservato:
+      // ambiente di esecuzione diverso da quello che il gioco si
+      // aspetta (DLL come ssleay32.dll normalmente disponibili solo
+      // dentro il container Steam Linux Runtime che umu-run fornisce —
+      // verificato dall'utente lanciando la STESSA identica riga di
+      // comando a mano con lo script di debug in modalità wine diretta:
+      // fallisce con lo stesso errore). Convenzione stabilita
+      // esplicitamente con l'utente: un gioco con un launcher condiviso
+      // — nativo o comprato altrove, nessuna differenza — lancia SEMPRE
+      // con la stessa sintassi dello script di debug in `--mode umu`,
+      // rispettando ogni switch attivo sulla card (Umu-launcher incluso)
+      // — mai un bypass diretto di wine. Verificato anche che i due
+      // casi reali già confermati funzionanti (Watch Dogs 2, Assassin's
+      // Creed Syndicate) hanno ENTRAMBI bypassStoreAuthChain=1 sul
+      // proprio profilo — il percorso leggero era quindi già
+      // inutilizzato in pratica per tutto ciò che è stato verificato
+      // finora, rischio di regressione basso. Codice della funzione
+      // lasciato intatto sotto (non cancellato) in caso servisse
+      // rivalutarlo in futuro — semplicemente non più raggiungibile.
+      const useSharedPrefixLightLaunch = false;
+      // Condizioni originali, lasciate per riferimento (non più
+      // valutate): !!effectiveSharedLauncherId && !!game.executablePath
+      // && !runnerConfig.eac && !runnerConfig.battleye &&
+      // !forceFullContainerLaunch && isSharedLauncherRunning(effectiveSharedLauncherId).
 
       // v1.1.30 — giochi Epic: sempre via legendary launch, non l'exe
       // diretto. Vedi launchEpicViaLegendary per il motivo esatto (alcuni
@@ -1543,11 +1604,17 @@ class GameManager {
       // futuro anche su un altro gioco (es. Watch Dogs 2, per unificare
       // il processo se il test dell'utente lo confermasse necessario
       // anche lì), si applica automaticamente, nessun codice aggiuntivo.
-      const bypassStoreAuthChain = forceFullContainerLaunch;
+      // v2.0.41-dev.23 — forceFullContainerLaunch non esiste più (era
+      // legato solo al pre-avvio anticipato, rimosso sopra) — letto qui
+      // direttamente dal profilo compat, unico scopo rimasto per questo
+      // switch: decidere se instradare un gioco Epic verso `legendary`
+      // o il lancio diretto, indipendente da qualunque logica di
+      // pre-avvio.
+      const bypassStoreAuthChain = !!db.getCompatProfile(id)?.bypassStoreAuthChain;
 
       const result = useSharedPrefixLightLaunch
         ? await launchGameInSharedPrefix(
-            game.requiresLauncher!,
+            effectiveSharedLauncherId!,
             expandHome(game.executablePath!),
             runnerConfig.args ?? [],
             runnerConfig.cwd,
@@ -1558,17 +1625,67 @@ class GameManager {
           : await runner.launch(game, runnerConfig);
       if (result.success) {
         this.addLog(`[LAUNCH] Sessione attiva — PID: ${result.pid} — ${result.message}`, 'system');
+        // v2.0.41-dev.32 — richiesta utente, splash di lancio: fase
+        // "launching" — il momento esatto da cui parte il timeout dei
+        // 120s (LAUNCH_WINDOW_TIMEOUT_MS), deliberatamente DOPO tutte le
+        // fasi preliminari (verifica verb) sopra, mai da quando l'utente
+        // ha premuto play. `detail` porta lo store per il testo della
+        // splash ("Avvio da {store}").
+        emitLaunchPhase({ gameId: id, phase: 'launching', detail: game.store });
+        // v2.0.41-dev.33/34/35/36 — richiesta utente: orchestrazione
+        // della splash di lancio (vedi splashOrchestrator.ts) — combina
+        // il rilevamento finestra (che imparerà window_class se non
+        // ancora noto, side-effect deliberato) con l'intercettazione
+        // dell'errore e il timeout di sicurezza. La finestra stessa è
+        // già aperta da prima (splashHandle, dev.36 — appare subito al
+        // lancio, non solo da qui in poi). Non await: gira in
+        // background, non deve mai rallentare/bloccare launchGame().
+        if (splashHandle) {
+          raceSplashClose(splashHandle, id, windowSnapshotBefore, effectiveSharedLauncherId, result.pid).catch(err => {
+            this.addLog(`[SPLASH] Orchestrazione splash fallita (non bloccante): ${err}`, 'warning');
+          });
+        }
         if (result.pid) {
-          // v1.1.31 — processNameHint solo per Epic: è l'unico store
-          // dove il PID tracciato (legendary/wrapper Proton) non è
-          // affidabile per sapere se il gioco vero è ancora in
-          // esecuzione. Basename dell'eseguibile già risolto
+          // v1.1.31 — processNameHint originariamente solo per Epic: è
+          // il primo caso in cui il PID tracciato (legendary/wrapper
+          // Proton) non è affidabile per sapere se il gioco vero è
+          // ancora in esecuzione. Basename dell'eseguibile già risolto
           // (game.executablePath), non l'intero percorso — pgrep -f
           // cerca per substring nella riga di comando completa, un
           // basename è già sufficientemente specifico ed evita falsi
           // negativi se il percorso assoluto cambiasse fra una sessione
           // e l'altra.
-          const processNameHint = game.store === 'Epic Games' && game.executablePath
+          //
+          // v2.0.41-dev.20 — richiesta utente, bug reale confermato su
+          // hardware reale (Dead Space 2/EA App): stesso identico
+          // problema di Epic/legendary, mai esteso ai giochi con un
+          // launcher condiviso (effectiveSharedLauncherId, dev.19).
+          // Qui il PID tracciato è quello del gioco stesso — ma il
+          // gioco può legittimamente "passare la mano" (avvia/aspetta
+          // il launcher condiviso per il proprio controllo DRM, la sua
+          // finestra reale compare solo dopo) mentre il processo
+          // ORIGINALE tracciato termina prima — esattamente la stessa
+          // dinamica per cui questo hint esiste già per Epic. Senza,
+          // isLastLaunchedGameRunning() tornava a un semplice
+          // process.kill(pid,0): l'istante in cui il PID originale
+          // termina, nessun margine, Dashboard torna a schermo intero
+          // (e intercetta l'input del controller) anche se il gioco
+          // sta ancora completando il proprio avvio. Con l'hint, si
+          // ottiene automaticamente lo stesso margine di 30s già
+          // collaudato per Epic (PROCESS_NAME_STARTUP_GRACE_MS) — "un
+          // tempo come per tutti gli altri giochi", nessun meccanismo
+          // nuovo da inventare.
+          // v2.0.41-dev.25 — richiesta utente, bug reale confermato su
+          // hardware reale (LEGO Indiana Jones + Gamescope): stesso
+          // identico problema di Epic/launcher condiviso sopra, per un
+          // motivo diverso — quando Gamescope avvolge il lancio, il PID
+          // che spawnDetached restituisce non è più quello del gioco ma
+          // di Gamescope stesso (che a sua volta genera un processo
+          // interno "gamescopereaper" per sorvegliare i propri figli) —
+          // tracciare quel PID diretto non dice più nulla di affidabile
+          // su "il gioco è ancora aperto?", esattamente come con Epic/
+          // legendary. Stesso hint, stessa soglia già collaudata.
+          const processNameHint = (game.store === 'Epic Games' || !!effectiveSharedLauncherId || !!profile?.gamescope) && game.executablePath
             ? path.basename(game.executablePath)
             : undefined;
           this.lastLaunchedGame = { gameId: id, gameTitle: game.title, pid: result.pid, launchedAt: Date.now(), logPath: result.logPath, processNameHint };
@@ -1576,6 +1693,13 @@ class GameManager {
         }
       } else {
         this.addLog(`[LAUNCH] Fallito: ${result.message}`, 'error');
+        // v2.0.41-dev.36 — la splash è già stata aperta prima della
+        // verifica verb (vedi sopra) — se lo spawn stesso fallisce, non
+        // c'è alcuna corsa da avviare (raceSplashClose non viene mai
+        // chiamata su questo ramo): senza chiuderla qui esplicitamente
+        // resterebbe orfana, nessun'altra parte del codice se ne
+        // occuperebbe più.
+        splashHandle?.close();
         // Log suggerimento se manca l'exe
         if (result.message?.includes('percorso eseguibile') || result.message?.includes('executablePath')) {
           this.addLog(`[LAUNCH] → Apri l'overlay del gioco e imposta "Executable Path" nella sezione Game Config`, 'error');
@@ -1585,6 +1709,10 @@ class GameManager {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.addLog(`[LAUNCH] Eccezione runner: ${msg}`, 'error');
+      // v2.0.41-dev.36 — stesso motivo del ramo "else" sopra: un'eccezione
+      // qui interrompe tutto prima che raceSplashClose venga mai
+      // chiamata — chiusura esplicita, altrimenti resterebbe orfana.
+      splashHandle?.close();
       return { success: false, message: msg };
     }
   }
@@ -1653,8 +1781,15 @@ class GameManager {
           }
         } else {
           await execFileAsync('which', ['winetricks']);
+          const verbTotal = profile.winetricksVerbs.length;
+          let verbIndex = 0;
           for (const verb of profile.winetricksVerbs) {
+            verbIndex += 1;
             this.addLog(`[LAUNCH] Verifica dipendenza: ${verb}`, 'system');
+            // v2.0.41-dev.32 — richiesta utente, splash di lancio: fase
+            // "Verifica ambiente" con indice/totale, per la barra di
+            // progresso globale della splash.
+            emitLaunchPhase({ gameId: id, phase: 'verifying-env', index: verbIndex, total: verbTotal, detail: verb });
             try {
               await execFileAsync('winetricks', ['--unattended', verb], {
                 env: {
@@ -1806,12 +1941,27 @@ class GameManager {
     const game = db.getGameById(id);
     if (!game) return { success: false, message: 'Gioco non trovato' };
 
+    // v2.0.41-dev.16 — calcolato qui, riusato più sotto sia per il lock
+    // "launcher in esecuzione" sia per la cartella da rimuovere/il
+    // reference counting — un solo lookup, non tre.
+    const thirdPartyLauncherDef = getThirdPartyLauncherByStoreId(game.store);
+
     // v0.99.36 — Step 2: stesso lock — non rimuovere file/prefix di un
     // gioco mentre il suo processo wine/proton è ancora attivo.
     const runningCheck = this.isLastLaunchedGameRunning();
     if (runningCheck.running && runningCheck.gameId === id) {
       this.addLog(`[UNINSTALL] Bloccato — ${game.title} è in esecuzione. Chiudi il gioco prima di disinstallare.`, 'error');
       return { success: false, message: `${game.title} è in esecuzione — chiudilo prima di disinstallare` };
+    }
+
+    // v2.0.41-dev.16 — BUG UTENTE: stesso lock di sopra, ma per il
+    // processo del LAUNCHER stesso (Ubisoft Connect/EA App aperti in
+    // quel momento) — isLastLaunchedGameRunning() sopra copre solo un
+    // gioco lanciato da noi, non il launcher condiviso aperto per conto
+    // suo (dalla propria card, o da un gioco che lo richiede).
+    if (thirdPartyLauncherDef && isSharedLauncherRunning(thirdPartyLauncherDef.id)) {
+      this.addLog(`[UNINSTALL] Bloccato — ${thirdPartyLauncherDef.displayName} è in esecuzione. Chiudilo prima di disinstallare.`, 'error');
+      return { success: false, message: `${thirdPartyLauncherDef.displayName} è in esecuzione — chiudilo prima di disinstallare` };
     }
 
     // v0.99.35 — bug confermato: un'installazione interrotta a metà
@@ -1899,6 +2049,32 @@ class GameManager {
     const { join }    = require('path');
     const { existsSync, rmSync } = require('fs');
 
+    // v2.0.41-dev.16 — BUG UTENTE: per i launcher condivisi (Ubisoft
+    // Connect, EA App — game.store mappato tramite
+    // getThirdPartyLauncherByStoreId, stesso ponte già usato altrove nel
+    // file, es. getGames()) storeDir restava sempre null: finiva sempre
+    // nel ramo "store non gestito" sotto, Disinstalla non cancellava mai
+    // davvero la cartella prefix in shared-launchers/, solo i campi DB.
+    //
+    // La cartella dell'INTERO launcher (non solo prefix/ — vedi
+    // SHARED_LAUNCHERS_DIR/getSharedPrefixBasePath in
+    // sharedLauncherManager.ts, prefix/ è l'unica sottocartella scritta
+    // lì) va rimossa SOLO quando si sta disinstallando la riga del
+    // launcher stesso — mai quella di un gioco che lo richiede
+    // (requiresLauncher), che condivide lo stesso prefix con
+    // potenzialmente altri giochi ancora installati. thirdPartyLauncherDef
+    // già calcolato in testa alla funzione, riusato qui.
+
+    // canRemoveSharedPrefix esisteva già (reference counting sui giochi
+    // installati che dipendono da questo launcher) ma non era MAI
+    // realmente collegata da nessuna parte — stesso bug. Se un altro
+    // gioco installato richiede ancora questo launcher, rifiuta invece
+    // di rimuovere un prefix di cui altri hanno ancora bisogno.
+    if (thirdPartyLauncherDef && !canRemoveSharedPrefix(thirdPartyLauncherDef.id, id)) {
+      this.addLog(`[UNINSTALL] Bloccato — altri giochi installati richiedono ancora ${thirdPartyLauncherDef.displayName}.`, 'error');
+      return { success: false, message: `Altri giochi installati richiedono ancora ${thirdPartyLauncherDef.displayName} — disinstallali prima, o lascia questo launcher installato.` };
+    }
+
     const storeDir = game.store === 'GOG Galaxy'
       ? join(homedir(), 'Games', 'GOG',  game.id.replace(/^gog-/, ''))
       : game.store === 'Epic Games'
@@ -1911,6 +2087,8 @@ class GameManager {
       // amazon- incluso, vedi slugFromId() — non ripulito qui, coerenza
       // col path realmente usato in fase di installazione).
       ? join(homedir(), 'Games', 'Amazon Games', game.id)
+      : thirdPartyLauncherDef
+      ? join(SHARED_LAUNCHERS_DIR, thirdPartyLauncherDef.id)
       : null;
 
     // Caso davvero vuoto: già segnato non installato E nessuna cartella
@@ -1929,6 +2107,15 @@ class GameManager {
         try {
           rmSync(storeDir, { recursive: true, force: true });
           this.addLog(`[UNINSTALL] ${game.title} — file rimossi: ${storeDir}`, 'system');
+          // v2.0.41-dev.16 — resetta il tracciamento del bootstrap SOLO
+          // dopo la rimozione reale riuscita della cartella: senza,
+          // isLauncherBootstrapped() continuerebbe a rispondere true
+          // puntando a un prefix ormai inesistente, rompendo qualunque
+          // reinstallazione successiva (isAuthenticated() del plugin
+          // resterebbe "connesso" a qualcosa che non c'è più).
+          if (thirdPartyLauncherDef) {
+            db.deleteSharedLauncherPrefix(thirdPartyLauncherDef.id);
+          }
         } catch (err) {
           this.addLog(`[UNINSTALL] Errore rimozione file ${game.title}: ${err}`, 'error');
           return { success: false, message: `Errore rimozione file: ${err}` };
@@ -2104,6 +2291,7 @@ class GameManager {
     libretroCore?: string;
     scummvmId?: string;
     scrapeTitle?: string;
+    windowClass?: string | null;
     runner?: string;
     // Step 19d — switch "Launcher condiviso" in Game Options.
     requiresLauncher?: string | null;

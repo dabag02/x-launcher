@@ -76,6 +76,25 @@ export interface CompatibilityProfile {
   // launcher condiviso (leggero se già attivo, pieno altrimenti) — mai
   // gli argomenti di autenticazione dello store d'origine.
   bypassStoreAuthChain?: boolean;
+  // v2.0.41-dev.24 — richiesta utente: lancia il gioco dentro Gamescope
+  // (micro-compositore Wayland pensato per le sessioni gaming/console),
+  // stesso pattern già in uso per GameMode (resolveGameModeWrapping in
+  // runners/implementations.ts) — avvolge il comando reale invece di
+  // limitarsi a variabili d'ambiente come FSR/MangoHud.
+  //
+  // v2.0.41-dev.25 — da booleano a 4 stati, stesso principio già in uso
+  // per mangohud (0|1|2): richiesta utente dopo aver verificato su
+  // hardware reale che Gamescope, senza argomenti, parte IN FINESTRA a
+  // 1280×720 (default reale di Gamescope, non la risoluzione del
+  // monitor) — un semplice on/off non bastava a coprire "voglio
+  // schermo intero alla risoluzione vera del mio monitor" in modo
+  // affidabile. 0 = spento. 1 = schermo intero, risoluzione rilevata
+  // automaticamente (xrandr, vedi detectMonitorResolution in
+  // runners/implementations.ts). 2 = schermo intero, override fisso a
+  // 3840×2160 (utile per il downsampling da un monitor più piccolo,
+  // stesso caso d'uso documentato nella guida ufficiale Gamescope). 3 =
+  // in finestra, dimensionata alla risoluzione del monitor (nessun -f).
+  gamescope?: 0 | 1 | 2 | 3;
 }
 
 export interface Game {
@@ -133,6 +152,16 @@ export interface Game {
    * sbagliato o non trova nulla.
    */
   scrapeTitle?: string;
+
+  /**
+   * v2.0.41-dev.40 — richiesta utente: override manuale del window_class
+   * rilevato automaticamente dalla splash di lancio (windowDetector.ts).
+   * Stesso principio di scrapeTitle sopra — se il rilevamento automatico
+   * continua a sbagliare per un gioco specifico, l'utente può correggere
+   * il valore a mano nell'overlay Game Config, o cancellarlo per tornare
+   * al rilevamento automatico dal prossimo lancio.
+   */
+  windowClass?: string;
 
   /**
    * Richiesta utente — dimensione prevista di installazione (GOG/Epic),

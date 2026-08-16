@@ -95,5 +95,9 @@
     "emptyFolder": "Cartella vuota",
     "noRemovableMedia": "Nessun supporto rimovibile inserito",
     "communicationError": "Errore di comunicazione col demone."
+  },
+  "launcherDescriptions": {
+    "ea_app_launcher": "Launcher EA App — richiesto da alcuni giochi EA comprati su Epic, GOG, Amazon Games o Steam. Installalo una sola volta: verrà condiviso da tutti i giochi che lo richiedono.",
+    "ubisoft_connect_launcher": "Launcher Ubisoft Connect — richiesto da alcuni giochi Ubisoft comprati su Epic, GOG o Amazon Games. Installalo una sola volta: verrà condiviso da tutti i giochi che lo richiedono."
   }
 }

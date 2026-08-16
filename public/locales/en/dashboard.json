@@ -95,5 +95,9 @@
     "emptyFolder": "Empty folder",
     "noRemovableMedia": "No removable media inserted",
     "communicationError": "Could not reach the daemon."
+  },
+  "launcherDescriptions": {
+    "ea_app_launcher": "EA App launcher — required by some EA games bought on Epic, GOG, Amazon Games, or Steam. Install it once: it'll be shared by every game that requires it.",
+    "ubisoft_connect_launcher": "Ubisoft Connect launcher — required by some Ubisoft games bought on Epic, GOG, or Amazon Games. Install it once: it'll be shared by every game that requires it."
   }
 }

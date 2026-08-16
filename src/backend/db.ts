@@ -98,6 +98,17 @@ db.exec(`
     -- contestuale della tray, vedi commento esteso nella migrazione qui
     -- sotto per un DB già esistente.
     last_launched_at      TEXT,
+    -- v2.0.41-dev.33 — richiesta utente: "carta d'identità" del gioco.
+    -- WM_CLASS della sua finestra reale (non il titolo, che spesso
+    -- cambia durante il gioco — es. "Livello 3 - Death Stranding") —
+    -- appreso dal PRIMO lancio riuscito (euristica esistente su PID/
+    -- nome, invariata) e salvato qui per ogni lancio SUCCESSIVO: da
+    -- quel momento la si cerca in modo diretto e inequivocabile
+    -- (wmctrl -lx, stesso comando già in uso per Steam Big Picture,
+    -- server.ts) invece di indovinare pattern di nomi processo — la
+    -- fonte di quasi tutti i bug della saga Gamescope. NULL finché non
+    -- ancora appreso.
+    window_class          TEXT,
     updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -127,7 +138,12 @@ db.exec(`
     -- v1.5.20-dev.32 — stessa identica lezione di umu_run appena sopra,
     -- applicata subito: colonna aggiunta QUI, non solo in types.ts,
     -- proprio per non ripetere quel bug.
-    bypass_store_auth_chain INTEGER NOT NULL DEFAULT 0
+    bypass_store_auth_chain INTEGER NOT NULL DEFAULT 0,
+    -- v2.0.41-dev.24 — switch overlay "Gamescope" (per-gioco, avvolge il
+    -- comando reale con gamescope -- ...), stessa identica lezione di
+    -- umu_run/bypass_store_auth_chain sopra: colonna aggiunta QUI subito,
+    -- non solo in types.ts, per non ripetere quel bug una terza volta.
+    gamescope INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS runners (
@@ -302,6 +318,12 @@ if (!existingCols.includes('scrape_title')) {
 if (!existingCols.includes('predicted_size_bytes')) {
   db.exec("ALTER TABLE games ADD COLUMN predicted_size_bytes INTEGER");
 }
+// v2.0.41-dev.33 — stessa identica migrazione esplicita già vista sopra
+// per gli altri campi, per lo stesso motivo. Vedi commento esteso sulla
+// colonna nella CREATE TABLE.
+if (!existingCols.includes('window_class')) {
+  db.exec("ALTER TABLE games ADD COLUMN window_class TEXT");
+}
 // Step 19d — dipendenza da un launcher terzo condiviso, impostata
 // manualmente dall'utente nell'overlay — mai auto-rilevata, nessun modo
 // affidabile di sapere in anticipo se un titolo la richiede prima di
@@ -371,6 +393,11 @@ if (!compatCols.includes('umu_run')) {
 if (!compatCols.includes('bypass_store_auth_chain')) {
   db.exec("ALTER TABLE compat_profiles ADD COLUMN bypass_store_auth_chain INTEGER NOT NULL DEFAULT 0");
 }
+// v2.0.41-dev.24 — stessa identica migrazione esplicita di umu_run/
+// bypass_store_auth_chain sopra, per lo stesso motivo.
+if (!compatCols.includes('gamescope')) {
+  db.exec("ALTER TABLE compat_profiles ADD COLUMN gamescope INTEGER NOT NULL DEFAULT 0");
+}
 
 // v0.99.35 — correzione storica: giochi installati con status='Not Installed'
 // Causa: il plugin GOG imposta sempre status='Not Installed' per tutti i
@@ -421,6 +448,7 @@ function rowToGame(row: any): Game {
     system:         row.system          ?? undefined,
     scummvmId:      row.scummvm_id      ?? undefined,
     scrapeTitle:    row.scrape_title    ?? undefined,
+    windowClass:    row.window_class    ?? undefined,
     predictedSizeBytes: row.predicted_size_bytes ?? undefined,
     hltbHours: (row.hltb_main != null) ? {
       main:          row.hltb_main,
@@ -754,6 +782,23 @@ export function recordGameLaunch(id: string): void {
 }
 
 /**
+ * v2.0.41-dev.33 — richiesta utente: "carta d'identità" del gioco, vedi
+ * commento esteso sulla colonna window_class nella CREATE TABLE. Scrive
+ * SEMPRE (non solo se NULL) — un aggiornamento del gioco potrebbe
+ * cambiare il WM_CLASS della propria finestra, meglio auto-correggersi
+ * al prossimo lancio riuscito che restare fermi su un valore ormai
+ * sbagliato.
+ */
+export function updateWindowClass(id: string, windowClass: string): void {
+  db.prepare('UPDATE games SET window_class = ? WHERE id = ?').run(windowClass, id);
+}
+
+export function getWindowClass(id: string): string | undefined {
+  const row = db.prepare('SELECT window_class FROM games WHERE id = ?').get(id) as any;
+  return row?.window_class ?? undefined;
+}
+
+/**
  * getRecentlyLaunched — gli ultimi N giochi lanciati, più recente prima.
  * Solo giochi con last_launched_at valorizzato (mai lanciati esclusi, non
  * mostrati come "recenti" solo perché in cima a un ordinamento NULL-first
@@ -830,6 +875,13 @@ export function updateGameConfig(id: string, config: {
   libretroCore?: string | null;
   scummvmId?: string | null;
   scrapeTitle?: string | null;
+  // v2.0.41-dev.40 — richiesta utente: override manuale del window_class
+  // rilevato automaticamente dalla splash (windowDetector.ts), sullo
+  // stesso modello di scrapeTitle sopra — se il rilevamento automatico
+  // continua a sbagliare per un gioco specifico, l'utente può correggere
+  // il valore a mano o cancellarlo (torna al rilevamento automatico al
+  // prossimo lancio).
+  windowClass?: string | null;
   runner?: string;
   // Step 19d — impostato/rimosso manualmente dall'utente nell'overlay.
   // null = rimuove la dipendenza (il gioco torna a un prefix isolato al
@@ -853,6 +905,7 @@ export function updateGameConfig(id: string, config: {
     libretroCore:   'libretro_core',
     scummvmId:      'scummvm_id',
     scrapeTitle:    'scrape_title',
+    windowClass:    'window_class',
     runner:         'runner',
     requiresLauncher: 'requires_launcher',
   };
@@ -889,8 +942,8 @@ export function updateGameConfig(id: string, config: {
 
 export function upsertCompatProfile(gameId: string, profile: CompatibilityProfile): void {
   db.prepare(`
-    INSERT INTO compat_profiles (game_id, fsr, game_mode, mangohud, eac, battleye, custom_env, winetricks_verbs, disable_wine_sync, use_known_fixes, known_fixes_notes, umu_run, bypass_store_auth_chain)
-    VALUES (@gameId, @fsr, @gameMode, @mangohud, @eac, @battleye, @customEnv, @winetricksVerbs, @disableWineSync, @useKnownFixes, @knownFixesNotes, @umuRun, @bypassStoreAuthChain)
+    INSERT INTO compat_profiles (game_id, fsr, game_mode, mangohud, eac, battleye, custom_env, winetricks_verbs, disable_wine_sync, use_known_fixes, known_fixes_notes, umu_run, bypass_store_auth_chain, gamescope)
+    VALUES (@gameId, @fsr, @gameMode, @mangohud, @eac, @battleye, @customEnv, @winetricksVerbs, @disableWineSync, @useKnownFixes, @knownFixesNotes, @umuRun, @bypassStoreAuthChain, @gamescope)
     ON CONFLICT(game_id) DO UPDATE SET
       fsr               = excluded.fsr,
       game_mode         = excluded.game_mode,
@@ -903,7 +956,8 @@ export function upsertCompatProfile(gameId: string, profile: CompatibilityProfil
       use_known_fixes   = excluded.use_known_fixes,
       known_fixes_notes = excluded.known_fixes_notes,
       umu_run           = excluded.umu_run,
-      bypass_store_auth_chain = excluded.bypass_store_auth_chain
+      bypass_store_auth_chain = excluded.bypass_store_auth_chain,
+      gamescope         = excluded.gamescope
   `).run({
     gameId,
     fsr:             profile.fsr       ? 1 : 0,
@@ -918,6 +972,7 @@ export function upsertCompatProfile(gameId: string, profile: CompatibilityProfil
     knownFixesNotes: profile.knownFixesNotes ? JSON.stringify(profile.knownFixesNotes) : null,
     umuRun:          profile.umuRun ? 1 : 0,
     bypassStoreAuthChain: profile.bypassStoreAuthChain ? 1 : 0,
+    gamescope:       profile.gamescope ?? 0,
   });
 }
 
@@ -937,6 +992,7 @@ export function getCompatProfile(gameId: string): CompatibilityProfile | undefin
     knownFixesNotes: row.known_fixes_notes ? JSON.parse(row.known_fixes_notes) : undefined,
     umuRun:          row.umu_run === 1,
     bypassStoreAuthChain: row.bypass_store_auth_chain === 1,
+    gamescope:       (row.gamescope ?? 0) as 0 | 1 | 2 | 3,
   };
 }
 
@@ -1421,6 +1477,19 @@ export function upsertSharedLauncherPrefix(row: SharedLauncherPrefixRow): void {
     bootstrappedAt: row.bootstrappedAt ?? null,
     runner:         row.runner,
   });
+}
+
+/**
+ * v2.0.41-dev.16 — richiesta utente: mancava del tutto — Disinstalla su
+ * un launcher condiviso (Ubisoft Connect, EA App) cancellava la cartella
+ * ma non resettava questa riga, quindi isLauncherBootstrapped() avrebbe
+ * continuato a rispondere true puntando a un prefix ormai inesistente,
+ * rompendo qualunque reinstallazione successiva. Chiamata da
+ * gameManager.uninstallGame() subito dopo la rimozione reale della
+ * cartella su disco.
+ */
+export function deleteSharedLauncherPrefix(launcherId: string): void {
+  db.prepare('DELETE FROM shared_launcher_prefixes WHERE launcher_id = ?').run(launcherId);
 }
 
 /**
