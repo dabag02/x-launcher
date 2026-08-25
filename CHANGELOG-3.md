@@ -626,3 +626,54 @@ Il blocco "Layer di compatibilità" aveva già la soluzione corretta per un prob
 **Fix**: `isThisGameASharedLauncher` ora esclude esplicitamente `effectiveSharedLauncherId` in entrambi i punti — la card del launcher condiviso non risulta mai più bloccata su se stessa, riprendendo il controllo pieno di Runner e Layer di compatibilità come qualunque altra card indipendente.
 
 **Verificato**: `tsc --noEmit` — 8 invariato. `check-focus-ids.cjs` — 104 id invariati.
+
+---
+
+## v2.0.41-dev.45 — Filtro titolo a senso unico: titoli finestra più corti del titolo salvato
+
+**Segnalato dall'utente**, con ipotesi corretta già in partenza: LEGO Indiana Jones (classe generica `steam_proton.steam_proton`) non chiudeva la splash nonostante il log confermasse `window_class appreso`. Causa confermata con i dati reali del log: titolo salvato nel DB `"LEGO Indiana Jones: The Original Adventures"` (con sottotitolo), titolo reale della finestra `"LEGO® Indiana Jones™"` (senza sottotitolo, più corto) — il controllo introdotto in dev.42 verificava solo che *il titolo della finestra* contenesse *il titolo del gioco*, mai il verso opposto.
+
+**Fix**: `titleLooksLikeGame()` ora bidirezionale — accetta la corrispondenza in entrambe le direzioni, con una soglia minima di 6 caratteri sulla stringa più corta prima di accettarla come sottostringa dell'altra (altrimenti un titolo finestra troppo generico rischierebbe di combaciare per caso con qualunque titolo di gioco abbastanza lungo da contenere quella parola).
+
+**Verificato**: testato direttamente contro il caso reale del log (`LEGO® Indiana Jones™` / `LEGO Indiana Jones: The Original Adventures` → ora combacia) e contro un potenziale falso positivo con titolo generico (`Menu` → non combacia, sotto soglia). `tsc --noEmit` — 8 invariato.
+
+---
+
+## v2.0.41-dev.46 — Il pannello XFCE poteva essere appreso come "finestra del gioco"
+
+**Segnalato dall'utente**: `window_class` appreso come `"xfce4-panel.Xfce4-panel"` — il pannello delle applicazioni di XFCE, non il gioco.
+
+**Causa probabile**: il pannello ha ottenuto un nuovo id finestra proprio nella finestra di tempo fra lo snapshot "prima" del lancio e il primo controllo (un cambio di autohide/risoluzione, plausibile su un sistema con molti test Gamescope pregressi su questo stesso gioco) — vista come "nuova" dal rilevamento per differenza, unica candidata al momento, presa per buona. Il filtro escludeva già la splash stessa (`isSplashWindow`) ma nessun componente noto del desktop.
+
+**Fix**: nuova `isSystemWindow()` — esclude qualunque finestra la cui classe inizia con `xfce4-`, `xfdesktop` o `xfwm4`, applicata allo stesso punto già usato per escludere la splash. Stessa identica filosofia: nessun componente noto del desktop può mai essere confermato come finestra del gioco, indipendentemente dal perché sia sembrato "nuovo" in quel momento.
+
+**Azione richiesta all'utente**: il valore sbagliato già salvato per LEGO Indiana Jones va azzerato a mano (query fornita, prende qualunque residuo simile).
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-dev.47 — Niente splash per i launcher condivisi lanciati da soli
+
+**Segnalato dall'utente**: EA App lanciato da solo (dalla propria card, non come dipendenza di un gioco) aveva imparato il `window_class` di **Ubisoft Connect** — contaminazione incrociata. Osservazione dell'utente, corretta: la splash non ha comunque alcun senso per queste due app desktop lanciate da sole (nessuna sequenza di caricamento a fasi paragonabile a un gioco).
+
+**Causa della contaminazione**: con entrambi i launcher potenzialmente attivi insieme, "l'unica finestra nuova" al momento del controllo può appartenere all'altro launcher, non a quello appena lanciato.
+
+**Fix, alla radice invece che con un altro filtro**: quando il gioco lanciato è la riga sintetica di un launcher condiviso (stessa convenzione d'id già in uso ovunque nel backend, `${launcherId}-launcher`), la splash non viene proprio aperta — niente splash, niente rilevamento, niente rischio di imparare la finestra sbagliata. Risolve entrambi i problemi segnalati insieme, non solo il sintomo visibile.
+
+**Azione richiesta all'utente**: il valore sbagliato già imparato da EA App va azzerato a mano (query fornita).
+
+**Verificato**: `tsc --noEmit` — 8 invariato. **Non ancora testato su hardware reale.**
+
+---
+
+## v2.0.41-Mercury — MILESTONE STABILE
+
+Congelata su richiesta esplicita dell'utente, seconda della serie Mercury — precede `v2.0.40-Mercury`. Nessun cambiamento di codice in questa voce oltre a quanto già elencato in dev.1 → dev.47 sopra — solo il congelamento: versione aggiornata in `App.tsx`/`package.json` (`v2.0.41-Mercury`), voce di roadmap aggiunta.
+
+**Riassunto dei due blocchi di lavoro principali di questa milestone** (dettaglio completo in dev.1-47 sopra e nei rispettivi transcript di sessione):
+
+1. **Gamescope per-gioco** (dev.24-31 e oltre) — switch a 4 stati (spento/schermo intero risoluzione monitor/override 4K/finestra), stesso pattern di MangoHud. Saga lunga di bug reali diagnosticati e corretti uno alla volta, mai per tentativi alla cieca: persistenza del selettore, rilevamento multi-monitor, un crash rivelatosi causato da un file di configurazione del gioco stesso mai toccato da X-Launcher (non dal nostro codice), riconoscimento del processo reale (`gamescope-wl` non `gamescope` nudo), e un'incompatibilità architetturale con `legendary`+Gamescope risolta seguendo la documentazione ufficiale di Heroic Games Launcher. Test aggiuntivi dell'utente hanno rivelato un problema più ampio e irrisolto fra Gamescope e l'inizializzazione grafica di alcuni giochi (ipotesi: la risoluzione forzata rompe motori che si aspettano di negoziarla da soli) — **parcheggiato per una sessione futura**, non affrontato in questa milestone.
+2. **Splash screen di lancio** (roadmap usabilità, punto 2/3 — mai scritta prima in questo documento, vedi sezione dedicata sotto) — completata end-to-end: fasi di caricamento in tempo reale, rilevamento della finestra vera del gioco per farla sparire al momento giusto, gestione di fallimento/timeout con terminazione forzata del processo. Sottoprodotto rilevante: una "carta d'identità" per gioco (`window_class` nel DB) che si è rivelata utile anche oltre lo scopo originale della splash.
+
+Vedi la sezione "Roadmap usabilità (Gamescope/splash/monitor processi)" più sotto per lo stato aggiornato dei tre punti e le lezioni tecniche da portare avanti.

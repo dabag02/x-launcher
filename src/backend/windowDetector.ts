@@ -102,6 +102,23 @@ function isSplashWindow(w: WindowInfo): boolean {
 }
 
 /**
+ * v2.0.41-dev.46 — BUG UTENTE, confermato su hardware reale (LEGO
+ * Indiana Jones): window_class appreso come "xfce4-panel.Xfce4-panel"
+ * — il pannello XFCE, non il gioco. Probabile causa: il pannello ha
+ * ottenuto un nuovo id finestra proprio nella finestra di tempo fra lo
+ * snapshot "prima" e il primo controllo (es. un cambio di
+ * autohide/risoluzione residuo, plausibile su un sistema con tanti test
+ * Gamescope pregressi su questo stesso gioco) — vista come "nuova",
+ * unica candidata al momento, presa per buona. Stessa filosofia già
+ * applicata a isSplashWindow sopra: nessun componente noto del desktop
+ * può MAI essere confermato come finestra del gioco, indipendentemente
+ * dal perché sia sembrato "nuovo" in quel momento.
+ */
+function isSystemWindow(w: WindowInfo): boolean {
+  return /^xfce4-|^xfdesktop|^xfwm4/i.test(w.wmClass);
+}
+
+/**
  * v2.0.41-dev.42 — richiesta utente, osservazione diretta confermata su
  * hardware reale: "steam_app_0.steam_app_0" è il WM_CLASS che
  * QUALUNQUE gioco lanciato con Umu-launcher attivo riceve (verificato:
@@ -122,11 +139,28 @@ function normalizeForMatch(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+/**
+ * v2.0.41-dev.45 — BUG UTENTE, confermato su hardware reale (LEGO
+ * Indiana Jones): il controllo era a senso unico — verificava solo "il
+ * titolo della finestra contiene il titolo del gioco". Qui il titolo
+ * salvato nel DB è "LEGO Indiana Jones: The Original Adventures" (con
+ * sottotitolo), ma la finestra reale mostra solo "LEGO® Indiana Jones™"
+ * (senza sottotitolo, più corto) — il verso opposto, mai controllato.
+ * Ora bidirezionale: accetta la corrispondenza in ENTRAMBE le
+ * direzioni, con una soglia minima (6 caratteri) sulla stringa più
+ * corta prima di accettarla come sottostringa dell'altra — altrimenti
+ * un titolo finestra troppo generico (es. "Menu") rischierebbe di
+ * combaciare per caso con qualunque titolo di gioco abbastanza lungo da
+ * contenere quella parola.
+ */
 function titleLooksLikeGame(windowTitle: string, gameTitle: string): boolean {
   if (!windowTitle || !gameTitle) return false;
   const normWindow = normalizeForMatch(windowTitle);
   const normGame = normalizeForMatch(gameTitle);
-  return normGame.length > 0 && normWindow.includes(normGame);
+  const MIN_LEN = 6;
+  if (normWindow.length >= MIN_LEN && normGame.includes(normWindow)) return true;
+  if (normGame.length >= MIN_LEN && normWindow.includes(normGame)) return true;
+  return false;
 }
 
 function attemptDetection(gameId: string, before: WindowInfo[], requiresLauncherId: string | undefined, state: { pendingId: string | null }): WindowDetectionResult {
@@ -168,7 +202,7 @@ function attemptDetection(gameId: string, before: WindowInfo[], requiresLauncher
 
   const after = listWindows();
   const beforeIds = new Set(before.map(w => w.id));
-  let candidates = after.filter(w => !beforeIds.has(w.id) && !isSplashWindow(w));
+  let candidates = after.filter(w => !beforeIds.has(w.id) && !isSplashWindow(w) && !isSystemWindow(w));
 
   if (requiresLauncherId) {
     const def = getThirdPartyLauncherDefinition(requiresLauncherId);

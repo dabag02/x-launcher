@@ -16,7 +16,7 @@ import { BattlenetPlugin } from './plugins/battlenetPlugin';
 import { UbisoftConnectPlugin } from './plugins/ubisoftConnectPlugin';
 import { EAAppPlugin } from './plugins/eaAppPlugin';
 import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath, waitForContainerReadyMarker, canRemoveSharedPrefix, SHARED_LAUNCHERS_DIR } from './sharedLauncherManager';
-import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
+import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition, THIRD_PARTY_LAUNCHERS } from './plugins/thirdPartyLaunchers';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions } from './plugins/classicPlugin';
 import { BaseRunner } from './runners/base';
 import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary, expandHome } from './runners/implementations';
@@ -1452,7 +1452,21 @@ class GameManager {
     // al ciclo di rilevamento della finestra del gioco (bug reale
     // confermato: window_class di Bioshock 2 era finito per essere
     // quello della splash stessa).
-    const splashHandle = await openSplashForLaunch(id);
+    //
+    // v2.0.41-dev.47 — BUG UTENTE: EA App lanciato da solo (dalla propria
+    // card, non come dipendenza di un gioco) aveva imparato il
+    // window_class di UBISOFT CONNECT (contaminazione incrociata — con
+    // entrambi i launcher potenzialmente attivi insieme, "l'unica
+    // finestra nuova" al momento del controllo può appartenere
+    // all'altro). Osservazione giusta dell'utente: la splash non ha
+    // comunque alcun senso per queste due app desktop lanciate da sole
+    // (nessuna sequenza di caricamento a fasi paragonabile a un gioco) —
+    // niente splash, niente rilevamento, niente rischio di imparare la
+    // finestra sbagliata. Riconosciuto per la stessa convenzione d'id
+    // già in uso ovunque nel backend (`${launcherId}-launcher`), non un
+    // flag nuovo.
+    const isThisGameASharedLauncherApp = THIRD_PARTY_LAUNCHERS.some(l => `${l.id}-launcher` === id);
+    const splashHandle = isThisGameASharedLauncherApp ? null : await openSplashForLaunch(id);
     const windowSnapshotBefore = captureWindowSnapshot();
 
     if (effectiveSharedLauncherId) {
