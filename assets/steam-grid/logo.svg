@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">
+  <g transform="translate(640,360)">
+    <rect x="-130" y="-130" width="260" height="260" rx="40" fill="#1a1d24" stroke="#3b82f6" stroke-width="6"/>
+    <text x="0" y="50" font-family="Arial, sans-serif" font-size="200" font-weight="800" fill="#3b82f6" text-anchor="middle">X</text>
+  </g>
+  <text x="640" y="600" font-family="Arial, sans-serif" font-size="72" font-weight="800" fill="#f3f4f6" text-anchor="middle">X-LAUNCHER</text>
+</svg>

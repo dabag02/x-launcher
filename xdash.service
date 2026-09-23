@@ -1,0 +1,74 @@
+# =============================================================
+#  Systemd unit — X-Launcher HTPC (modalità produzione)
+#
+#  Installazione:
+#    sudo cp xdash.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now xdash
+#
+#  v0.99.32 — Se hai installato X-Launcher globalmente con
+#  ./install.sh (vedi /opt/x-launcher), WorkingDirectory è già
+#  corretto di default — resta da sostituire solo TUOUTENTE
+#  (lo username Linux che possiede le impostazioni/cache in
+#  ~/.local/share/x-launcher), non più anche il path del
+#  progetto. Se invece esegui da una cartella di sviluppo
+#  diversa, aggiorna WorkingDirectory di conseguenza.
+#
+#  v0.99.35 — Target cambiato da graphical-session.target a
+#  multi-user.target: il daemon ora parte al boot del sistema,
+#  PRIMA che LightDM mostri il login, indipendentemente da quale
+#  sessione grafica (XFCE o dedicata) venga poi scelta — scelta
+#  deliberata per isolare la diagnosi della sessione dedicata
+#  (vedi roadmap) dalla disponibilità del daemon, che con questo
+#  target non è più una variabile in gioco.
+#
+#  ATTENZIONE — limite noto di questa scelta: DISPLAY e
+#  XDG_RUNTIME_DIR sotto sono valori "tipici" per la prima
+#  sessione utente su Arch con LightDM, ma multi-user.target è
+#  per definizione precedente a qualunque login — quel display X
+#  non esiste ancora quando il servizio parte. Per le richieste
+#  HTTP/SQLite del daemon questo non ha alcun effetto. Ha effetto
+#  reale solo se/quando il daemon invoca wine/winetricks (che
+#  richiedono un X server reale): in quel caso le chiamate
+#  falliranno finché una sessione grafica su quel DISPLAY non è
+#  effettivamente attiva. Non risolto qui di proposito — è un
+#  problema distinto (passare un X server vivo a un servizio di
+#  sistema pre-login) che merita la sua diagnosi dedicata se e
+#  quando emergerà un fallimento reale di wine lanciato dal
+#  daemon di sistema, non dal browser in sessione utente.
+# =============================================================
+
+[Unit]
+Description=X-Launcher HTPC Game Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Sostituisci con il tuo utente Linux reale
+User=TUOUTENTE
+WorkingDirectory=/opt/x-launcher
+ExecStart=/usr/bin/node dist/server.cjs
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# PATH esplicito: include ~/.local/bin (legendary, lgogdownloader da AUR/pipx)
+# Sostituisci TUOUTENTE con il tuo nome utente reale
+Environment=PATH=/home/TUOUTENTE/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/TUOUTENTE
+# Display X11 — vedi nota sopra: valido solo una volta che una
+# sessione grafica su questo DISPLAY è effettivamente attiva.
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+# v1.1.102-dev.1 — PRIMA questo servizio non caricava .env in nessun caso.
+# Il "-" iniziale rende il file opzionale (parte lo stesso se manca).
+# Sostituisci TUOUTENTE come per le righe sopra.
+EnvironmentFile=-/home/TUOUTENTE/.local/share/x-launcher/.env
+
+# Sicurezza: limita accesso al filesystem
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

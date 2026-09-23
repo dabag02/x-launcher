@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=X-Launcher
+Comment=X-Launcher HTPC — Dashboard a schermo intero, senza desktop
+Exec=/opt/x-launcher/session-launch.sh
+Type=Application
+DesktopNames=X-Launcher

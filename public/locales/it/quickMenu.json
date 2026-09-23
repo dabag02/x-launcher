@@ -1,0 +1,18 @@
+{
+  "title": "Impostazioni",
+  "manageAccounts": "Gestisci Account",
+  "avatar": "Avatar",
+  "processManager": "Gestore dei Processi",
+  "gamescopeMode": "Modalità Gamescope",
+  "on": "Attivo",
+  "off": "Disattivo",
+  "toggleTheme": "Cambia Tema",
+  "consoleMode": "Modalità Console",
+  "backToDesktop": "Torna al Desktop",
+  "displayMode": "Modalità Schermo",
+  "windowed": "Finestra",
+  "kioskMode": "Kiosk",
+  "borderlessMode": "Senza Bordi",
+  "exit": "Esci",
+  "confirmA": "Conferma con A"
+}

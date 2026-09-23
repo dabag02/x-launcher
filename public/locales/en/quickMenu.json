@@ -1,0 +1,18 @@
+{
+  "title": "Settings",
+  "manageAccounts": "Manage Accounts",
+  "avatar": "Avatar",
+  "processManager": "Process Manager",
+  "gamescopeMode": "Gamescope Mode",
+  "on": "On",
+  "off": "Off",
+  "toggleTheme": "Toggle Theme",
+  "consoleMode": "Console Mode",
+  "backToDesktop": "Back to Desktop",
+  "displayMode": "Display Mode",
+  "windowed": "Windowed",
+  "kioskMode": "Kiosk",
+  "borderlessMode": "Borderless",
+  "exit": "Exit",
+  "confirmA": "Confirm A"
+}
