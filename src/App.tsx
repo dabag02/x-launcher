@@ -501,6 +501,15 @@ function MainApp() {
   const [theme, setTheme] = useState<Theme>(() => {
     try { const t = localStorage.getItem('x-launcher-theme'); return (t === 'light' || t === 'dark') ? t : 'dark'; } catch { return 'dark'; }
   });
+  // v2.2.17-dev.2 — richiesta utente: indicatore visivo quando si sta
+  // testando col server locale invece di xdash (/opt). Necessario perché
+  // in modalità kiosk/app la barra indirizzi è nascosta — la porta da
+  // sola (passata da kiosk-launch.sh --local-server) non sarebbe
+  // altrimenti visibile guardando la finestra. Letto una sola volta
+  // all'avvio (non cambia mai durante la sessione).
+  const [isLocalDevServer] = useState<boolean>(() => {
+    try { return new URLSearchParams(window.location.search).get('localdev') === '1'; } catch { return false; }
+  });
   // v0.99.9: isFullscreen (booleano) sostituito da displayMode a tre stati.
   // v2.1.10-dev.5 — SEMANTICA CAMBIATA: 'kiosk' ora avvia il vero --kiosk/
   // -kiosk del browser (kiosk-launch.sh, v2.1.10-dev.4) — non più
@@ -819,7 +828,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v2.2.16-Mercury');
+  const [appVersion, setAppVersion] = useState('v2.2.17-dev.3');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -6363,6 +6372,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               <div className="mt-auto opacity-30 italic text-[10px] font-bold tracking-[0.4em] uppercase">
                  X-Launcher Core {appVersion}
               </div>
+              {/* v2.2.17-dev.3 — spostato qui sotto il numero di versione su
+                  richiesta dell'utente (prima badge fisso in basso a destra,
+                  slegato dal resto del menu). Stesso scopo: sapere da dove
+                  si sta leggendo senza dover guardare il terminale. */}
+              {isLocalDevServer && (
+                <div className="text-center text-[9px] font-black uppercase tracking-widest text-red-500">
+                  Server locale · :{window.location.port || '80'}
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>

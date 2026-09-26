@@ -64,7 +64,7 @@ Entrambi supportati e testati in modo equivalente (finestra a schermo intero sen
 | GOG | [`lgogdownloader`](https://github.com/Sude-/lgogdownloader) | Arch: AUR. Debian/Ubuntu: pacchetto ufficiale. **Fedora: pacchetto ufficiale diretto** (`sudo dnf install lgogdownloader`, verificato — nessun COPR necessario). Scraping libreria, download, dimensione prevista di installazione |
 | Epic Games | [`legendary`](https://github.com/derrod/legendary) | `pip install --user legendary-gl` funziona su qualunque distro (via `setup-linux.sh` o a mano) — più affidabile del pacchetto di sistema, che non tutte le distro hanno |
 | Amazon Games — **RACCOMANDATO** | [`nile`](https://github.com/imLinguin/nile) | Nessun pacchetto pulito su nessuna distro, nemmeno PyPI (il nome "nile" su PyPI è un progetto Python estraneo, non installarlo). Via cross-distro: `pip install --user git+https://github.com/imLinguin/nile.git`. Su Arch, l'AUR `nile-git` è l'alternativa nativa |
-| Classic Console (ROM) | [`RetroArch`](https://www.retroarch.com/) + core libretro necessari, [`ScummVM`](https://www.scummvm.org/) (giochi punta-e-clicca), [`DOSBox Staging`](https://dosbox-staging.github.io/) (giochi DOS) | Nessun account richiesto — legge direttamente `~/Roms/` (percorso configurabile, vedi `.env`). Per ROM con immagine CD (`.cue`/`.bin`) o `.7z`, richiede anche `unzip` e `p7zip` — estrazione automatica al primo avvio del gioco |
+| Classic Console (ROM) | [`RetroArch`](https://www.retroarch.com/) + core libretro necessari, [`ScummVM`](https://www.scummvm.org/) (giochi punta-e-clicca), [`DOSBox Staging`](https://dosbox-staging.github.io/) (giochi DOS) | Nessun account richiesto — legge direttamente `~/Roms/` (percorso configurabile, vedi `.env`). Sistemi CD/DVD (PSX, Saturn, Dreamcast, PS2) supportati come `.zip`/`.7z` (richiede `unzip` e `p7zip`, estrazione automatica persistente al primo avvio) o come cartella già estratta, con qualunque combinazione di `.cue`/`.bin`/`.gdi`/`.chd`/`.iso`. Titoli multi-disco riconosciuti automaticamente (tag `(Disc N)`/`(CD N)` nel nome) e uniti in un `.m3u` generato per il cambio disco da RetroArch |
 
 ### Compatibilità Windows (Wine/Proton) — FONDAMENTALE
 
@@ -195,7 +195,7 @@ Tutte le variabili sono opzionali — X-Launcher funziona anche senza `.env`, co
 |---|---|
 | `STEAM_API_KEY` | Steam Web API key, per il tempo di gioco ufficiale Steam. Ottienila su https://steamcommunity.com/dev/apikey |
 | `STEAM_ID` | Il tuo SteamID64 — rilevato automaticamente se vuoto |
-| `ROMS_PATH` | Cartella ROM per Classic Console (default `~/Roms/`) — struttura attesa: `~/Roms/SNES/`, `~/Roms/N64/`, ecc., solo file `.zip` |
+| `ROMS_PATH` | Cartella ROM per Classic Console (default `~/Roms/`) — struttura attesa: `~/Roms/SNES/`, `~/Roms/N64/`, `~/Roms/PSX/`, `~/Roms/SATURN/`, `~/Roms/DREAMCAST/`, `~/Roms/PS2/`, ecc. Per i sistemi a cartuccia, file `.zip`; per i sistemi CD/DVD, anche `.7z`, o una cartella già estratta con dentro `.cue`/`.bin`/`.gdi`/`.chd`/`.iso` |
 | `STEAMGRIDDB_API_KEY` | Cover art per GOG/Epic/Classic Console. Chiave su https://www.steamgriddb.com/profile/preferences/api |
 | `IGDB_CLIENT_ID` / `IGDB_CLIENT_SECRET` | Rating, generi, descrizione, data di uscita. Registra un'app su https://dev.twitch.tv/console |
 

@@ -1583,16 +1583,31 @@ async function startServer() {
   // richiesta è stata accettata prima che il processo muoia, altrimenti la
   // fetch lato frontend fallirebbe con un errore di connessione invece di
   // un successo pulito.
+  //
+  // v2.2.17-dev.2 — BUG REALE segnalato dall'utente: con xdash.service
+  // installato (demone persistente, pensato per restare sempre attivo),
+  // questo endpoint lo terminava comunque ad ogni "Chiudi la Dashboard" —
+  // conveniva quando l'unico modello era "un processo usa-e-getta rilanciato
+  // da kiosk-launch.sh ad ogni apertura", ma qui rendeva vano il senso
+  // stesso di avere un demone persistente (serviva un `systemctl restart
+  // xdash` manuale prima di ogni riapertura). `INVOCATION_ID` è impostata
+  // automaticamente da systemd per i processi che avvia — assente se il
+  // processo gira come fallback manuale/di sviluppo (kiosk-launch.sh senza
+  // xdash attivo, o `--local-server`). Sotto systemd: il processo (e il
+  // tray, stesso discorso — deve restare caldo per la prossima apertura)
+  // NON vengono terminati, solo la finestra del browser si chiude (lato
+  // client, vedi handleExit in App.tsx). Fallback/dev: comportamento
+  // invariato, terminazione completa.
   app.post('/api/system/exit', (_req, res) => {
-    writeLog('system', '[SYSTEM] Shutdown request received — stopping...');
+    const managedBySystemd = !!process.env.INVOCATION_ID;
 
-    // v0.99.90 — termina anche il demone tray Python, se attivo. Prima di
-    // questo fix, in sessioni di sviluppo successive le modifiche al
-    // codice di tray.py non avrebbero mai effetto finché il vecchio
-    // processo restava vivo in background — stesso identico problema già
-    // visto con server.ts stesso: un rebuild da solo non basta, il
-    // processo va terminato esplicitamente perché quello nuovo (rilanciato
-    // al prossimo avvio da kiosk-launch.sh) carichi il codice aggiornato.
+    // v2.2.17-dev.3 — BUG segnalato dall'utente: in dev.2 il pkill del tray
+    // era dentro lo stesso ramo "solo se non gestito da systemd", quindi
+    // chiudendo la Dashboard con xdash attivo il tray restava aperto — non
+    // era quello che voleva. Il tray è un demone indipendente da xdash (lo
+    // avvia kiosk-launch.sh, non xdash), quindi la sua terminazione va
+    // decisa a parte: sempre, indipendentemente da come viene gestito il
+    // processo node.
     try {
       execSync('pkill -f "tray.py"', { stdio: 'ignore' });
       writeLog('system', '[SYSTEM] Python tray daemon terminated.');
@@ -1602,6 +1617,13 @@ async function startServer() {
       // era attivo (es. .venv-tray mai configurato, o già terminato).
     }
 
+    if (managedBySystemd) {
+      writeLog('system', '[SYSTEM] Exit request received — xdash.service gestisce il processo, nessuna terminazione (resta pronto per la prossima apertura).');
+      res.json({ success: true, message: 'Solo la finestra (e il tray) si chiudono — il servizio resta attivo.' });
+      return;
+    }
+
+    writeLog('system', '[SYSTEM] Shutdown request received — stopping...');
     res.json({ success: true, message: 'Chiusura in corso.' });
     setTimeout(() => process.exit(0), 300);
   });

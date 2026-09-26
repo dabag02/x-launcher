@@ -25,7 +25,11 @@
 
 set -u
 
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# v2.2.17-dev.1 — stessa correzione di kiosk-launch.sh: `dirname "$0"`
+# non segue il symlink /usr/local/bin/x-launcher creato da install.sh,
+# risolvendo PROJECT_DIR nel posto sbagliato se invocato tramite quel
+# comando invece che con il path reale in /opt/x-launcher.
+PROJECT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LAUNCHER_URL="http://localhost:3000"
 WINDOW_TITLE="X-Launcher HTPC"
 WAIT_TIMEOUT=30

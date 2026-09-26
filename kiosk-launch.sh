@@ -5,7 +5,15 @@
 
 LAUNCHER_URL="http://localhost:3000"
 WAIT_TIMEOUT=30
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# v2.2.17-dev.1 — BUG REALE segnalato dall'utente: install.sh crea un
+# symlink in /usr/local/bin/x-launcher → questo script in /opt/x-launcher/.
+# `dirname "$0"` non segue i symlink: lanciando col comando `x-launcher`
+# da terminale, PROJECT_DIR risolveva a /usr/local/bin invece del vero
+# /opt/x-launcher, mandando in cerca .venv-tray (e potenzialmente
+# dist/server.cjs) nel posto sbagliato — da cui il systray mai avviato
+# in quella modalità, pur essendo presente sul disco. `readlink -f`
+# risolve il link fino al file reale prima di calcolare la cartella.
+PROJECT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 # --- v0.99.30 — Opzione --always-on-top (default: disattivata) ---
 # --- v2.1.10-dev.4 — Opzione --borderless (default: disattivata): forza
@@ -19,16 +27,43 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # FORCED_BROWSER prende il primo argomento che non è una flag nota.
 X_LAUNCHER_ALWAYS_ON_TOP="false"
 X_LAUNCHER_FORCE_BORDERLESS="false"
+# v2.2.17-dev.2 — richiesta utente: poter testare le modifiche locali
+# senza dover fermare xdash.service in /opt per liberare la porta 3000.
+# Porta dedicata e separata, MAI la stessa di xdash — le due istanze
+# possono girare in parallelo senza conflitti.
+X_LAUNCHER_LOCAL_SERVER="false"
+LOCAL_SERVER_PORT=3001
 FORCED_BROWSER=""
 for arg in "$@"; do
   case "$arg" in
     --always-on-top) X_LAUNCHER_ALWAYS_ON_TOP="true" ;;
     --borderless)    X_LAUNCHER_FORCE_BORDERLESS="true" ;;
+    --local-server)  X_LAUNCHER_LOCAL_SERVER="true" ;;
     *) [ -z "$FORCED_BROWSER" ] && FORCED_BROWSER="$arg" ;;
   esac
 done
 echo "[KIOSK] Always-on-top: ${X_LAUNCHER_ALWAYS_ON_TOP}" 
 echo "[KIOSK] Borderless forzato da CLI: ${X_LAUNCHER_FORCE_BORDERLESS}"
+
+# v2.2.17-dev.2 — vedi commento sopra su X_LAUNCHER_LOCAL_SERVER. Da qui
+# in poi LAUNCHER_URL punta alla porta dedicata: ogni controllo/apertura
+# più sotto nello script la usa già senza bisogno di altre modifiche.
+# BROWSER_URL (diversa da LAUNCHER_URL) è quella passata davvero al
+# browser — in questa modalità porta anche ?localdev=1, letto da App.tsx
+# per mostrare un indicatore in-app: utile perché in modalità kiosk/app
+# la barra degli indirizzi è nascosta, quindi la porta da sola non è
+# visibile guardando la finestra.
+BROWSER_URL="$LAUNCHER_URL"
+if [ "$X_LAUNCHER_LOCAL_SERVER" = "true" ]; then
+  LAUNCHER_URL="http://localhost:${LOCAL_SERVER_PORT}"
+  BROWSER_URL="${LAUNCHER_URL}/?localdev=1"
+  echo "=============================================================="
+  echo "[KIOSK] MODALITA' SERVER LOCALE — porta ${LOCAL_SERVER_PORT}"
+  echo "[KIOSK] Dati letti/scritti dalla copia di sviluppo in:"
+  echo "[KIOSK]   ${PROJECT_DIR}"
+  echo "[KIOSK] xdash (/opt, porta 3000) NON viene toccato."
+  echo "=============================================================="
+fi
 
 # --- v2.0.41-dev.7 — richiesta utente: rientro da Steam Big Picture.
 # X-Launcher è aggiunto come Non-Steam Game in Steam (scripts/setup-
@@ -45,7 +80,7 @@ echo "[KIOSK] Borderless forzato da CLI: ${X_LAUNCHER_FORCE_BORDERLESS}"
 # sprecato. `wmctrl -a` per mostrare la finestra è lo stesso, identico
 # comando già usato da show_window() in tray.py — non una nuova
 # assunzione, lo stesso meccanismo già collaudato per ogni gioco.
-if curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null && command -v wmctrl &>/dev/null && wmctrl -l 2>/dev/null | grep -q "X-Launcher HTPC"; then
+if [ "$X_LAUNCHER_LOCAL_SERVER" != "true" ] && curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null && command -v wmctrl &>/dev/null && wmctrl -l 2>/dev/null | grep -q "X-Launcher HTPC"; then
   echo "[KIOSK] Daemon e finestra già attivi — rientro da Steam Big Picture, nessun nuovo avvio."
   curl -s -X POST "${LAUNCHER_URL}/api/system/steam-bigpicture-closed" &>/dev/null
   wmctrl -a "X-Launcher HTPC" 2>/dev/null
@@ -92,7 +127,11 @@ echo "[KIOSK] Sessione dedicata (nessun DE sotto): ${X_LAUNCHER_DEDICATED_SESSIO
 # `systemctl status xdash` / `journalctl -u xdash` PRIMA di
 # indagare altrove, invece di considerarlo un avvio normale.
 if ! curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null; then
-  echo "[KIOSK] Daemon non attivo — avvio come fallback locale (xdash.service non rilevato attivo)." 
+  if [ "$X_LAUNCHER_LOCAL_SERVER" = "true" ]; then
+    echo "[KIOSK] Avvio server locale dedicato sulla porta ${LOCAL_SERVER_PORT}."
+  else
+    echo "[KIOSK] Daemon non attivo — avvio come fallback locale (xdash.service non rilevato attivo)." 
+  fi
   cd "$PROJECT_DIR" 
 
   if [ ! -f "$PROJECT_DIR/dist/server.cjs" ]; then 
@@ -105,10 +144,15 @@ if ! curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null; then
   # cartella giusta": e sempre nello stesso posto per qualunque modo si
   # avvii il daemon (dev, questo script, o xdash.service — vedi anche li).
   ENV_FILE="$HOME/.local/share/x-launcher/.env" 
+  # v2.2.17-dev.2 — PORT_OVERRIDE vuota fuori da --local-server (il node
+  # sottostante usa il default 3000 di server.ts), valorizzata solo qui:
+  # xdash in /opt continua ad ascoltare la sua porta indisturbato.
+  PORT_OVERRIDE=""
+  [ "$X_LAUNCHER_LOCAL_SERVER" = "true" ] && PORT_OVERRIDE="PORT=${LOCAL_SERVER_PORT}"
   if [ -f "$ENV_FILE" ]; then 
-    NODE_ENV=production node --env-file="$ENV_FILE" dist/server.cjs & 
+    env $PORT_OVERRIDE NODE_ENV=production node --env-file="$ENV_FILE" dist/server.cjs & 
   else
-    NODE_ENV=production node dist/server.cjs & 
+    env $PORT_OVERRIDE NODE_ENV=production node dist/server.cjs & 
   fi 
   DAEMON_PID=$! 
   echo "[KIOSK] Daemon avviato (PID $DAEMON_PID)" 
@@ -445,12 +489,12 @@ if [ "$X_LAUNCHER_DEDICATED_SESSION" = "true" ]; then
     FIREFOX_PROFILE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/x-launcher/firefox-profile"
     setup_firefox_profile 
     exec gamescope -W 1920 -H 1080 -f -e -- \
-      "$BROWSER" --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${LAUNCHER_URL}" 
+      "$BROWSER" --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${BROWSER_URL}" 
   else
     # Avvio Chromium in Gamescope
     exec gamescope -W 1920 -H 1080 -f -e -- \
       "$BROWSER" \
-        --app="${LAUNCHER_URL}" \
+        --app="${BROWSER_URL}" \
         --noerrdialogs \
         --disable-infobars \
         --no-first-run \
@@ -479,7 +523,7 @@ else
       # stesso obiettivo dell'utente per il ramo Chromium: un solo
       # comportamento uniforme su ogni desktop, senza trick per-DE.
       echo "[KIOSK] Firefox in modalità -kiosk reale (default)." 
-      "$BROWSER" -kiosk --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${LAUNCHER_URL}" & 
+      "$BROWSER" -kiosk --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${BROWSER_URL}" & 
       BROWSER_PID=$! 
       focus_dashboard_window & 
       wait "$BROWSER_PID" 
@@ -497,7 +541,7 @@ else
       # rimandato a una sessione futura.
       maybe_enable_xfce_panel_autohide 
       maybe_enable_xfwm4_titleless 
-      "$BROWSER" --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${LAUNCHER_URL}" & 
+      "$BROWSER" --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${BROWSER_URL}" & 
       BROWSER_PID=$! 
       focus_dashboard_window & 
       remove_window_decorations & 
@@ -506,7 +550,7 @@ else
   else 
     if [ "$DISPLAY_MODE" = "window" ]; then 
       "$BROWSER" \
-        --app="${LAUNCHER_URL}" \
+        --app="${BROWSER_URL}" \
         --window-size=1280,800 \
         --window-position=100,100 \
         --noerrdialogs \
@@ -532,7 +576,7 @@ else
       maybe_enable_xfce_panel_autohide 
       maybe_enable_xfwm4_titleless 
       "$BROWSER" \
-        --app="${LAUNCHER_URL}" \
+        --app="${BROWSER_URL}" \
         --start-maximized \
         --use-system-title-bar \
         --noerrdialogs \
@@ -566,7 +610,7 @@ else
       # stessi trick che questo cambiamento vuole eliminare.
       echo "[KIOSK] Chromium in modalità --kiosk reale (default)." 
       "$BROWSER" \
-        --app="${LAUNCHER_URL}" \
+        --app="${BROWSER_URL}" \
         --kiosk \
         --noerrdialogs \
         --disable-infobars \

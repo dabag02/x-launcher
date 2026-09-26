@@ -912,3 +912,64 @@ per questa classe di bug — `isLastLaunchedGameRunning()` ora riporta
 `running:true` correttamente per tutta la durata reale del lancio.
 Non toccato in questo step (un fix alla volta) — da rivalutare una
 volta confermato che dev.14 risolve il problema sul campo.
+
+---
+
+# v2.1.10-Mercury — MILESTONE CONGELATA
+
+Chiude il ciclo di sviluppo aperto dopo v2.1.9-Mercury (dev.1→dev.14,
+questo file). Tutti e tre i punti della roadmap di sessione confermati
+su hardware reale, salvo un problema noto esplicitamente accantonato.
+
+## Punto 1 — Kiosk mode reale come default
+Vero `--kiosk` (Chromium) / `-kiosk` (Firefox) come default sopra un
+desktop esistente (XFCE/MATE/GNOME/Plasma), al posto del trick storico
+borderless-massimizzato-senza-decorazioni (ora fallback esplicito via
+`--borderless` o un vecchio `app.conf`). Menu corretto di conseguenza
+(ciclo a 2 stati, etichette oneste). **Confermato su hardware reale**:
+lag accettabile come previsto.
+
+## Punto 2 — Input controller durante un gioco
+Due bug reali corretti all'origine (`handlePlay` interrogava l'endpoint
+sbagliato; un fallback in `InputManager` ignorava `enabled`). Aggiunte
+due combo: Select+L1+R1 (risveglia la Dashboard, apre il Gestore
+Processi) e Select+◄/► (torna alla finestra del gioco tracciato,
+correlata per PID/cgroup). Corretti altri tre bug reali emersi dai test
+(freeze che si toglieva da solo dopo 5 minuti; analogico bloccato dopo
+aver terminato un gioco dal Gestore Processi; chiusura prematura dei
+lanci Proton, causa e fix entrambi in `isLastLaunchedGameRunning`).
+**Confermato su hardware reale** per tutti i bug sopra.
+
+**Resta aperto, accantonato su richiesta esplicita dell'utente per una
+sessione futura "con le idee più lucide"**: con più finestre aperte,
+Select+◄/► sposta correttamente il focus di input sul gioco (verificato
+da log reale) ma la Dashboard resta visivamente disegnata sopra —
+sospetto non verificato: `X_LAUNCHER_ALWAYS_ON_TOP` in `kiosk-launch.sh`
+imposta uno stato EWMH "sempre sopra" persistente che potrebbe
+interferire indipendentemente da chi ha il focus.
+
+## Punto 3 — Splash integrata nella Dashboard
+Sostituita la vecchia finestra browser separata con un overlay React
+nella Dashboard stessa, stesso stream SSE già esistente. Il freeze
+scatta comunque immediatamente al lancio (scelta esplicita
+dell'utente); nuova combo Select+B annulla un lancio lungo senza
+intaccare il freeze normale in-game. Timeout di sicurezza alzato da
+120s a 10 minuti. **Confermato su hardware reale**, con un beneficio
+collaterale non previsto: boot dei giochi sensibilmente più veloce
+(un intero processo browser in meno da avviare ad ogni lancio).
+
+## Altri limiti noti, non risolti in questo ciclo
+- Per Firefox, la modalità "finestra" condivide ancora lo stesso
+  profilo/CSS della modalità borderless (gap pre-esistente, mai un vero
+  ramo distinto — servirebbe un secondo profilo dedicato).
+- Il meccanismo di grazia "quick exit" in `startGameExitPolling`
+  (`pgrepGameStillRunning(installDirName)`) è probabilmente in gran
+  parte superfluo dopo il fix Proton di dev.14 — non toccato, da
+  rivalutare in futuro.
+- `X-Launcher-Roadmap.md` (sezione URI scheme) cita ancora il vecchio
+  meccanismo hide/show di `tray.py`, rimosso in dev.3 — da correggere
+  quando/se si riprende quel punto di roadmap.
+
+## Verifica finale prima del congelamento
+`tsc --noEmit` pulito, `check-focus-ids.cjs` invariato (109 id
+dichiarati, stesso falso positivo noto `key-sugg-0` di inizio sessione).
