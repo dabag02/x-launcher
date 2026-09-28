@@ -149,7 +149,15 @@ Il progetto funziona perfettamente lanciato direttamente dalla propria cartella,
 ./build.sh start        # avvia senza ricompilare (demone già compilato)
 ./build.sh start firefox   # avvia forzando Firefox invece di Chromium
 ./build.sh dev           # modalità sviluppo, con hot module reload
+./build.sh start --local-server   # avvia su una porta dedicata (3001),
+                                   # senza toccare un xdash.service già
+                                   # attivo in /opt — utile per testare
+                                   # modifiche locali in parallelo a
+                                   # un'installazione di sistema esistente
 ```
+
+Con `--local-server` un badge rosso compare sotto il numero di versione
+nel quick-menu, per non confondere mai quale istanza si sta guardando.
 
 Utile durante lo sviluppo attivo o per provare X-Launcher senza impegnarsi in un'installazione permanente.
 

@@ -118,3 +118,21 @@ esistente, nessuna modifica necessaria lì).
 `tsc --noEmit` pulito, `check-focus-ids.cjs` invariato (109 id). **Da
 confermare su hardware reale**: badge nella posizione giusta, tray
 terminato alla chiusura anche con xdash attivo.
+
+---
+
+## Congelato — MILESTONE STABILE v2.2.18-Mercury
+
+Ciclo chiuso qui (dev.1→dev.3), tutto confermato funzionante
+dall'utente. Riepilogo: risolto un bug reale di path (`PROJECT_DIR`
+sbagliato quando lanciato tramite il symlink `/usr/local/bin/x-launcher`
+creato da `install.sh` — impediva l'avvio del systray sull'installazione
+in `/opt`) e un bug reale più consistente per cui "Chiudi la Dashboard"
+terminava anche `xdash.service`, il demone persistente pensato per
+restare sempre attivo, costringendo a un `systemctl restart` manuale ad
+ogni riapertura — risolto distinguendo il caso "gestito da systemd" da
+quello "fallback locale" (`INVOCATION_ID`). Aggiunta anche una nuova
+opzione di sviluppo, `--local-server` (porta dedicata 3001 + badge
+visivo nel quick-menu), per testare modifiche locali senza dover fermare
+un'installazione di sistema attiva. `INSTALL.md` aggiornato con la nuova
+opzione.
