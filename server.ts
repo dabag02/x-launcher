@@ -29,6 +29,7 @@ import { spawn, execSync, execFileSync } from 'child_process';
 import { subscribeLaunchPhase, getLastLaunchPhase } from './src/backend/launchPhaseTracker';
 import * as processManager from './src/backend/processManager';
 import * as windowFocus from './src/backend/windowFocus';
+import { setActiveDisplay, getActiveSessionInfo } from './src/backend/activeDisplay';
 import { requestLaunchCancel } from './src/backend/splashOrchestrator';
 
 // Stesso pattern già usato in altri moduli backend (downloadManager.ts,
@@ -478,6 +479,31 @@ async function startServer() {
   // un ciclo fra tutte le finestre aperte.
   app.post("/api/system/input-focus-game", (_req, res) => {
     res.json({ success: windowFocus.focusGameWindow() });
+  });
+
+  // POST /api/system/active-display — v2.2.19-dev.2. BUG REALE
+  // CONFERMATO: xdash.service ha DISPLAY=:0 fisso (valido solo per la
+  // sessione XFCE, vedi commento in xdash.service) — i giochi lanciati
+  // mentre la sessione Kiosk gamescope (Step 20) era quella attiva
+  // finivano invisibili sull'altro DISPLAY. Ogni sessione (kiosk-launch.sh
+  // per XFCE, gamescope-session.sh per la Kiosk) chiama questo endpoint
+  // quando diventa quella attiva, riportando il proprio DISPLAY reale.
+  // Vedi activeDisplay.ts per la diagnosi completa.
+  app.post("/api/system/active-display", (req, res) => {
+    const { display, waylandDisplay, kind, resolution } = req.body ?? {};
+    setActiveDisplay(display, waylandDisplay, kind, resolution);
+    writeLog('system', `[ACTIVE-DISPLAY] Sessione attiva segnalata: kind=${kind ?? 'desktop'} DISPLAY=${display ?? '(non impostato)'} WAYLAND_DISPLAY=${waylandDisplay ?? '(non impostato)'}${resolution ? ` risoluzione=${resolution}` : ''}`);
+    res.json({ success: true });
+  });
+
+  // GET /api/system/session-info — v2.2.19-dev.7. Stato reale per il
+  // pulsante "Modalità Gamescope" del menu (sostituisce il mock
+  // isGamescope lato frontend): se la sessione Kiosk è davvero attiva in
+  // questo momento e, se sì, a quale risoluzione sta girando gamescope —
+  // valori riportati da gamescope-session.sh/kiosk-launch.sh allo stesso
+  // POST /api/system/active-display sopra, non rilevati da qui.
+  app.get("/api/system/session-info", (_req, res) => {
+    res.json(getActiveSessionInfo());
   });
 
   // GET /api/logs?type=error,download&limit=200

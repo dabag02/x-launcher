@@ -49,6 +49,7 @@ import { execFileSync } from 'child_process';
 import { writeLog } from './logger';
 import { gameManager } from './gameManager';
 import * as processManager from './processManager';
+import { getActiveDisplayEnv } from './activeDisplay';
 
 const WINDOW_TITLE = 'X-Launcher HTPC';
 
@@ -59,7 +60,10 @@ let missingToolWarned = false;
 
 function run(cmd: string, args: string[]): string | null {
   try {
-    return execFileSync(cmd, args, { encoding: 'utf-8', timeout: 3000 });
+    // v2.2.19-dev.3 — stesso bug/fix di windowDetector.ts: senza questo
+    // env esplicito, wmctrl/xprop ereditano il DISPLAY statico del
+    // daemon, sbagliato quando la sessione attiva è la Kiosk gamescope.
+    return execFileSync(cmd, args, { encoding: 'utf-8', timeout: 3000, env: { ...process.env, ...getActiveDisplayEnv() } });
   } catch (err) {
     if (!missingToolWarned) {
       missingToolWarned = true;

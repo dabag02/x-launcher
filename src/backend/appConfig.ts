@@ -38,9 +38,41 @@ export type DisplayMode = 'kiosk' | 'window' | 'borderless';
 // public/locales/, non hardcoded qui.
 export type Language = 'it' | 'en';
 
+// v2.2.19-dev.7 — Step 20 seguito: risoluzione della sessione Kiosk
+// (gamescope standalone), ciclabile dal menu quick-menu della Dashboard
+// e persistita qui (stesso file bash-readable) così gamescope-session.sh
+// la legge direttamente all'avvio senza passare dal backend Node.
+export type GamescopeResolution = 'HD' | 'FullHD' | 'QHD' | '4K';
+
+// Ordine di ciclo del pulsante "Modalità Gamescope" — HD → FullHD → QHD →
+// 4K → di nuovo HD. Tenuto qui (non solo in gamescope-session.sh) perché
+// sia il backend (endpoint di ciclo, Step 2) sia lo script bash devono
+// concordare sullo stesso ordine e sugli stessi W×H — vedi il mapping
+// duplicato in gamescope-session.sh (bash puro, non può importare da qui)
+// con un commento che rimanda a questa fonte di verità.
+export const GAMESCOPE_RESOLUTION_ORDER: GamescopeResolution[] = ['HD', 'FullHD', 'QHD', '4K'];
+
+export const GAMESCOPE_RESOLUTION_SIZES: Record<GamescopeResolution, { width: number; height: number }> = {
+  HD:     { width: 1280, height: 720 },
+  FullHD: { width: 1920, height: 1080 },
+  QHD:    { width: 2560, height: 1440 },
+  '4K':   { width: 3840, height: 2160 },
+};
+
+export function nextGamescopeResolution(current: GamescopeResolution): GamescopeResolution {
+  const idx = GAMESCOPE_RESOLUTION_ORDER.indexOf(current);
+  return GAMESCOPE_RESOLUTION_ORDER[(idx + 1) % GAMESCOPE_RESOLUTION_ORDER.length];
+}
+
 export interface AppConfig {
   fullscreen: boolean;
   displayMode: DisplayMode;
+  // v2.2.19-dev.7 — vedi sopra. Default 'QHD': era il valore hardcoded in
+  // gamescope-session.sh prima di questo step (2560x1440, la risoluzione
+  // reale del monitor dell'utente) — mantenuto come default per non
+  // cambiare comportamento a chi aggiorna senza aver ancora mai toccato
+  // il nuovo pulsante.
+  gamescopeResolution: GamescopeResolution;
   // Step 19b (v1.1.38) — lingua UI scelta manualmente in Settings. Nessun
   // autorilevamento della lingua di sistema ancora implementato (roadmap):
   // il default resta 'it' finché quella parte non viene costruita.
@@ -60,6 +92,7 @@ const DEFAULTS: AppConfig = {
   displayMode: 'kiosk',    // equivalente a fullscreen=true prima di v0.99.9
   language: 'it',
   avatarUrl: null,
+  gamescopeResolution: 'QHD',
 };
 
 function parseConfFile(raw: string): Partial<AppConfig> {
@@ -80,6 +113,9 @@ function parseConfFile(raw: string): Partial<AppConfig> {
     }
     if (key === 'avatarUrl') {
       out.avatarUrl = val === '' ? null : val;
+    }
+    if (key === 'gamescopeResolution' && (val === 'HD' || val === 'FullHD' || val === 'QHD' || val === '4K')) {
+      out.gamescopeResolution = val;
     }
   }
   return out;
@@ -137,6 +173,7 @@ export function writeAppConfig(partial: Partial<AppConfig>): AppConfig {
     `displayMode=${next.displayMode}`,
     `language=${next.language}`,
     `avatarUrl=${next.avatarUrl ?? ''}`,
+    `gamescopeResolution=${next.gamescopeResolution}`,
     '',
   ].join('\n');
   writeFileSync(CONFIG_PATH, body, 'utf-8');

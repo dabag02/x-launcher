@@ -44,6 +44,7 @@ import { resolveProtonBin } from './runners/implementations';
 import { getSharedPrefixBasePath, resolveSharedPrefixExecutionPath } from './sharedLauncherManager';
 import { getThirdPartyLauncherDefinition, getThirdPartyLauncherByStoreId, ThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { browseForFile } from './filePicker';
+import { getActiveDisplayEnv } from './activeDisplay';
 
 // v0.99.35 — versione asincrona di execFile, usata per "sync" tra
 // download e creazione prefix (vedi runEpic/runGOG). Non sostituisce
@@ -349,8 +350,9 @@ function buildSafeEnv(extra: Record<string, string> = {}): Record<string, string
     ...process.env,
     HOME:             home,
     PATH:             pathParts.join(':'),
-    DISPLAY:          process.env.DISPLAY         ?? ':0',
-    WAYLAND_DISPLAY:  process.env.WAYLAND_DISPLAY ?? '',
+    // v2.2.19-dev.2 — stesso bug/fix di implementations.ts: DISPLAY
+    // statico sostituito da quello della sessione realmente attiva.
+    ...getActiveDisplayEnv(),
     XDG_RUNTIME_DIR:  process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`,
     // Forza winetricks in modalità non-interattiva anche se DISPLAY è disponibile
     WINETRICKS_GUI:   'none',

@@ -27,15 +27,24 @@
 #  sessione utente su Arch con LightDM, ma multi-user.target è
 #  per definizione precedente a qualunque login — quel display X
 #  non esiste ancora quando il servizio parte. Per le richieste
-#  HTTP/SQLite del daemon questo non ha alcun effetto. Ha effetto
-#  reale solo se/quando il daemon invoca wine/winetricks (che
-#  richiedono un X server reale): in quel caso le chiamate
-#  falliranno finché una sessione grafica su quel DISPLAY non è
-#  effettivamente attiva. Non risolto qui di proposito — è un
-#  problema distinto (passare un X server vivo a un servizio di
-#  sistema pre-login) che merita la sua diagnosi dedicata se e
-#  quando emergerà un fallimento reale di wine lanciato dal
-#  daemon di sistema, non dal browser in sessione utente.
+#  HTTP/SQLite del daemon questo non ha alcun effetto. Resta un
+#  problema distinto, non risolto qui di proposito (passare un X
+#  server vivo a un servizio di sistema pre-login): finché
+#  nessuna sessione ha ancora chiamato POST /api/system/active-
+#  display (vedi sotto), le chiamate wine/winetricks falliranno
+#  se lanciate prima che qualunque sessione grafica sia attiva.
+#
+#  v2.2.19-dev.2 — BUG REALE CONFERMATO E RISOLTO (parzialmente):
+#  questo valore statico era anche la causa dei giochi lanciati
+#  "invisibili" quando la sessione attiva era la Kiosk gamescope
+#  (Step 20) invece di questa sessione XFCE — ogni processo di
+#  gioco erediva questo DISPLAY fisso, sbagliato per quella
+#  sessione. Risolto SOLO per il caso "una sessione grafica è già
+#  attiva": kiosk-launch.sh e gamescope-session.sh ora segnalano
+#  al daemon, all'avvio della propria sessione, il DISPLAY
+#  realmente in uso via POST /api/system/active-display — questo
+#  valore statico resta solo il fallback per la finestra fra il
+#  boot e la prima segnalazione (vedi activeDisplay.ts).
 # =============================================================
 
 [Unit]

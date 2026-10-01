@@ -23,6 +23,15 @@
 #  raggiungibile da riga di comando con un nome breve da
 #  qualunque cartella.
 #
+#  v2.2.19-dev.1 — Aggiunta la seconda sessione di login
+#  "X-Launcher Kiosk" (Step 20, gamescope standalone via DRM/KMS,
+#  nessun desktop sotto — vedi gamescope-session.sh). A differenza
+#  di xlauncher.desktop (sessione X11, cartella xsessions/), questa
+#  è una sessione Wayland nativa: va in /usr/share/wayland-sessions/,
+#  cartella che potrebbe non esistere ancora su un sistema che non
+#  ha mai offerto sessioni Wayland — creata esplicitamente con
+#  mkdir -p invece di assumerla già presente.
+#
 #  Uso:
 #    sudo ./install.sh              # installa/aggiorna /opt/x-launcher
 #    sudo ./install.sh --uninstall  # rimuove /opt/x-launcher e i link
@@ -32,6 +41,9 @@ set -e
 INSTALL_DIR="/opt/x-launcher"
 BIN_LINK="/usr/local/bin/x-launcher"
 SESSION_FILE="/usr/share/xsessions/xlauncher.desktop"
+# v2.2.19-dev.1 — sessione Kiosk (Wayland/gamescope), vedi nota sopra.
+KIOSK_SESSION_DIR="/usr/share/wayland-sessions"
+KIOSK_SESSION_FILE="${KIOSK_SESSION_DIR}/xlauncher-kiosk.desktop"
 # Step 19a (v1.1.69) — protocollo xlaunch://. Il .desktop del gestore va
 # in /usr/share/applications (scoperto da xdg-mime per tutti gli utenti
 # del sistema, stessa logica di FHS già seguita per INSTALL_DIR), ma la
@@ -43,7 +55,7 @@ XLAUNCH_DESKTOP_FILE="/usr/share/applications/xlaunch-protocol.desktop"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$EUID" -ne 0 ]; then
-  echo "[INSTALL] Questo script richiede sudo (scrive in /opt, /usr/local/bin, /usr/share/xsessions)."
+  echo "[INSTALL] Questo script richiede sudo (scrive in /opt, /usr/local/bin, /usr/share/xsessions, /usr/share/wayland-sessions)."
   echo "[INSTALL] Riprova con: sudo ./install.sh"
   exit 1
 fi
@@ -53,6 +65,7 @@ if [ "$1" = "--uninstall" ]; then
   rm -rf "$INSTALL_DIR"
   rm -f "$BIN_LINK"
   rm -f "$SESSION_FILE"
+  rm -f "$KIOSK_SESSION_FILE"
   rm -f "$XLAUNCH_DESKTOP_FILE"
   update-desktop-database /usr/share/applications 2>/dev/null || true
   echo "[INSTALL] Rimosso. Le impostazioni utente in ~/.local/share/x-launcher NON sono state toccate (sono per-utente, non riguardano l'installazione globale)."
@@ -99,8 +112,17 @@ chmod +x "$INSTALL_DIR"/*.sh
 echo "[INSTALL] Creo il symlink ${BIN_LINK} → ${INSTALL_DIR}/kiosk-launch.sh..."
 ln -sf "$INSTALL_DIR/kiosk-launch.sh" "$BIN_LINK"
 
-echo "[INSTALL] Installo la sessione LightDM in ${SESSION_FILE}..."
+echo "[INSTALL] Installo la sessione LightDM (X11) in ${SESSION_FILE}..."
 cp "$INSTALL_DIR/xlauncher.desktop" "$SESSION_FILE"
+
+# v2.2.19-dev.1 — sessione Kiosk (Wayland/gamescope standalone). Il file
+# .desktop NON va reso eseguibile (lezione della vecchia diagnosi Step 20:
+# il bit eseguibile su xlauncher.desktop fu trovato come anomalia, non
+# risolutiva ma comunque da evitare) — solo gamescope-session.sh lo è, già
+# garantito dal chmod +x "*.sh" sopra.
+echo "[INSTALL] Installo la sessione LightDM (Wayland/gamescope) in ${KIOSK_SESSION_FILE}..."
+mkdir -p "$KIOSK_SESSION_DIR"
+cp "$INSTALL_DIR/xlauncher-kiosk.desktop" "$KIOSK_SESSION_FILE"
 
 echo "[INSTALL] Registro il protocollo xlaunch:// in ${XLAUNCH_DESKTOP_FILE}..."
 cp "$INSTALL_DIR/xlaunch-protocol.desktop" "$XLAUNCH_DESKTOP_FILE"
@@ -124,7 +146,8 @@ fi
 echo ""
 echo "[INSTALL] Completato."
 echo "[INSTALL] - Avvio da riga di comando, qualunque cartella: x-launcher"
-echo "[INSTALL] - Sessione dedicata: selezionabile dal menu sessioni alla schermata di login LightDM."
+echo "[INSTALL] - Sessione dedicata X11: selezionabile dal menu sessioni alla schermata di login LightDM."
+echo "[INSTALL] - Sessione Kiosk (Wayland/gamescope, senza desktop): selezionabile come 'X-Launcher Kiosk' dallo stesso menu."
 echo "[INSTALL] - Link xlaunch://<id-gioco> (da browser, script esterni, altre integrazioni) ora avviano il gioco direttamente, aprendo la Dashboard nascosta in background se non è già in esecuzione."
 echo "[INSTALL] - Per disinstallare: sudo ${INSTALL_DIR}/install.sh --uninstall (oppure rilancia questo script con --uninstall)"
 echo ""

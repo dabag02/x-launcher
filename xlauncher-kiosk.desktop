@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=X-Launcher Kiosk
+Comment=X-Launcher HTPC — sessione Wayland/gamescope indipendente, senza desktop
+Exec=/opt/x-launcher/gamescope-session.sh
+Type=Application
+DesktopNames=X-Launcher-Kiosk

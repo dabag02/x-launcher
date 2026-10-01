@@ -18,6 +18,7 @@ import { EAAppPlugin } from './plugins/eaAppPlugin';
 import { isLauncherBootstrapped, findGameExeInSharedPrefix, launchSharedLauncher, isSharedLauncherRunning, launchGameInSharedPrefix, getSharedPrefixBasePath, waitForContainerReadyMarker, canRemoveSharedPrefix, SHARED_LAUNCHERS_DIR } from './sharedLauncherManager';
 import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition, THIRD_PARTY_LAUNCHERS } from './plugins/thirdPartyLaunchers';
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions, removeRemasterOptions } from './plugins/classicPlugin';
+import { getActiveDisplayEnv } from './activeDisplay';
 import { BaseRunner } from './runners/base';
 import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary, expandHome } from './runners/implementations';
 import { downloadManager, resolveGogExe, resolveRunnerWineEnv, storeDir, slugFromId } from './downloadManager';
@@ -481,9 +482,11 @@ class GameManager {
     // prima di concludere che manca davvero il pacchetto.
     const home = process.env.HOME ?? require('os').homedir();
     const existingPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
+    // v2.2.19-dev.2 — stesso bug/fix di implementations.ts/downloadManager.ts:
+    // DISPLAY statico sostituito da quello della sessione realmente attiva.
     const x11Env = {
       ...process.env,
-      DISPLAY: process.env.DISPLAY ?? ':0',
+      ...getActiveDisplayEnv(),
       PATH: [`${home}/.local/bin`, '/usr/local/bin', '/usr/bin', '/bin', existingPath].join(':'),
     };
     let xsetOk = false;
@@ -520,7 +523,7 @@ class GameManager {
   }
 
   private stopScreensaverInhibit() {
-    const x11Env = { ...process.env, DISPLAY: process.env.DISPLAY ?? ':0' };
+    const x11Env = { ...process.env, ...getActiveDisplayEnv() };
     try { execFileSync('xset', ['s', 'on'], { stdio: 'ignore', env: x11Env }); execFileSync('xset', ['+dpms'], { stdio: 'ignore', env: x11Env }); } catch {}
     if (this.screensaverInhibitProcess) {
       try { this.screensaverInhibitProcess.kill(); } catch {}

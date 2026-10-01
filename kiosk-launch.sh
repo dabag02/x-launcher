@@ -508,6 +508,20 @@ if [ "$X_LAUNCHER_DEDICATED_SESSION" = "true" ]; then
 
 # CASO 2: AVVIO SOPRA UN DESKTOP ENVIRONMENT ESISTENTE (XFCE/MATE/GNOME/Plasma)
 else
+  # v2.2.19-dev.2 — BUG REALE CONFERMATO: xdash.service ha DISPLAY=:0
+  # fisso — corretto finché esiste solo questa sessione, ma se prima era
+  # attiva la sessione Kiosk (gamescope, DISPLAY diverso) il daemon resta
+  # sul valore vecchio. Segnaliamo qui il $DISPLAY reale di QUESTA
+  # sessione ogni volta che diventa quella attiva — vedi activeDisplay.ts
+  # e server.ts (POST /api/system/active-display) per il dettaglio.
+  # v2.2.19-dev.7 — kind:"desktop" azzera lo stato "sessione Kiosk attiva"
+  # nel daemon quando si torna qui da gamescope, così il pulsante
+  # "Modalità Gamescope" nel menu torna correttamente a "Disattivo".
+  curl -sf -X POST "${LAUNCHER_URL}/api/system/active-display" \
+    -H "Content-Type: application/json" \
+    -d "{\"display\":\"${DISPLAY:-:0}\",\"kind\":\"desktop\"}" &>/dev/null \
+    || echo "[KIOSK] ATTENZIONE: segnalazione DISPLAY al daemon fallita (curl)."
+
   if [ "$BROWSER_TYPE" = "firefox" ]; then 
     # v1.1.81 — -no-remote + profilo dedicato, altrimenti la Dashboard
     # finisce come scheda in un Firefox già in esecuzione (segnalato

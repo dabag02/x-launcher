@@ -25,6 +25,7 @@ import { execFileSync } from 'child_process';
 import { writeLog } from './logger';
 import * as db from './db';
 import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
+import { getActiveDisplayEnv } from './activeDisplay';
 
 export interface WindowInfo {
   id: string;
@@ -40,7 +41,15 @@ export interface WindowDetectionResult {
 
 export function listWindows(): WindowInfo[] {
   try {
-    const out = execFileSync('wmctrl', ['-lx'], { encoding: 'utf-8' });
+    // v2.2.19-dev.3 — BUG REALE CONFERMATO: senza questo env esplicito,
+    // wmctrl eredita il process.env statico del daemon (DISPLAY=:0, la
+    // sessione XFCE) anche quando la sessione realmente attiva è la
+    // Kiosk gamescope — non vede mai la finestra del gioco, la splash
+    // non si chiude mai (fino al timeout di sicurezza di 10 minuti, che
+    // a quel punto termina forzatamente anche il gioco). Stesso fix già
+    // applicato a runners/implementations.ts, downloadManager.ts e
+    // gameManager.ts — qui mancava.
+    const out = execFileSync('wmctrl', ['-lx'], { encoding: 'utf-8', env: { ...process.env, ...getActiveDisplayEnv() } });
     return out.split('\n').filter(Boolean).map(line => {
       const parts = line.trim().split(/\s+/);
       return {

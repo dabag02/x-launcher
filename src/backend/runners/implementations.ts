@@ -18,6 +18,7 @@ import path from 'path';
 import { writeLog } from '../logger';
 import { DATA_DIR } from '../paths';
 import * as processManager from '../processManager';
+import { getActiveDisplayEnv } from '../activeDisplay';
 import type { ScopeKind } from '../processManager';
 
 // ---------------------------------------------------------------------------
@@ -97,7 +98,16 @@ function spawnDetached(
   const spawnOpts = {
     detached: true,
     stdio,
-    env: { ...process.env, ...cleanEnv },
+    // v2.2.19-dev.2 — BUG REALE CONFERMATO: process.env.DISPLAY qui è
+    // quello statico di xdash.service (:0, valido solo per la sessione
+    // XFCE) — con la sessione Kiosk gamescope attiva, i giochi finivano
+    // invisibili sull'altro DISPLAY. getActiveDisplayEnv() riporta quello
+    // della sessione realmente attiva (segnalato da kiosk-launch.sh /
+    // gamescope-session.sh), con fallback al vecchio comportamento se
+    // nessuna sessione l'ha ancora segnalato. ...cleanEnv resta per
+    // ultimo apposta: un DISPLAY esplicito nel profilo del gioco continua
+    // a vincere su entrambi.
+    env: { ...process.env, ...getActiveDisplayEnv(), ...cleanEnv },
     ...(resolvedCwd ? { cwd: resolvedCwd } : {}),
   };
 
@@ -390,7 +400,17 @@ export class WineRunner extends BaseRunner {
   readonly name = 'Wine (Lutris Build)';
 
   async launch(game: Game, config?: RunnerConfig) {
-    const wineBin = resolveBinaryPath('wine-lutris') ?? resolveBinaryPath('wine');
+    // v2.2.19-dev.5 — BUG REALE CONFERMATO: il fallback a 'wine' di
+    // sistema quando 'wine-lutris' non è nel PATH era silenzioso — il
+    // log riportava comunque "Runner: Wine (Lutris Build)" dando
+    // l'impressione di usare la build giusta anche quando in realtà
+    // gira plain wine (potenzialmente privo delle patch/runtime che
+    // avevano motivato la scelta di quel runner specifico).
+    const lutrisBin = resolveBinaryPath('wine-lutris');
+    const wineBin = lutrisBin ?? resolveBinaryPath('wine');
+    if (wineBin && !lutrisBin) {
+      writeLog('warning', `[WINE] 'wine-lutris' non trovato nel PATH del daemon — uso '${wineBin}' (wine di sistema) al suo posto per ${game.title}. Se la build Lutris è installata altrove, verifica il PATH di xdash.service.`);
+    }
     if (!wineBin) {
       return { success: false, message: `Wine non trovato. Installa con: sudo pacman -S wine` };
     }
@@ -792,7 +812,11 @@ export async function launchEpicViaLegendary(game: Game, runner: BaseRunner, con
     // umu-run invoca comunque al suo interno.
     applyProtonAnticheatEnv(env, config, 'EPIC');
   } else {
-    const wineBin = resolveBinaryPath('wine-lutris') ?? resolveBinaryPath('wine');
+    const lutrisBin = resolveBinaryPath('wine-lutris');
+    const wineBin = lutrisBin ?? resolveBinaryPath('wine');
+    if (wineBin && !lutrisBin) {
+      writeLog('warning', `[WINE] 'wine-lutris' non trovato nel PATH del daemon — uso '${wineBin}' (wine di sistema) al suo posto per ${game.title}. Se la build Lutris è installata altrove, verifica il PATH di xdash.service.`);
+    }
     if (!wineBin) {
       return { success: false, message: 'Wine non trovato. Installa con: sudo pacman -S wine' };
     }
