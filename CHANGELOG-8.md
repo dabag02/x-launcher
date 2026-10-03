@@ -365,3 +365,178 @@ tecnicamente più delicato, il self-restart dentro `gamescope-session.sh`
 non esiste ancora); frontend (sostituire il mock `isGamescope`, icona
 verde, pulsante ciclico, countdown rosso sotto la versione app — stesso
 punto dove compare già l'indicatore "Server locale" —, stringhe IT/EN).
+
+## v2.2.19-dev.8
+
+**Step 2/3 — ciclo risoluzione + riavvio di gamescope senza chiudere la
+sessione.**
+
+**`gamescope-session.sh` ristrutturato** (da singolo avvio+wait a ciclo
+riavviabile): la lettura della risoluzione e l'avvio di gamescope sono
+ora funzioni (`read_resolution_from_config`, `launch_gamescope`)
+richiamabili più volte. Il proprio PID viene scritto in
+`gamescope-session.pid` (stessa cartella dati) perché il daemon possa
+trovarlo. Un trap su `SIGUSR1` marca una richiesta di riavvio pendente;
+il ciclo principale, quando `wait` ritorna per quel segnale, termina
+l'istanza corrente di gamescope e ne avvia una nuova con la risoluzione
+aggiornata — **senza uscire dallo script**, quindi senza tornare al
+login LightDM. Un'uscita naturale (Exit dal menu, crash) resta invece
+l'uscita vera dello script, comportamento identico a prima.
+
+**Nuovo endpoint `POST /api/system/gamescope-resolution/cycle`**
+(`server.ts`): avanza `gamescopeResolution` in `app.conf` alla voce
+successiva (HD→FullHD→QHD→4K→HD) e, solo se `getActiveSessionInfo()`
+riporta la Kiosk come sessione attiva in questo momento, legge il
+pidfile e invia `SIGUSR1` a `gamescope-session.sh` per il riavvio.
+Se la Kiosk non è attiva (es. si cicla da desktop), la risoluzione viene
+comunque persistita per il prossimo avvio della Kiosk, senza alcun
+segnale da inviare. Il countdown di 5s mostrato all'utente resta
+interamente lato frontend (Step 3, prossimo) — arrivati a questo
+endpoint il riavvio è già deciso.
+
+**File modificati**:
+- `gamescope-session.sh` — ristrutturato in funzioni + ciclo + trap
+  SIGUSR1 + pidfile (riscritto per intero, cambi troppo estesi per un
+  patch mirato).
+- `server.ts` — nuovo endpoint, import di `readAppConfig`/
+  `writeAppConfig`/`nextGamescopeResolution` da `appConfig.ts` e
+  `DATA_DIR` da `paths.ts` (niente import duplicati: `fs`/`path` erano
+  già presenti nel file).
+
+**Ancora NON fatto (Step 3, prossimo)**: tutto il frontend — sostituire
+il mock `isGamescope` con `GET /api/system/session-info`, icona verde,
+pulsante ciclico con countdown di 5s in rosso sotto la versione app
+(stesso punto del badge "Server locale"), reset del countdown su nuova
+pressione, chiamata a `POST /api/system/gamescope-resolution/cycle` allo
+scadere, stringhe IT/EN.
+
+**Promemoria dell'utente, da fare DOPO aver concluso tutti gli step
+previsti per questa feature**: ripulire `install.sh` dalle sessioni
+LightDM non più in uso — lasciare solo "X-Launcher Kiosk" come
+alternativa al desktop (la vecchia sessione X11 `xlauncher.desktop`,
+mai stata funzionante secondo la diagnosi Step 20 originale, va
+rimossa dall'installer).
+
+## v2.2.19-dev.9
+
+**Step 3/3 completato — "Modalità Gamescope" reale nel menu.** Feature
+chiusa (i tre step pianificati nella sessione sono tutti consegnati).
+
+**Correzione al disegno di dev.8**: l'endpoint unico `.../cycle`
+(persisti + riavvia) avrebbe causato un riavvio reale di gamescope per
+OGNI pressione del pulsante durante il countdown di 5s, vanificandolo.
+Diviso in due:
+- `POST /api/system/gamescope-resolution/cycle` — avanza e persiste
+  soltanto, nessun segnale di riavvio. Chiamato dal frontend ad ogni
+  pressione, anche durante il countdown.
+- `POST /api/system/gamescope-resolution/apply` — non cambia la
+  risoluzione, applica quella già persistita (segnale SIGUSR1 a
+  `gamescope-session.sh`, solo se la Kiosk è attiva ora). Chiamato una
+  sola volta, allo scadere del countdown.
+
+**Frontend** (`src/App.tsx`):
+- `isGamescope` non è più un mock: polling di `GET
+  /api/system/session-info` ogni 5s (stessa cadenza/pattern del polling
+  log/download già esistente). Stesso stato alimenta sia la label
+  "GAMESCOPE STANDALONE / WAYLAND NATIVE" nell'header (uso preesistente,
+  automaticamente corretto) sia il pulsante nel quick-menu.
+- Pulsante "Modalità Gamescope": icona verde (`OptionItem` ha ora un
+  prop `iconClassName`, nuovo) quando la Kiosk è attiva; valore mostrato
+  = risoluzione reale invece di "Attivo"/"Disattivo".
+- Click → `handleGamescopeCycle`: chiama `.../cycle`, mostra subito la
+  risoluzione scelta (`pendingGamescopeResolution`), avvia un countdown
+  di 5s; una pressione durante il countdown lo resetta e avanza
+  ulteriormente (confermato dall'utente); allo scadere, chiama
+  `.../apply` una sola volta.
+- Countdown mostrato in rosso sotto "X-Launcher Core {versione}", stesso
+  punto/stile del badge "Server locale" già lì (richiesta esplicita
+  dell'utente) — stringa `quickMenu:gamescopeApplyCountdown` (IT/EN).
+
+**File modificati**:
+- `server.ts` — endpoint diviso in `/cycle` + `/apply` (sostituisce
+  l'unico `/cycle` di dev.8).
+- `public/locales/it/quickMenu.json` / `en/quickMenu.json` — nuova
+  stringa `gamescopeApplyCountdown`.
+- `src/App.tsx` — vedi sopra (diff puntuali nella risposta, non il file
+  intero: oltre 10.500 righe).
+
+**Promemoria ancora aperto** (da fare ora che la feature è conclusa, su
+richiesta esplicita dell'utente): ripulire `install.sh` dalle sessioni
+LightDM non in uso — lasciare solo "X-Launcher Kiosk", rimuovere la
+vecchia `xlauncher.desktop` (X11, mai funzionante).
+
+**Non verificato su hardware reale**: l'intera feature (Step 1-3) non è
+ancora stata testata end-to-end dall'utente.
+
+## v2.2.19-dev.10
+
+**BUG MIO, confermato — schermata nera segnalata dall'utente**: in
+dev.9 ho usato `safeJson` nel nuovo polling `session-info` e in
+`handleGamescopeCycle`, ma quel nome era già usato nel progetto per un
+helper definito **localmente dentro un altro `useEffect`** — fuori
+scope per qualunque altro codice. `esbuild`/il bundler non lo segnala
+(JS non tipizzato a runtime, l'errore emerge solo quando la funzione
+viene davvero chiamata): `Uncaught ReferenceError: safeJson is not
+defined`, da cui la Dashboard restava nera. Confermato riproducendo la
+diagnosi con un diff puntuale fra una copia di riferimento con le
+modifiche di dev.9 applicate correttamente e il file dell'utente, poi
+verificando entrambi con `esbuild` — zero errori di sintassi in
+entrambi, la causa reale era questo riferimento fuori scope, non un
+errore di trascrizione dell'utente.
+
+**Fix**: nuovo helper di modulo `parseJsonResponse` (stessa identica
+logica del `safeJson` locale preesistente, lasciato invariato dov'era —
+nessun altro codice toccato), usato nei due punti nuovi di dev.9.
+
+**Trovato nello stesso giro, separato — transcription error
+dell'utente, non mio**: il blocco del countdown era finito annidato
+dentro il blocco `isLocalDevServer` invece che come fratello dopo la
+sua chiusura — sintatticamente valido (compila), ma il countdown
+sarebbe comparso solo quando `isLocalDevServer` è vero. Segnalato
+all'utente con la correzione, non applicato qui (il nostro riferimento
+era già corretto).
+
+**File modificati**:
+- `src/App.tsx` — nuovo helper `parseJsonResponse` + due riferimenti
+  corretti (righe indicate nella risposta, non il file intero: oltre
+  10.500 righe).
+
+## v2.2.19-dev.11
+
+**BUG MIO, confermato dal log reale — causa di TUTTI i sintomi "Modalità
+Gamescope" segnalati dall'utente** (icona sempre "Disattivo", countdown
+che non riavvia mai nulla, unico modo per applicare la risoluzione era
+uscire e rientrare da LightDM). Il messaggio reale di gamescope è:
+
+```
+[xwayland/server.c:107] Starting Xwayland on :0
+```
+
+La regex di rilevazione in `gamescope-session.sh` cercava `Xwayland
+:[0-9]+` (senza la parola "on" in mezzo) — non ha **mai** trovato nulla,
+su nessun avvio, fin dalla sua introduzione in dev.2. Di conseguenza la
+segnalazione `kind:"kiosk"` al daemon non partiva mai (non un rifiuto
+del backend: lo script non la inviava proprio), `session-info` restava
+sempre `kind:"desktop"`, e l'endpoint `.../apply` non inviava mai
+`SIGUSR1` (gate su `kind === 'kiosk'`). L'unico motivo per cui la nuova
+risoluzione risultava comunque applicata uscendo e rientrando dalla
+sessione è che `.../cycle` persiste correttamente in `app.conf`
+indipendentemente da questo bug — un riavvio completo della sessione la
+legge comunque da capo.
+
+**Fix**: pattern reso tollerante al testo intermedio
+(`Xwayland[^0-9]*:[0-9]+`), copre sia "Xwayland on :N" (il formato
+reale) sia il vecchio "Xwayland :N" ipotizzato, nel caso il testo
+cambi ancora in una futura versione di gamescope.
+
+**File modificati**:
+- `gamescope-session.sh` — regex di rilevazione DISPLAY corretta.
+
+**Diagnosi parallela chiusa senza modifiche**: il crash Mesa/DRM
+("Permission denied" su `dri_gbm.so`) nel log precedente dell'utente —
+permessi del file verificati normali, nessun mount `noexec`, AppArmor
+non attivo. L'utente conferma che la sessione Kiosk parte sempre
+correttamente: quel crash resta un episodio isolato, non riprodotto,
+non più indagato per ora.
+
+**Non ancora verificato su hardware reale**: il fix di questa versione.

@@ -6,6 +6,7 @@
   "gamescopeMode": "Modalità Gamescope",
   "on": "Attivo",
   "off": "Disattivo",
+  "gamescopeApplyCountdown": "Nuova risoluzione tra {{seconds}}s…",
   "toggleTheme": "Cambia Tema",
   "consoleMode": "Modalità Console",
   "backToDesktop": "Torna al Desktop",

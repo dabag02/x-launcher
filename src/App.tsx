@@ -421,6 +421,28 @@ function useScrollOnceOverflow(ref: React.RefObject<HTMLInputElement | null>, tr
   }, [trigger]);
 }
 
+// v2.2.19-dev.11 — BUG REALE CONFERMATO (mio, non di trascrizione):
+// esisteva già un helper omonimo "safeJson" ma definito LOCALMENTE dentro
+// un altro useEffect (poco più sotto) — fuori scope per qualunque altro
+// codice. Il polling di /api/system/session-info e
+// handleGamescopeCycle (v2.2.19-dev.11) lo referenziavano comunque,
+// causando "ReferenceError: safeJson is not defined" a runtime (non
+// intercettato a compilazione) e una Dashboard che restava nera. Questo
+// helper di modulo, condiviso, risolve il problema per quei due punti;
+// il safeJson locale preesistente resta invariato dov'era, nessun altro
+// codice toccato.
+async function parseJsonResponse(res: Response) {
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 50)}`);
+  }
+  const ct = res.headers.get('content-type');
+  if (!ct || !ct.includes('application/json')) {
+    throw new Error(`Expected JSON but got ${ct}`);
+  }
+  return res.json();
+}
+
 function MainApp() {
   // Step 19b (v1.1.38) — namespace 'settings': solo la sezione Settings è
   // stata migrata finora (vedi roadmap Step 19b per il piano di
@@ -701,7 +723,19 @@ function MainApp() {
   // Step 11 — versione runner corrente per il gioco selezionato
   const [runnerVersion, setRunnerVersion] = useState<string>('');
   
+  // v2.2.19-dev.11 — Step 20 seguito, Step 3/3: isGamescope era un mock
+  // (useState(false) invertito dal click). Ora riflette la sessione
+  // Kiosk realmente attiva, rilevata via polling di
+  // GET /api/system/session-info (vedi useEffect dedicato più sotto).
   const [isGamescope, setIsGamescope] = useState(false);
+  const [gamescopeResolution, setGamescopeResolution] = useState<string | undefined>(undefined);
+  // Risoluzione scelta con l'ultima pressione del pulsante, mostrata
+  // subito (anche prima che il riavvio vero avvenga) — azzerata allo
+  // scadere del countdown, quando il valore torna a riflettere lo stato
+  // reale (gamescopeResolution se la Kiosk è attiva, altrimenti "Disattivo").
+  const [pendingGamescopeResolution, setPendingGamescopeResolution] = useState<string | null>(null);
+  const [gamescopeCountdown, setGamescopeCountdown] = useState<number | null>(null);
+  const gamescopeCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [showDebugConsole, setShowDebugConsole] = useState(false); // Step 13 UI: nascosta di default
   // Step 12f — Log console avanzata
   const [logFilter, setLogFilter] = useState<Set<string>>(new Set());   // set vuoto = mostra tutto
@@ -828,7 +862,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v2.2.19-dev.7');
+  const [appVersion, setAppVersion] = useState('v2.2.19-dev.11');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1892,6 +1926,63 @@ function MainApp() {
       clearInterval(interval);
     };
   }, [activeStore, searchQuery, sortBy, sortOrder, selectedGenre, selectedCategory, buildLibraryCacheKey, refreshGamesList]);
+
+  // v2.2.19-dev.11 — sostituisce il mock isGamescope: polling leggero
+  // (stessa cadenza di fetchStatus sopra, 5s) dello stato reale della
+  // sessione Kiosk. Non tocca pendingGamescopeResolution/countdown —
+  // quelli sono gestiti solo da handleGamescopeCycle sotto.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchSessionInfo = () => {
+      fetch('/api/system/session-info').then(parseJsonResponse).then((data: { kind?: string; resolution?: string }) => {
+        if (cancelled || !data) return;
+        setIsGamescope(data.kind === 'kiosk');
+        setGamescopeResolution(data.resolution);
+      }).catch(() => {});
+    };
+    fetchSessionInfo();
+    const interval = setInterval(fetchSessionInfo, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // v2.2.19-dev.11 — pulsante "Modalità Gamescope": ogni pressione avanza
+  // e persiste subito la risoluzione successiva (POST .../cycle, nessun
+  // riavvio), mostra il risultato all'utente, e (ri)avvia un countdown di
+  // 5s. Una nuova pressione durante il countdown lo resetta e avanza
+  // ulteriormente — il riavvio vero (POST .../apply) scatta una sola
+  // volta, solo quando il countdown arriva in fondo senza altre
+  // pressioni nel frattempo.
+  const handleGamescopeCycle = useCallback(() => {
+    fetch('/api/system/gamescope-resolution/cycle', { method: 'POST' })
+      .then(parseJsonResponse)
+      .then((data: { resolution?: string }) => {
+        if (!data?.resolution) return;
+        setPendingGamescopeResolution(data.resolution);
+        if (gamescopeCountdownTimerRef.current) {
+          clearInterval(gamescopeCountdownTimerRef.current);
+        }
+        setGamescopeCountdown(5);
+        gamescopeCountdownTimerRef.current = setInterval(() => {
+          setGamescopeCountdown(prev => {
+            if (prev === null || prev <= 1) {
+              if (gamescopeCountdownTimerRef.current) {
+                clearInterval(gamescopeCountdownTimerRef.current);
+                gamescopeCountdownTimerRef.current = null;
+              }
+              fetch('/api/system/gamescope-resolution/apply', { method: 'POST' }).catch(() => {});
+              setPendingGamescopeResolution(null);
+              return null;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => () => {
+    if (gamescopeCountdownTimerRef.current) clearInterval(gamescopeCountdownTimerRef.current);
+  }, []);
 
   // v0.99.35 — quando un task passa a 'completed', programma la sua
   // rimozione dalla visualizzazione locale dopo 6s. scheduledTimersRef
@@ -6343,7 +6434,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 <OptionItem group="quick-menu" id="opt-accounts" icon={Gamepad2} label={t('quickMenu:manageAccounts')} onClick={() => { setShowSettings(true); setActiveGroup('settings'); setActiveSettingsTab('accounts'); setFocusedId(null); setTimeout(() => setFocusedId('settings-tab-accounts'), 80); }} />
                 <OptionItem group="quick-menu" id="opt-avatar" icon={User} label={t('quickMenu:avatar')} onClick={() => { setShowAvatarLibrary(true); setActiveGroup('avatar-library'); setTimeout(() => setFocusedId('avatar-0'), 80); }} />
                 <OptionItem group="quick-menu" id="opt-process-manager" icon={Cpu} label={t('quickMenu:processManager')} onClick={() => { setShowProcessManager(true); setActiveGroup('process-manager'); setTimeout(() => setFocusedId('pm-close'), 80); }} />
-                <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label={t('quickMenu:gamescopeMode')} value={isGamescope ? t('quickMenu:on') : t('quickMenu:off')} onClick={() => { setIsGamescope(!isGamescope); play('select'); }} />
+                <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label={t('quickMenu:gamescopeMode')} value={pendingGamescopeResolution ?? (isGamescope ? (gamescopeResolution ?? t('quickMenu:on')) : t('quickMenu:off'))} iconClassName={isGamescope ? "text-green-500" : undefined} onClick={handleGamescopeCycle} />
                 <OptionItem group="quick-menu" id="opt-theme" icon={theme === 'dark' ? Sun : Moon} label={t('quickMenu:toggleTheme')} value={theme} onClick={toggleTheme} />
                 {dedicatedSession ? (
                   <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label={t('quickMenu:consoleMode')} value={t('quickMenu:backToDesktop')} onClick={switchToDesktop} />
@@ -6379,6 +6470,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               {isLocalDevServer && (
                 <div className="text-center text-[9px] font-black uppercase tracking-widest text-red-500">
                   Server locale · :{window.location.port || '80'}
+                </div>
+              )}
+              {/* v2.2.19-dev.11 — countdown prima del riavvio di gamescope
+                  alla nuova risoluzione (Modalità Gamescope, qui sopra),
+                  stesso posto/stile del badge "Server locale": è dove
+                  l'utente già guarda per capire lo stato della sessione. */}
+              {gamescopeCountdown !== null && (
+                <div className="text-center text-[9px] font-black uppercase tracking-widest text-red-500">
+                  {t('quickMenu:gamescopeApplyCountdown', { seconds: gamescopeCountdown })}
                 </div>
               )}
             </motion.div>
@@ -10419,7 +10519,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
   );
 }
 
-function OptionItem({ id, group, icon: Icon, label, value, onClick, pending }: any) {
+function OptionItem({ id, group, icon: Icon, label, value, onClick, pending, iconClassName }: any) {
   const { play } = useAudio();
   return (
     <Focusable id={id} group={group} onEnter={() => { onClick?.(); play('select'); }}>
@@ -10447,7 +10547,7 @@ function OptionItem({ id, group, icon: Icon, label, value, onClick, pending }: a
               Intero" è abbastanza lungo da forzare comunque lo shrink),
               "Modalità Gamescope" no. */}
           <div className="flex items-center gap-4 flex-1 min-w-0">
-            <Icon size={18} strokeWidth={3} className="shrink-0" />
+            <Icon size={18} strokeWidth={3} className={cn("shrink-0", iconClassName)} />
             <span className="font-black italic uppercase text-sm tracking-tight">{label}</span>
           </div>
           {/* shrink-0: il valore (es. "Schermo Intero", "Confirm A") non

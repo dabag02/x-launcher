@@ -30,6 +30,8 @@ import { subscribeLaunchPhase, getLastLaunchPhase } from './src/backend/launchPh
 import * as processManager from './src/backend/processManager';
 import * as windowFocus from './src/backend/windowFocus';
 import { setActiveDisplay, getActiveSessionInfo } from './src/backend/activeDisplay';
+import { readAppConfig, writeAppConfig, nextGamescopeResolution } from './src/backend/appConfig';
+import { DATA_DIR } from './src/backend/paths';
 import { requestLaunchCancel } from './src/backend/splashOrchestrator';
 
 // Stesso pattern già usato in altri moduli backend (downloadManager.ts,
@@ -504,6 +506,54 @@ async function startServer() {
   // POST /api/system/active-display sopra, non rilevati da qui.
   app.get("/api/system/session-info", (_req, res) => {
     res.json(getActiveSessionInfo());
+  });
+
+  // POST /api/system/gamescope-resolution/cycle — v2.2.19-dev.9. Avanza
+  // gamescopeResolution alla prossima voce (HD→FullHD→QHD→4K→HD) e la
+  // persiste in app.conf. SOLO QUESTO — nessun segnale di riavvio qui.
+  // Chiamato dal frontend ad OGNI pressione del pulsante, anche durante
+  // il countdown di 5s: una pressione in più deve solo avanzare la
+  // selezione mostrata, non far ripartire gamescope sul colpo (altrimenti
+  // N pressioni durante il countdown causerebbero N riavvii reali,
+  // vanificando il countdown stesso). Vedi /apply sotto per il riavvio
+  // vero, chiamato una sola volta allo scadere del countdown.
+  app.post("/api/system/gamescope-resolution/cycle", (_req, res) => {
+    const current = readAppConfig();
+    const next = nextGamescopeResolution(current.gamescopeResolution);
+    writeAppConfig({ gamescopeResolution: next });
+    writeLog('system', `[GAMESCOPE] Risoluzione Kiosk selezionata: ${next} (era ${current.gamescopeResolution}) — non ancora applicata.`);
+    res.json({ resolution: next });
+  });
+
+  // POST /api/system/gamescope-resolution/apply — v2.2.19-dev.9. Non
+  // tocca la risoluzione persistita — la applica, così com'è in questo
+  // momento in app.conf (qualunque sequenza di /cycle l'abbia portata
+  // lì), segnalando a gamescope-session.sh di riavviarsi SOLO se la
+  // sessione Kiosk è davvero attiva ora. Chiamato dal frontend una sola
+  // volta, allo scadere del countdown di 5s senza ulteriori pressioni.
+  // pidfile scritto da gamescope-session.sh stesso al proprio avvio.
+  app.post("/api/system/gamescope-resolution/apply", (_req, res) => {
+    const { gamescopeResolution } = readAppConfig();
+    const sessionInfo = getActiveSessionInfo();
+    let restarted = false;
+    if (sessionInfo.kind === 'kiosk') {
+      const pidFile = path.join(DATA_DIR, 'gamescope-session.pid');
+      try {
+        if (fs.existsSync(pidFile)) {
+          const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+          if (Number.isFinite(pid) && pid > 0) {
+            process.kill(pid, 'SIGUSR1');
+            restarted = true;
+            writeLog('system', `[GAMESCOPE] Segnale di riavvio inviato a gamescope-session.sh (PID ${pid}) per applicare ${gamescopeResolution}.`);
+          }
+        } else {
+          writeLog('warning', `[GAMESCOPE] Sessione Kiosk segnalata attiva ma ${pidFile} non trovato — impossibile far riavviare gamescope ora.`);
+        }
+      } catch (err) {
+        writeLog('error', `[GAMESCOPE] Invio segnale di riavvio fallito: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    res.json({ resolution: gamescopeResolution, restarted });
   });
 
   // GET /api/logs?type=error,download&limit=200
