@@ -27,6 +27,43 @@ import { emitLaunchPhase, LAUNCH_WINDOW_TIMEOUT_MS } from './launchPhaseTracker'
 import { waitForGameWindow, WindowInfo } from './windowDetector';
 import { notificationEngine, type EngineEvent } from './notificationEngine';
 import { writeLog } from './logger';
+import { gameManager } from './gameManager';
+import { getActiveSessionInfo } from './activeDisplay';
+
+// v2.2.19-dev.12 — Step 20 seguito: CONFERMATO su hardware reale
+// (wmctrl -lx → "Cannot get client list properties (_NET_CLIENT_LIST or
+// WIN_CLIENT_LIST)") che l'Xwayland interna di gamescope standalone non
+// espone proprietà EWMH — la rilevazione finestra via windowDetector.ts
+// è strutturalmente impossibile in questa sessione, non un bug da
+// correggere. Su scelta esplicita dell'utente (opzione 1 fra le due
+// proposte): nella sola sessione Kiosk, la splash si chiude non appena
+// il processo di lancio risulta attivo nel gestore (stessa identica
+// verifica di isLastLaunchedGameRunning, già usata altrove per lo stesso
+// scopo), SENZA mai tentare la rilevazione finestra. Compromesso
+// accettato consapevolmente: può chiudere la splash un istante prima che
+// il gioco mostri davvero la propria finestra (la verifica diventa vera
+// al primo processo reale della catena di lancio, non necessariamente
+// l'eseguibile finale) — preferibile ad aspettare qualcosa che in questa
+// sessione non arriverà mai. Sessione desktop (XFCE) INVARIATA: wmctrl
+// funziona lì, resta il percorso basato su windowDetector.ts.
+function waitForProcessAlive(gameId: string, timeoutMs: number, pollIntervalMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = () => {
+      const check = gameManager.isLastLaunchedGameRunning();
+      if (check.running && check.gameId === gameId) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() - start >= timeoutMs) {
+        resolve(false);
+        return;
+      }
+      setTimeout(tick, pollIntervalMs);
+    };
+    tick();
+  });
+}
 
 function waitForLaunchError(gameId: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -84,7 +121,17 @@ export async function raceSplashClose(
   requiresLauncherId: string | undefined,
   pidToKillOnTimeout: number | undefined,
 ): Promise<void> {
-  const windowResultPromise = waitForGameWindow(gameId, windowSnapshotBefore, requiresLauncherId, LAUNCH_WINDOW_TIMEOUT_MS);
+  // v2.2.19-dev.12 — vedi commento di waitForProcessAlive sopra: in
+  // Kiosk la rilevazione finestra è impossibile per costruzione
+  // (confermato su hardware reale), sostituita dalla verifica di
+  // processo. Il nome del ramo nel race result resta 'window' in
+  // entrambi i casi — il resto della funzione (emissione fase 'done',
+  // pulizia pendingCancelResolvers) non deve sapere quale dei due ha
+  // prodotto il risultato.
+  const isKiosk = getActiveSessionInfo().kind === 'kiosk';
+  const windowResultPromise = isKiosk
+    ? waitForProcessAlive(gameId, LAUNCH_WINDOW_TIMEOUT_MS).then(found => ({ found }))
+    : waitForGameWindow(gameId, windowSnapshotBefore, requiresLauncherId, LAUNCH_WINDOW_TIMEOUT_MS);
   const errorPromise = waitForLaunchError(gameId, LAUNCH_WINDOW_TIMEOUT_MS);
   const cancelPromise = waitForCancelRequest(gameId);
 
@@ -131,7 +178,8 @@ export async function raceSplashClose(
   // solo (richiesta esplicita dell'utente): lo terminiamo qui.
   emitLaunchPhase({ gameId, phase: 'timeout' });
   if (pidToKillOnTimeout) {
-    writeLog('warning', `[SPLASH] "${gameId}": nessuna finestra rilevata entro ${LAUNCH_WINDOW_TIMEOUT_MS / 1000}s — termino forzatamente il processo di lancio (PID ${pidToKillOnTimeout}).`);
+    const reason = isKiosk ? 'nessun processo rilevato come attivo' : 'nessuna finestra rilevata';
+    writeLog('warning', `[SPLASH] "${gameId}": ${reason} entro ${LAUNCH_WINDOW_TIMEOUT_MS / 1000}s — termino forzatamente il processo di lancio (PID ${pidToKillOnTimeout}).`);
     try { process.kill(pidToKillOnTimeout, 'SIGTERM'); } catch { /* già terminato */ }
     setTimeout(() => {
       try { process.kill(pidToKillOnTimeout, 'SIGKILL'); } catch { /* già terminato */ }

@@ -540,3 +540,201 @@ correttamente: quel crash resta un episodio isolato, non riprodotto,
 non più indagato per ora.
 
 **Non ancora verificato su hardware reale**: il fix di questa versione.
+
+## v2.2.19-dev.12
+
+**Splash in sessione Kiosk — Opzione 1 implementata** (scelta
+dell'utente dopo conferma definitiva: `wmctrl -lx` nella Kiosk restituisce
+"Cannot get client list properties (_NET_CLIENT_LIST or
+WIN_CLIENT_LIST)" — l'Xwayland interna di gamescope standalone non
+espone proprietà EWMH, la rilevazione finestra è strutturalmente
+impossibile in questa sessione, non un bug da rincorrere ulteriormente).
+
+**`src/backend/splashOrchestrator.ts`**: nuova `waitForProcessAlive()`,
+stessa identica verifica di `gameManager.isLastLaunchedGameRunning()`
+(scope/cgroup o pgrep, già matura e testata altrove) invece
+dell'attesa finestra. `raceSplashClose()` ora biforca su
+`getActiveSessionInfo().kind`: in Kiosk usa `waitForProcessAlive`, su
+desktop XFCE resta invariato `waitForGameWindow` (wmctrl funziona lì,
+nessuna regressione). Compromesso accettato esplicitamente dall'utente:
+la splash può chiudersi un istante prima che il gioco mostri davvero la
+propria finestra (il processo risulta "attivo" al primo processo reale
+della catena di lancio) — preferibile ad aspettare un segnale che in
+Kiosk non arriverà mai, fino allo scadere dei 10 minuti di sicurezza con
+conseguente kill del gioco.
+
+**File modificati**:
+- `src/backend/splashOrchestrator.ts` — vedi sopra. Nessuna modifica a
+  `windowDetector.ts`/`windowFocus.ts` (restano il percorso desktop,
+  invariati) né al frontend (le fasi emesse restano le stesse:
+  `done`/`failed`/`cancelled`/`timeout`).
+
+**Diagnosi chiusa, non più da riaprire**: la domanda aperta dal dev.3 in
+poi su EWMH/gamescope ha ora una risposta definitiva e negativa,
+confermata su hardware reale — non ripetere test `wmctrl` in Kiosk in
+futuro, la risposta non cambierà senza un cambio di versione/backend di
+gamescope.
+
+**In corso, parallelo**: l'utente sta verificando `xdotool search` nella
+stessa sessione, per capire se è disponibile un'alternativa a EWMH utile
+per il futuro "gestore degli spazi" (non collegato a questo fix, che non
+ne ha bisogno).
+
+**Non ancora verificato su hardware reale**: questo fix.
+
+## v2.2.19-dev.13
+
+**Pulsante "Modalità Gamescope" nascosto fuori dalla sessione Kiosk**
+(richiesta esplicita dell'utente, in coda dopo il fix della splash).
+
+`src/App.tsx`: l'`OptionItem` del quick-menu ora è renderizzato solo
+quando `isGamescope` è vero (sessione Kiosk realmente attiva, stato già
+reale da dev.9 — non un nuovo meccanismo). Nessuna gestione aggiuntiva
+per il controller: verificato che `FocusProvider` registra/deregistra i
+`Focusable` al mount/smontaggio e lo scoring geometrico lavora solo su
+quelli effettivamente presenti — nessun altro `Focusable` referenzia
+`"opt-gamescope"` come vicino esplicito altrove, quindi nascondere
+l'item è sicuro di per sé, lo scoring salta automaticamente al più
+vicino fra quelli rimasti. Semplificata anche l'espressione del valore
+mostrato (`value`/`iconClassName`), dato che ora l'item esiste solo nel
+ramo "attivo" — rimossa la diramazione per il caso "Disattivo", non più
+raggiungibile.
+
+**File modificati**:
+- `src/App.tsx` — vedi sopra (patch puntuale, non il file intero: oltre
+  10.600 righe).
+
+**Ancora pendente**: output di `xdotool search --name ""` nella sessione
+Kiosk (test dell'utente in corso, per il futuro gestore degli spazi);
+pulizia di `install.sh` (sessioni LightDM non in uso).
+
+## v2.2.19-dev.14
+
+**Rilevazione pacchetti installati via flatpak, tab Gestione Account >
+Sistema** (richiesta dell'utente: ProtonUp-Qt via flatpak non veniva
+rilevato, più in generale altri strumenti installati così).
+
+**Causa confermata** (verificato sul manifest Flathub ufficiale, non
+assunto): `detectSystemTools()` controllava solo
+`binaryExists('protonup')` — il binario della CLI `protonup` (pip/AUR).
+Un'installazione flatpak di ProtonUp-Qt (`net.davidotek.pupgui2`) è
+sandboxata ed espone sul PATH dell'host solo il comando
+`net.davidotek.pupgui2` (la GUI), mai `protonup` — strutturalmente
+invisibile alla vecchia rilevazione, qualunque fosse lo stato del
+sistema.
+
+**Fix**: nuova `getInstalledFlatpakApps()` (una sola chiamata a
+`flatpak list --app --columns=application`, riusata per tutte le voci),
+aggiunta in OR a `binaryExists(...)` per le app standalone con un ID
+Flathub verificato sul manifest ufficiale: ProtonUp-Qt
+(`net.davidotek.pupgui2`), Lutris (`net.lutris.Lutris`), Steam
+(`com.valvesoftware.Steam`), RetroArch (`org.libretro.RetroArch`),
+ScummVM (`org.scummvm.ScummVM`).
+
+**Deliberatamente NON estesa** a gamemode/mangohud/gamescope/wine/umu:
+sono librerie/shim che devono integrarsi con processi lanciati
+nativamente sull'host (LD_PRELOAD, compositor) — una loro ipotetica
+versione flatpak sandboxata non avrebbe comunque alcun effetto sui
+giochi lanciati da X-Launcher. DOSBox-staging lasciato fuori: nessun ID
+Flathub verificato con sufficiente certezza al momento — va aggiunto
+solo dopo una verifica puntuale, non per coerenza con gli altri.
+
+**Non toccato apposta**: il codice che invoca realmente `protonup -i
+<id>` per installare Proton-GE (altra occorrenza di
+`binaryExists('protonup')`, circa riga 167) resta legato alla sola CLI
+nativa — un ProtonUp-Qt flatpak è sandboxato e non espone quella CLI
+scriptabile dall'host, quindi non potrebbe comunque essere invocato così.
+Questa rilevazione serve solo a non fuorviare l'utente con "non
+installato" per uno strumento che in realtà usa a mano dalla sua GUI
+flatpak.
+
+**File modificati**:
+- `src/backend/compatibilityManager.ts` — vedi sopra.
+
+## v2.2.19-dev.15
+
+**Pulizia `install.sh`** (richiesta dell'utente, in coda da diverse
+versioni): rimossa l'installazione della vecchia sessione LightDM X11
+(`xlauncher.desktop`, cartella `xsessions/`) — mai resa funzionante
+(diagnosi originale Step 20, causa mai isolata), sostituita a tutti gli
+effetti dalla Kiosk, l'unica sessione standalone testata e confermata
+funzionante su hardware reale. Il file `xlauncher.desktop` resta nel
+repository come riferimento storico ma non viene più installato né
+rimosso dallo script; su un sistema con un'installazione precedente,
+resta in `xsessions/` finché non rimosso a mano.
+
+**BUG REALE CONFERMATO dall'utente — permessi post-installazione**:
+dopo un'installazione pulita, `/opt/x-launcher` risultava accessibile
+al solo root, costringendo a un `chmod` manuale da terminale. Causa:
+`chmod -R go-w "$INSTALL_DIR"` toglie il bit di scrittura a
+gruppo/altri ma **non garantisce** che lettura/esecuzione siano
+presenti — se i file sorgente avevano già permessi restrittivi (es.
+`umask 077` in fase di sviluppo/clone), il risultato restava illeggibile
+per chiunque non fosse root, indipendentemente da `chown`. Fix:
+permessi impostati esplicitamente — `755` per le directory, `644` per i
+file, poi `+x` sugli script — invece di dipendere da cosa avesse la
+sorgente.
+
+**File modificati**:
+- `install.sh` — entrambe le correzioni sopra; intestazione e messaggi
+  aggiornati di conseguenza (nessun riferimento residuo a
+  `/usr/share/xsessions`).
+
+Verificato con `bash -n install.sh` — sintassi corretta. Comportamento
+da riverificare su un'installazione pulita reale (`sudo ./install.sh`
+su un sistema senza `/opt/x-launcher` preesistente).
+
+---
+
+## Congelato — MILESTONE STABILE v2.5.0-Mercury
+
+Ciclo chiuso qui (dev.1→dev.15), tutto confermato funzionante
+dall'utente su hardware reale. Salto di minor version (2.2→2.5) a
+segnare la portata del ciclo: non solo correzioni, ma lo **Step 20
+completato** — sessione Kiosk standalone (gamescope su DRM/KMS, nessun
+desktop sotto), selezionabile dal greeter LightDM accanto al desktop
+XFCE, dopo anni di tentativi falliti mai arrivati in fondo.
+
+**Step 20 — sessione Kiosk indipendente**: compositore gamescope
+confermato funzionante da zero, con un'intera famiglia di bug reali
+diagnosticati e risolti via log reali, mai per assunzione — xdash.service
+con `DISPLAY` statico che faceva lanciare i giochi sulla sessione
+sbagliata (dev.2/dev.4, inclusa una regressione mia su
+`WAYLAND_DISPLAY` iniettata vuota); fallback silenzioso a wine di
+sistema quando `wine-lutris` non era nel PATH del daemon (dev.5, reso
+visibile nel log); risoluzione gamescope hardcoded (dev.6); regex di
+rilevazione del DISPLAY di Xwayland che non ha mai corrisposto al
+formato reale del log, causa di ogni sintomo della feature "Modalità
+Gamescope" (dev.11).
+
+**Feature "Modalità Gamescope"** (dev.7→dev.13): icona/risoluzione
+reali nel menu al posto del vecchio mock, pulsante ciclico HD/FullHD/
+QHD/4K con countdown di 5s e riavvio di gamescope sul posto (nessun
+ritorno al login), nascosto fuori dalla sessione Kiosk dove non è
+azionabile.
+
+**Splash screen in Kiosk**: diagnosi definitiva — `wmctrl -lx`
+conferma che l'Xwayland interna di gamescope non espone proprietà EWMH,
+rendendo la rilevazione finestra strutturalmente impossibile in questa
+sessione (non un bug, un limite del compositor). Risolta chiudendo la
+splash non appena il processo di lancio risulta attivo nel gestore
+(`isLastLaunchedGameRunning`), invece di attendere una finestra che non
+sarebbe mai stata rilevabile — sessione desktop XFCE invariata, dove
+`wmctrl` funziona regolarmente.
+
+**Altri fix reali inclusi nel ciclo**: causa vera dei crash
+Bioshock 2/LEGO Indiana Jones isolata dall'utente stesso (modalità
+video fullscreen esclusiva DXVK, non DISPLAY/wine-lutris come
+inizialmente sospettato); rilevazione pacchetti installati via flatpak
+(ProtonUp-Qt e altri) oltre a pacman/yay; `install.sh` ripulito dalla
+vecchia sessione X11 mai funzionante e permessi post-installazione
+corretti (restavano leggibili dal solo root su alcune installazioni).
+
+**Resta aperto, non ancora iniziato**: il "gestore degli spazi"
+("gamespace manager") proposto dall'utente per il prossimo ciclo —
+spazio 0 fisso per la Dashboard, spazi 1-3 per giochi attivi, switch
+con Select+D-pad. Fattibilità sul desktop XFCE presumibile (workspace
+nativi + wmctrl); su Kiosk **sconosciuta**, dato che EWMH è escluso
+(vedi sopra) — l'output di `xdotool search --name ""` come possibile
+alternativa non-EWMH era stato richiesto ma non ancora riportato alla
+chiusura di questo ciclo.

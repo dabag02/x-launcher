@@ -1,0 +1,10 @@
+{
+  "title": "Gestore dei Processi",
+  "subtitle": "Giochi e launcher condivisi attualmente in esecuzione",
+  "emptyTitle": "Nessun processo attivo",
+  "emptyDesc": "Quando avvii un gioco o un launcher condiviso comparirà qui",
+  "kindGame": "Gioco",
+  "kindSharedLauncher": "Launcher condiviso",
+  "confirmKill": "Conferma con A",
+  "runningSince": "In esecuzione da"
+}

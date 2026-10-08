@@ -1,0 +1,166 @@
+{
+  "tabs": {
+    "accounts": "Account Store",
+    "system": "Sistema",
+    "plugins": "Plugin",
+    "input": "Input",
+    "aiAdvisor": "AI Advisor",
+    "hardware": "Info Hardware"
+  },
+  "hardware": {
+    "loading": "Rilevamento hardware in corso…",
+    "motherboard": "Scheda madre",
+    "cpu": "CPU",
+    "gpu": "GPU",
+    "ram": "RAM",
+    "storage": "Disco",
+    "os": "Sistema operativo"
+  },
+  "accounts": {
+    "sessionActive": "Sessione attiva · Sincronizzati: {{synced}} · Installati: {{installed}}",
+    "waitingBrowser": "In attesa del browser...",
+    "disconnected": "Disconnesso",
+    "synced": "Sincronizzato",
+    "waitingTerminal": "In attesa del completamento da terminale…",
+    "noLoginRequired": "Accesso non richiesto",
+    "linkedAccount": "✓ Account collegato",
+    "confirmDisconnect": "Confermi disconnessione? Premi A",
+    "cancel": "Annulla",
+    "connectStore": "Connetti Store",
+    "cloudBackup": "Cloud Backup",
+    "notConfigured": "non configurato",
+    "lastBackup": "Ultimo backup: {{date}}",
+    "noBackupYet": "Nessun backup ancora effettuato",
+    "backupNow": "Esegui Backup",
+    "backupRunning": "Backup in corso...",
+    "restoreNow": "Ripristina",
+    "restoreRunning": "Ripristino in corso...",
+    "disconnect": "Disconnetti"
+  },
+  "language": {
+    "label": "Lingua",
+    "it": "Italiano",
+    "en": "Inglese"
+  },
+  "system": {
+    "installedRunners": "Runner installati",
+    "noRunnersFound": "Nessun runner Proton trovato in ~/.local/share/Steam/",
+    "removing": "rimozione…",
+    "confirmA": "Conferma con A",
+    "installedBadge": "installato",
+    "installableRunners": "Runner installabili",
+    "refresh": "↻ Aggiorna",
+    "protonupLutris": {
+      "title": "ProtonUp-Qt e Lutris rilevati",
+      "prefix": "I runner verranno installati via ",
+      "suffix": " · Lutris disponibile per gestione avanzata"
+    },
+    "protonupOnly": {
+      "title": "ProtonUp-Qt rilevato",
+      "prefix": "Runner installati via ",
+      "middle": " · Lutris non trovato — ",
+      "suffix": " per gestione avanzata"
+    },
+    "lutrisOnly": {
+      "title": "Lutris rilevato · ProtonUp-Qt non trovato",
+      "prefix": "Download runner via GitHub Releases (fallback) · ",
+      "suffix": " per gestione ottimale"
+    },
+    "neitherFound": {
+      "title": "ProtonUp-Qt e Lutris non trovati",
+      "desc": "X-Launcher userà GitHub Releases come fallback, ma l'installazione potrebbe essere più lenta. Per la gestione ottimale dei runner installa almeno uno dei due:",
+      "recommended": "— consigliato"
+    },
+    "loadingVersions": "Caricamento versioni disponibili…",
+    "installing": "installazione…",
+    "installAction": "Installa",
+    "systemTools": "Tool di sistema",
+    "diskSpace": "Spazio disco",
+    "freeSpace": "{{free}} liberi",
+    "usedPercentTotal": "{{percent}}% usato · {{total}} totali",
+    "folderNotCreated": "cartella non ancora creata",
+    "loadingEllipsis": "Lettura in corso..."
+  },
+  "plugins": {
+    "intro": "Attiva o disattiva i plugin store. I giochi installati rimangono visibili anche con il plugin disattivato, ma quelli con DRM non potranno essere avviati.",
+    "retry": "↻ Riprova",
+    "loadingPlugins": "Caricamento plugin...",
+    "reload": "↻ Ricarica",
+    "drmFree": "DRM-free",
+    "drm": "DRM",
+    "requires": "richiede: {{tool}}"
+  },
+  "input": {
+    "connectedDevices": "Dispositivi connessi",
+    "noControllerDetected": "Nessun controller rilevato",
+    "assignedPlugin": "Plugin assegnato: {{plugin}}",
+    "connected": "connesso",
+    "inputPlugins": "Plugin input",
+    "genericFallbackNote": "Il plugin Generico è il fallback per controller non riconosciuti e non dovrebbe essere disabilitato.",
+    "testController": "Test controller",
+    "testInputLive": "Test input live",
+    "testModeActive": "Modalità test attiva: la Dashboard ignora ogni input mentre sei qui, per non attivare altre funzioni per sbaglio.",
+    "testInstructions": "Premi un tasto o muovi gli stick: lo schema si illumina in tempo reale con esattamente quello che la Dashboard sta leggendo dal controller.",
+    "connectControllerPrompt": "Collega un controller per verificare che i suoi input vengano rilevati correttamente.",
+    "navNormal": "Navigazione normale",
+    "exitInProgress": "Uscita in corso — tieni premuto B",
+    "testModeHint": "Modalità test — tieni premuto B per uscire"
+  },
+  "storePluginDescriptions": {
+    "Steam": "Libreria Steam — legge i file .acf locali",
+    "GOG_Galaxy": "Libreria GOG Galaxy — DRM-free, richiede lgogdownloader",
+    "Battle_net": "Battle.net — non ancora supportato",
+    "Amazon_Games": "Libreria Amazon Games (Prime Gaming) — richiede nile",
+    "Classic_Console": "ROM e console classiche — RetroArch, DOSBox, ScummVM",
+    "Epic_Games": "Libreria Epic Games — richiede legendary",
+    "Ubisoft": "Ubisoft Connect — launcher condiviso richiesto da alcuni giochi Ubisoft comprati su altri store"
+  },
+  "cloudBackupDescriptions": {
+    "google_drive": "Backup su Google Drive (cartella dati dedicata all'app, non visibile nel tuo Drive)"
+  },
+  "inputPluginDescriptions": {
+    "ds4": "Controller PlayStation 4 (via USB o Bluetooth)",
+    "ds5": "Controller PlayStation 5 (via USB o Bluetooth)",
+    "generic": "Fallback per controller non riconosciuti — layout XInput standard",
+    "xinput": "Xbox 360, Xbox One, Xbox Series e controller XInput generici"
+  },
+  "inputPluginNames": {
+    "generic": "Controller Generico"
+  },
+  "aiAdvisor": {
+    "experimental": "Sperimentale",
+    "experimentalNote": "L'AI Advisor è in fase di test — le risposte possono richiedere debug manuale.",
+    "modelsIntro": "Modelli Ollama già scaricati su questa macchina. Seleziona quale usare per l'AI Advisor quando la Knowledge Base locale non trova una soluzione nota — modelli più piccoli rispondono prima e pesano meno sulla GPU condivisa coi giochi, modelli più grandi possono dare risposte più accurate.",
+    "monthlyBudget": "Budget token mensile",
+    "tokensThisMonth": "{{used}} / {{budget}} token questo mese",
+    "setBudget": "Imposta budget",
+    "budgetFieldLabel": "Budget Token Mensile",
+    "tokensPerMonth": "token/mese",
+    "installedModels": "Modelli installati",
+    "noModelsFound": "Nessun modello trovato — scaricane uno da terminale con 'ollama pull <nome>'.",
+    "weight": {
+      "light": "Leggero",
+      "medium": "Medio",
+      "heavy": "Pesante",
+      "veryHeavy": "Molto pesante"
+    },
+    "active": "attivo",
+    "select": "seleziona",
+    "inactive": "disattivo",
+    "cloudProviders": "Provider cloud",
+    "paid": "A pagamento",
+    "freeCheap": "Gratuito/economico",
+    "apiKey": "API Key",
+    "apiKeyPlaceholder": "Incolla/digita l'API key…",
+    "apiKeyStoredPlaceholder": "•••••••• (salvata)",
+    "testing": "test…",
+    "testConnection": "Testa connessione",
+    "removeKey": "Rimuovi key"
+  },
+  "cloudProviderNotes": {
+    "gemini": "Tier gratuito reale con limiti di frequenza. Su questo tier, prompt e risposte possono essere usati da Google per migliorare i propri modelli — per dati sensibili serve il tier a pagamento.",
+    "deepseek": "5 milioni di token gratuiti alla registrazione, nessuna carta di credito richiesta.",
+    "chatgpt": "Richiede una ricarica prepagata (min. $5) su platform.openai.com — nessun tier gratuito reale, anche per i modelli più economici.",
+    "claude": "Pay-as-you-go fin dal primo utilizzo su console.anthropic.com — nessun tier gratuito reale."
+  }
+}

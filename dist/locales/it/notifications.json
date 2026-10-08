@@ -1,0 +1,12 @@
+{
+  "title": "Notifiche",
+  "clearHistory": "↺ Pulisci storico",
+  "noNotifications": "Nessuna notifica",
+  "waitingConfirmation": "in attesa di conferma",
+  "resolved": "✅ risolto",
+  "notResolved": "❌ non risolto",
+  "technicalLog": "Log tecnico",
+  "itWorked": "✅ Ha funzionato",
+  "itDidNotWork": "❌ Non ha funzionato",
+  "close": "Chiudi"
+}

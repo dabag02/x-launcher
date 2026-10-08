@@ -421,11 +421,11 @@ function useScrollOnceOverflow(ref: React.RefObject<HTMLInputElement | null>, tr
   }, [trigger]);
 }
 
-// v2.2.19-dev.11 — BUG REALE CONFERMATO (mio, non di trascrizione):
+// v2.5.0-Mercury — BUG REALE CONFERMATO (mio, non di trascrizione):
 // esisteva già un helper omonimo "safeJson" ma definito LOCALMENTE dentro
 // un altro useEffect (poco più sotto) — fuori scope per qualunque altro
 // codice. Il polling di /api/system/session-info e
-// handleGamescopeCycle (v2.2.19-dev.11) lo referenziavano comunque,
+// handleGamescopeCycle (v2.5.0-Mercury) lo referenziavano comunque,
 // causando "ReferenceError: safeJson is not defined" a runtime (non
 // intercettato a compilazione) e una Dashboard che restava nera. Questo
 // helper di modulo, condiviso, risolve il problema per quei due punti;
@@ -723,7 +723,7 @@ function MainApp() {
   // Step 11 — versione runner corrente per il gioco selezionato
   const [runnerVersion, setRunnerVersion] = useState<string>('');
   
-  // v2.2.19-dev.11 — Step 20 seguito, Step 3/3: isGamescope era un mock
+  // v2.5.0-Mercury — Step 20 seguito, Step 3/3: isGamescope era un mock
   // (useState(false) invertito dal click). Ora riflette la sessione
   // Kiosk realmente attiva, rilevata via polling di
   // GET /api/system/session-info (vedi useEffect dedicato più sotto).
@@ -862,7 +862,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v2.2.19-dev.11');
+  const [appVersion, setAppVersion] = useState('v2.5.0-Mercury');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1927,7 +1927,7 @@ function MainApp() {
     };
   }, [activeStore, searchQuery, sortBy, sortOrder, selectedGenre, selectedCategory, buildLibraryCacheKey, refreshGamesList]);
 
-  // v2.2.19-dev.11 — sostituisce il mock isGamescope: polling leggero
+  // v2.5.0-Mercury — sostituisce il mock isGamescope: polling leggero
   // (stessa cadenza di fetchStatus sopra, 5s) dello stato reale della
   // sessione Kiosk. Non tocca pendingGamescopeResolution/countdown —
   // quelli sono gestiti solo da handleGamescopeCycle sotto.
@@ -1945,7 +1945,7 @@ function MainApp() {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
-  // v2.2.19-dev.11 — pulsante "Modalità Gamescope": ogni pressione avanza
+  // v2.5.0-Mercury — pulsante "Modalità Gamescope": ogni pressione avanza
   // e persiste subito la risoluzione successiva (POST .../cycle, nessun
   // riavvio), mostra il risultato all'utente, e (ri)avvia un countdown di
   // 5s. Una nuova pressione durante il countdown lo resetta e avanza
@@ -6434,7 +6434,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 <OptionItem group="quick-menu" id="opt-accounts" icon={Gamepad2} label={t('quickMenu:manageAccounts')} onClick={() => { setShowSettings(true); setActiveGroup('settings'); setActiveSettingsTab('accounts'); setFocusedId(null); setTimeout(() => setFocusedId('settings-tab-accounts'), 80); }} />
                 <OptionItem group="quick-menu" id="opt-avatar" icon={User} label={t('quickMenu:avatar')} onClick={() => { setShowAvatarLibrary(true); setActiveGroup('avatar-library'); setTimeout(() => setFocusedId('avatar-0'), 80); }} />
                 <OptionItem group="quick-menu" id="opt-process-manager" icon={Cpu} label={t('quickMenu:processManager')} onClick={() => { setShowProcessManager(true); setActiveGroup('process-manager'); setTimeout(() => setFocusedId('pm-close'), 80); }} />
-                <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label={t('quickMenu:gamescopeMode')} value={pendingGamescopeResolution ?? (isGamescope ? (gamescopeResolution ?? t('quickMenu:on')) : t('quickMenu:off'))} iconClassName={isGamescope ? "text-green-500" : undefined} onClick={handleGamescopeCycle} />
+                {/* v2.5.0-Mercury — nascosto fuori dalla sessione Kiosk su
+                    richiesta esplicita dell'utente: da desktop non c'è
+                    nulla da mostrare/ciclare in modo significativo (nessuna
+                    sessione gamescope attiva a cui applicare un riavvio).
+                    Nessuna gestione extra per il controller: FocusProvider
+                    registra/deregistra i Focusable al mount/smontaggio e lo
+                    scoring geometrico salta da solo al vicino più vicino fra
+                    quelli effettivamente presenti — verificato che nessun
+                    altro Focusable referenzia "opt-gamescope" come vicino
+                    esplicito altrove. */}
+                {isGamescope && (
+                  <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label={t('quickMenu:gamescopeMode')} value={pendingGamescopeResolution ?? (gamescopeResolution ?? t('quickMenu:on'))} iconClassName="text-green-500" onClick={handleGamescopeCycle} />
+                )}
                 <OptionItem group="quick-menu" id="opt-theme" icon={theme === 'dark' ? Sun : Moon} label={t('quickMenu:toggleTheme')} value={theme} onClick={toggleTheme} />
                 {dedicatedSession ? (
                   <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label={t('quickMenu:consoleMode')} value={t('quickMenu:backToDesktop')} onClick={switchToDesktop} />
@@ -6472,7 +6484,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   Server locale · :{window.location.port || '80'}
                 </div>
               )}
-              {/* v2.2.19-dev.11 — countdown prima del riavvio di gamescope
+              {/* v2.5.0-Mercury — countdown prima del riavvio di gamescope
                   alla nuova risoluzione (Modalità Gamescope, qui sopra),
                   stesso posto/stile del badge "Server locale": è dove
                   l'utente già guarda per capire lo stato della sessione. */}

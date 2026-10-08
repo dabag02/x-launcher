@@ -17,20 +17,38 @@
 #  funzionare perfettamente anche lanciato direttamente dalla
 #  propria cartella (come già fai oggi con ./kiosk-launch.sh) —
 #  serve solo per chi vuole rendere X-Launcher disponibile come
-#  sessione di login globale (xlauncher.desktop richiede
-#  necessariamente un path assoluto fisso, dato che lo legge
-#  LightDM prima ancora che un utente sia autenticato) o
-#  raggiungibile da riga di comando con un nome breve da
-#  qualunque cartella.
+#  sessione di login globale o raggiungibile da riga di comando
+#  con un nome breve da qualunque cartella.
 #
-#  v2.2.19-dev.1 — Aggiunta la seconda sessione di login
-#  "X-Launcher Kiosk" (Step 20, gamescope standalone via DRM/KMS,
-#  nessun desktop sotto — vedi gamescope-session.sh). A differenza
-#  di xlauncher.desktop (sessione X11, cartella xsessions/), questa
-#  è una sessione Wayland nativa: va in /usr/share/wayland-sessions/,
-#  cartella che potrebbe non esistere ancora su un sistema che non
-#  ha mai offerto sessioni Wayland — creata esplicitamente con
-#  mkdir -p invece di assumerla già presente.
+#  v2.2.19-dev.1 — Aggiunta la sessione di login "X-Launcher Kiosk"
+#  (Step 20, gamescope standalone via DRM/KMS, nessun desktop sotto
+#  — vedi gamescope-session.sh), sessione Wayland nativa: va in
+#  /usr/share/wayland-sessions/, cartella che potrebbe non esistere
+#  ancora su un sistema che non ha mai offerto sessioni Wayland —
+#  creata esplicitamente con mkdir -p invece di assumerla già
+#  presente.
+#
+#  v2.2.19-dev.15 — Rimossa l'installazione della vecchia sessione
+#  X11 (xlauncher.desktop, cartella xsessions/): non è mai stata
+#  resa funzionante (diagnosi originale Step 20, causa mai isolata —
+#  vedi roadmap) ed è stata sostituita a tutti gli effetti dalla
+#  Kiosk, l'unica sessione standalone testata e confermata
+#  funzionante. Il file xlauncher.desktop resta nel repository come
+#  riferimento storico ma NON viene più installato né rimosso da
+#  qui — su un sistema dove un'installazione precedente lo avesse
+#  già messo in xsessions/, resta lì finché non lo si rimuove a
+#  mano (`sudo rm /usr/share/xsessions/xlauncher.desktop`).
+#
+#  v2.2.19-dev.15 — Corretto anche un difetto nei permessi
+#  post-installazione: `chmod -R go-w` toglie il bit di scrittura a
+#  gruppo/altri ma NON garantisce che lettura/esecuzione siano
+#  presenti — se i file sorgente avevano permessi già restrittivi
+#  (es. umask 077 in fase di sviluppo/clone), il risultato poteva
+#  essere una cartella leggibile dal solo root, inutilizzabile dagli
+#  altri utenti senza un chmod manuale da terminale (riscontrato
+#  dall'utente). Ora i permessi vengono impostati esplicitamente
+#  (755 directory, 644 file, poi +x sugli script), indipendentemente
+#  da cosa avesse la sorgente.
 #
 #  Uso:
 #    sudo ./install.sh              # installa/aggiorna /opt/x-launcher
@@ -40,8 +58,9 @@ set -e
 
 INSTALL_DIR="/opt/x-launcher"
 BIN_LINK="/usr/local/bin/x-launcher"
-SESSION_FILE="/usr/share/xsessions/xlauncher.desktop"
 # v2.2.19-dev.1 — sessione Kiosk (Wayland/gamescope), vedi nota sopra.
+# v2.2.19-dev.15 — unica sessione standalone installata: la vecchia
+# X11 (xsessions/) non viene più installata né rimossa da qui.
 KIOSK_SESSION_DIR="/usr/share/wayland-sessions"
 KIOSK_SESSION_FILE="${KIOSK_SESSION_DIR}/xlauncher-kiosk.desktop"
 # Step 19a (v1.1.69) — protocollo xlaunch://. Il .desktop del gestore va
@@ -55,7 +74,7 @@ XLAUNCH_DESKTOP_FILE="/usr/share/applications/xlaunch-protocol.desktop"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$EUID" -ne 0 ]; then
-  echo "[INSTALL] Questo script richiede sudo (scrive in /opt, /usr/local/bin, /usr/share/xsessions, /usr/share/wayland-sessions)."
+  echo "[INSTALL] Questo script richiede sudo (scrive in /opt, /usr/local/bin, /usr/share/wayland-sessions)."
   echo "[INSTALL] Riprova con: sudo ./install.sh"
   exit 1
 fi
@@ -64,7 +83,6 @@ if [ "$1" = "--uninstall" ]; then
   echo "[INSTALL] Rimozione di X-Launcher da /opt..."
   rm -rf "$INSTALL_DIR"
   rm -f "$BIN_LINK"
-  rm -f "$SESSION_FILE"
   rm -f "$KIOSK_SESSION_FILE"
   rm -f "$XLAUNCH_DESKTOP_FILE"
   update-desktop-database /usr/share/applications 2>/dev/null || true
@@ -99,8 +117,16 @@ fi
 
 # Permessi: leggibile/eseguibile da tutti, scrivibile solo da root —
 # coerente con "disponibile globalmente, impostazioni per-utente altrove".
+#
+# v2.2.19-dev.15 — BUG REALE CONFERMATO dall'utente: il vecchio
+# `chmod -R go-w` toglie solo il bit di scrittura a gruppo/altri, non
+# GARANTISCE che lettura/esecuzione siano presenti — se la sorgente
+# aveva già permessi restrittivi (es. umask 077), il risultato restava
+# leggibile dal solo root. Permessi ora impostati esplicitamente,
+# indipendentemente da cosa avesse la sorgente.
 chown -R root:root "$INSTALL_DIR"
-chmod -R go-w "$INSTALL_DIR"
+find "$INSTALL_DIR" -type d -exec chmod 755 {} +
+find "$INSTALL_DIR" -type f -exec chmod 644 {} +
 chmod +x "$INSTALL_DIR"/*.sh
 # v1.5.0-Venus — scripts/with-env.sh (nuovo, caricamento .env condizionale
 # per npm run dev/start) non è coperto dal glob sopra, che guarda solo la
@@ -111,9 +137,6 @@ chmod +x "$INSTALL_DIR"/*.sh
 
 echo "[INSTALL] Creo il symlink ${BIN_LINK} → ${INSTALL_DIR}/kiosk-launch.sh..."
 ln -sf "$INSTALL_DIR/kiosk-launch.sh" "$BIN_LINK"
-
-echo "[INSTALL] Installo la sessione LightDM (X11) in ${SESSION_FILE}..."
-cp "$INSTALL_DIR/xlauncher.desktop" "$SESSION_FILE"
 
 # v2.2.19-dev.1 — sessione Kiosk (Wayland/gamescope standalone). Il file
 # .desktop NON va reso eseguibile (lezione della vecchia diagnosi Step 20:
@@ -146,8 +169,7 @@ fi
 echo ""
 echo "[INSTALL] Completato."
 echo "[INSTALL] - Avvio da riga di comando, qualunque cartella: x-launcher"
-echo "[INSTALL] - Sessione dedicata X11: selezionabile dal menu sessioni alla schermata di login LightDM."
-echo "[INSTALL] - Sessione Kiosk (Wayland/gamescope, senza desktop): selezionabile come 'X-Launcher Kiosk' dallo stesso menu."
+echo "[INSTALL] - Sessione Kiosk (Wayland/gamescope, senza desktop): selezionabile come 'X-Launcher Kiosk' dal menu sessioni alla schermata di login LightDM."
 echo "[INSTALL] - Link xlaunch://<id-gioco> (da browser, script esterni, altre integrazioni) ora avviano il gioco direttamente, aprendo la Dashboard nascosta in background se non è già in esecuzione."
 echo "[INSTALL] - Per disinstallare: sudo ${INSTALL_DIR}/install.sh --uninstall (oppure rilancia questo script con --uninstall)"
 echo ""

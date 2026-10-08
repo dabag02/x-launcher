@@ -1,0 +1,100 @@
+{
+  "allGames": "All Games",
+  "collectionTitle": "Collection",
+  "titlesSynced_one": "{{count}} Title Synced",
+  "titlesSynced_other": "{{count}} Titles Synced",
+  "gamescopeStandalone": "Gamescope Standalone",
+  "waylandNative": "Wayland Native",
+  "windowed": "Windowed",
+  "consoleMode": "Console Mode",
+  "kioskMode": "Kiosk",
+  "borderlessMode": "Borderless",
+  "searchAllLibraries": "Search across all libraries...",
+  "searchInStore": "Search in {{store}}...",
+  "sortByTitle": "By Title",
+  "sortByPlayTime": "By Play Time",
+  "sortByRating": "By Rating",
+  "sortByInstallDate": "By Install Date",
+  "installedFilter": "Installed",
+  "genres": "Genres",
+  "categories": "Categories",
+  "noMatchingTitles": "No matching titles found",
+  "tryAdjustingFilters": "Try adjusting your filters or search keywords",
+  "clearAllFilters": "Clear All Filters",
+  "sidebar": {
+    "verified": "Verified",
+    "verifiedWithMethod": "Verified ({{method}})",
+    "pluginDisabled": "Plugin disabled",
+    "steamClient": "Steam Client",
+    "installed": "Installed",
+    "notInstalled": "Not Installed",
+    "rating": "Rating {{pct}}%",
+    "hltb": "HLTB {{hours}}h",
+    "playtime": "Playtime",
+    "predictedSize": "Predicted size",
+    "predictedSizeLoading": "Checking…",
+    "loadingLibrary": "Loading library…",
+    "welcomeBackNamed": "Welcome back, {{name}}",
+    "welcomeBack": "Welcome back",
+    "welcomeHint": "Select a game from your library to see its details, or press Play to launch it directly.",
+    "titleCount_one": "{{count}} title",
+    "titleCount_other": "{{count}} titles",
+    "verifiedCount_one": "{{count}} verified",
+    "verifiedCount_other": "{{count}} verified"
+  },
+  "gameStatus": {
+    "Ready_to_Launch": "Ready to Launch",
+    "Not_Installed": "Not Installed",
+    "Playing": "Playing"
+  },
+  "storePluginNames": {
+    "Classic_Console": "Classic Console",
+    "Ubisoft": "Ubisoft Connect"
+  },
+  "footer": {
+    "select": "Select",
+    "back": "Back",
+    "quickActions": "Quick Actions",
+    "globalSearch": "Global Search",
+    "jumpStore": "Jump Store",
+    "download": "Download",
+    "notifications": "Notifications",
+    "execute": "Execute",
+    "exitView": "Exit View",
+    "nextGroup": "Next Group",
+    "spotlight": "Spotlight",
+    "netBridge": "Net Bridge"
+  },
+  "keyboard": {
+    "emptyField": "Empty…",
+    "startTyping": "Start typing...",
+    "paste": "Paste",
+    "clipboardEmpty": "Clipboard empty",
+    "clipboardUnavailable": "Clipboard unavailable"
+  },
+  "notif": {
+    "launchBlockedTitle": "Launch blocked — {{title}}",
+    "launchBlockedBody": "The {{store}} plugin is disabled and requires DRM to launch. Re-enable it in Settings → Plugins.",
+    "goToPlugins": "Go to Plugins",
+    "displayModeTitle": "Mode: {{mode}}",
+    "displayModeBody": "Preference saved — will take effect on the next Dashboard restart.",
+    "switchToDesktopTitle": "Switching to Desktop",
+    "switchToDesktopBody": "X-Launcher stays running in the background — come back here from XFCE's user menu."
+  },
+  "fileBrowser": {
+    "title": "Choose file",
+    "up": "Up",
+    "home": "Home",
+    "downloads": "Downloads",
+    "removableMedia": "Removable media",
+    "filterOn": "Installer files only",
+    "filterOff": "All files",
+    "emptyFolder": "Empty folder",
+    "noRemovableMedia": "No removable media inserted",
+    "communicationError": "Could not reach the daemon."
+  },
+  "launcherDescriptions": {
+    "ea_app_launcher": "EA App launcher — required by some EA games bought on Epic, GOG, Amazon Games, or Steam. Install it once: it'll be shared by every game that requires it.",
+    "ubisoft_connect_launcher": "Ubisoft Connect launcher — required by some Ubisoft games bought on Epic, GOG, or Amazon Games. Install it once: it'll be shared by every game that requires it."
+  }
+}

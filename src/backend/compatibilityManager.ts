@@ -5,6 +5,42 @@ import { homedir } from 'os';
 import path from 'path';
 import { findSteamRoot, findAllLibraryPaths, parseVdf } from './plugins/steamPlugin';
 
+// v2.2.19-dev.14 — BUG REALE CONFERMATO dall'utente: ProtonUp-Qt
+// installato via flatpak (net.davidotek.pupgui2) non veniva mai
+// rilevato nella tab Gestione Account > Sistema. Causa: detectSystemTools()
+// controllava solo `binaryExists('protonup')` — il binario della CLI
+// `protonup` (pip/AUR), che un'installazione flatpak sandboxata non
+// espone affatto sul PATH dell'host (il comando esportato dal flatpak è
+// `net.davidotek.pupgui2`, non `protonup` — verificato sul manifest
+// ufficiale). Serve quindi un controllo separato, specifico per
+// flatpak, in aggiunta a quello su PATH — non al suo posto, dato che
+// un'installazione nativa resta comunque valida.
+//
+// Applicato SOLO alle app standalone con un ID Flathub verificato
+// (ProtonUp-Qt, Lutris, Steam, RetroArch, ScummVM) — non a
+// gamemode/mangohud/gamescope/wine/umu: sono librerie/shim che devono
+// integrarsi con processi lanciati nativamente sull'host (LD_PRELOAD,
+// compositor, ecc.), una loro eventuale versione flatpak sandboxata non
+// avrebbe comunque alcun effetto sui giochi lanciati da X-Launcher.
+// DOSBox-staging lasciato fuori: nessun ID Flathub verificato con
+// sufficiente certezza al momento — da aggiungere solo dopo verifica.
+function getInstalledFlatpakApps(): Set<string> {
+  try {
+    // Senza --user/--system, flatpak list elenca entrambi gli ambiti —
+    // copre sia un'installazione per il solo utente sia una di sistema.
+    const raw = execSync('flatpak list --app --columns=application 2>/dev/null', {
+      encoding: 'utf-8',
+      timeout: 3000,
+    });
+    return new Set(raw.split('\n').map(l => l.trim()).filter(Boolean));
+  } catch {
+    // flatpak non installato, o comando fallito — nessuna app flatpak
+    // rilevabile, non un errore fatale: le altre rilevazioni (PATH)
+    // restano valide comunque.
+    return new Set();
+  }
+}
+
 export interface CommunityFix {
   id: string;
   gameId: string;
@@ -311,20 +347,24 @@ class CompatibilityManager {
       } catch { return false; }
     })();
 
+    // v2.2.19-dev.14 — una sola chiamata a `flatpak list`, riusata per
+    // tutte le voci sotto che hanno un ID Flathub verificato.
+    const flatpakApps = getInstalledFlatpakApps();
+
     return {
       gamescope: this.binaryExists('gamescope'),
       mangohud:  this.binaryExists('mangohud'),
       gamemode:  this.binaryExists('gamemoderun'),
-      protonup:  this.binaryExists('protonup'),
+      protonup:  this.binaryExists('protonup') || flatpakApps.has('net.davidotek.pupgui2'),
       // v1.5.20-dev.1 — umu-run (umu-launcher): il comando si chiama
       // `umu-run`, il pacchetto `umu-launcher` — rilevato per nome
       // binario reale, non per nome pacchetto (stesso principio già
       // usato per gamemode/gamemoderun sopra).
       umu:       this.binaryExists('umu-run'),
-      lutris:    this.binaryExists('lutris'),
-      steam:     this.binaryExists('steam'),
-      retroarch: this.binaryExists('retroarch'),
-      scummvm:   this.binaryExists('scummvm'),
+      lutris:    this.binaryExists('lutris') || flatpakApps.has('net.lutris.Lutris'),
+      steam:     this.binaryExists('steam') || flatpakApps.has('com.valvesoftware.Steam'),
+      retroarch: this.binaryExists('retroarch') || flatpakApps.has('org.libretro.RetroArch'),
+      scummvm:   this.binaryExists('scummvm') || flatpakApps.has('org.scummvm.ScummVM'),
       dosbox:    this.binaryExists('dosbox-staging') || this.binaryExists('dosbox'),
       wine:      this.binaryExists('wine'),
       fsr:       fsrAvailable,

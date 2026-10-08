@@ -1,0 +1,10 @@
+{
+  "title": "Avatar Library",
+  "fileTypes": "jpg · png · webp",
+  "remove": "Remove",
+  "account": "Account",
+  "reload": "Reload",
+  "emptyFolderTitle": "Empty folder",
+  "emptyFolderDesc": "Add .jpg .png .webp images in",
+  "activeBadge": "● Active"
+}
