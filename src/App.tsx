@@ -862,7 +862,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v2.5.0-Mercury');
+  const [appVersion, setAppVersion] = useState('v2.6.6-Mercury');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');

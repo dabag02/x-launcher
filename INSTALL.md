@@ -123,6 +123,20 @@ La modalità "sessione dedicata senza desktop sotto" è **oggi incompleta e non 
 
 ---
 
+### Solo per la sessione Openbox "Shell" (opzionale)
+
+La sessione standalone **Xorg + Openbox** (Dashboard e giochi in spazi separati, vedi §4.1) richiede, oltre a quanto sopra:
+
+| Strumento | Arch | Debian/Ubuntu |
+|---|---|---|
+| Window manager | `openbox` | `openbox` |
+| Gestione finestre da riga di comando | `wmctrl`, `xdotool` | `wmctrl`, `xdotool` |
+| Layout dei monitor | `xorg-xrandr` | `x11-xserver-utils` |
+
+Il gestore degli spazi usa il venv `.venv-tray` creato da `./build.sh compile` (`python-xlib` incluso) e legge il controller da `/dev/input/event*` (accessibile all'utente della sessione grafica, senza permessi particolari).
+
+---
+
 ## 2. Compilazione
 
 ```bash
@@ -175,6 +189,7 @@ Cosa fa, nel dettaglio:
 - Copia il progetto (già compilato — esegui prima `./build.sh compile`) in `/opt/x-launcher/` (percorso FHS standard per software non pacchettizzato dalla distro)
 - Crea un link `x-launcher` in `/usr/local/bin/`, eseguibile da qualunque cartella
 - Installa la sessione LightDM (`xlauncher.desktop`) per l'avvio come sessione di login dedicata
+- Installa in `/opt` anche `spaces.py` e la cartella `openbox/` (sessione Openbox "Shell", §4.1), crea il link `x-launcher-spaces` in `/usr/local/bin/` e prepara, **per l'utente che ha lanciato `sudo`**, le cartelle e i symlink di una sessione Openbox pulita (vedi §4.1)
 - Registra il protocollo `xlaunch://<id-gioco>` a livello di sistema (per lanciare un gioco da link esterni — script, automazioni, integrazioni di terze parti — senza dover aprire la Dashboard)
 
 Le impostazioni, il database, i log e tutto ciò che è specifico dell'utente restano sempre in `~/.local/share/x-launcher/` (mai in `/opt`), e sopravvivono a reinstallazioni/aggiornamenti.
@@ -185,6 +200,34 @@ sudo ./install.sh --uninstall
 ```
 
 Rimuove `/opt/x-launcher`, il link e le registrazioni di sistema. **Non tocca** `~/.local/share/x-launcher/` (dati per-utente).
+
+### 4.1 Sessione Openbox "Shell" (Dashboard e giochi in spazi separati)
+
+Seconda sessione standalone, accanto alla Kiosk gamescope (che resta invariata): **Xorg + Openbox**, nessun desktop sotto. La Dashboard sta nello **spazio 0** (desktop 1), ogni gioco lanciato prende uno **spazio** libero (fino a 3, desktop 2-4) e ci passa da solo. Si seleziona come **"Openbox"** dal greeter LightDM (voce fornita dal pacchetto `openbox`).
+
+**Controller** (letto direttamente da `/dev/input`, funziona qualunque finestra sia in primo piano):
+- **Select + D-pad destra / sinistra** — spazio successivo / precedente (ciclico sugli spazi occupati)
+- **Select + L1 + R1** — torna alla Dashboard
+
+**Tastiera** (scorciatoie di sviluppo): `Ctrl+Alt+Destra` / `Ctrl+Alt+Sinistra` / `Ctrl+Alt+Su` = successivo / precedente / Dashboard; `Ctrl+Alt+Q` = esci dalla sessione.
+
+**Riga di comando**: `x-launcher-spaces state | next | prev | dashboard | switch N | clients` (`clients` elenca ogni finestra con la classificazione e il desktop reale: utile per diagnosticare un gioco che non compare).
+
+**Cosa prepara `install.sh`** — per l'utente reale (quello che ha lanciato `sudo`, mai per root):
+
+| Percorso | Contenuto |
+|---|---|
+| `~/.config/openbox/rc.xml` | symlink → `/opt/x-launcher/openbox/rc.xml` |
+| `~/.config/openbox/autostart` | symlink → `/opt/x-launcher/openbox/autostart` |
+| `~/.config/openbox/spaces-ctl` | symlink → `/opt/x-launcher/openbox/spaces-ctl` |
+| `~/.config/x-launcher/shell-display.conf.example` | copia dell'esempio per il layout dei monitor (la `shell-display.conf` attiva non viene mai creata né toccata) |
+| `~/.local/share/x-launcher/` | log della sessione (`openbox-session.log`, `display.log`, `tray.log`) |
+
+Se esiste già un `rc.xml` o `autostart` personale viene salvato come `*.bak-<data>`, mai cancellato. Un symlink che punta altrove (tipicamente a una copia di sviluppo) viene **lasciato com'è**; per riportarlo a `/opt`: `sudo ./install.sh --relink-openbox`. Per non toccare `~/.config` dell'utente: `sudo ./install.sh --no-openbox`. La disinstallazione rimuove solo i symlink che puntano a `/opt/x-launcher/openbox`.
+
+**Monitor**: nella sessione si lavora col **solo monitor principale**, gli altri vengono spenti (a ogni avvio `openbox/display.sh` applica un layout deterministico: l'output principale è primario e sta a `+0+0`). Senza configurazione sceglie da solo (l'output già primario, altrimenti il più grande). Per scegliere esplicitamente: copia `~/.config/x-launcher/shell-display.conf.example` in `shell-display.conf` e imposta `MAIN_OUTPUT`; `SECONDARY="keep"` tiene accesi gli altri monitor (con `XRANDR_ARGS` per il layout; `bash /opt/x-launcher/openbox/display.sh --capture`, lanciato in XFCE col layout desiderato, stampa la riga pronta). Esito e verifica in `~/.local/share/x-launcher/display.log` (`VERIFY=OK solo il monitor principale … è attivo`).
+
+**Copia di sviluppo**: se i symlink puntano a una cartella diversa da `/opt/x-launcher`, la sessione avvia il backend **di quella copia** sulla porta 3001 (serve `./build.sh compile`) e lascia in pace `xdash` di sistema sulla 3000; `X_LAUNCHER_LOCAL_SERVER=1` (sempre) o `=0` (mai) in `~/.config/openbox/environment` per forzarlo. Il log `~/.local/share/x-launcher/openbox-session.log` riporta la scelta fatta.
 
 Integrazione Steam opzionale (aggiunge X-Launcher come Non-Steam Game, con artwork dedicata — richiede Steam già autenticato almeno una volta):
 ```bash

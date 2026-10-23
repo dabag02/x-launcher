@@ -1,0 +1,16 @@
+#!/bin/sh
+# =============================================================
+#  X-Launcher — wrapper per comandare il gestore degli spazi (spaces.py)
+#
+#  Usato dalle scorciatoie da TASTIERA di rc.xml (Ctrl+Alt+Destra/Sinistra/Su)
+#  per provare gli spazi senza controller, e da riga di comando:
+#      spaces-ctl state | next | prev | dashboard | switch N
+#
+#  openbox/autostart ne crea il symlink in ~/.config/openbox/spaces-ctl (cosi'
+#  il percorso del progetto si ricava da readlink, anche con spazi nel nome).
+# =============================================================
+HERE="$(dirname "$(readlink -f "$0")")"
+PROJECT_DIR="$(dirname "$HERE")"
+PY="$PROJECT_DIR/.venv-tray/bin/python3"
+[ -x "$PY" ] || PY=python3
+exec "$PY" "$PROJECT_DIR/spaces.py" ctl "$@"

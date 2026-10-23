@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  X-Launcher — configurazione Openbox per la sessione "Shell" (Fase 1).
+
+  Obiettivo: un window manager NEUTRO e SENZA INTERFACCIA — niente barre,
+  niente menu, niente decorazioni, nessuna scorciatoia di tastiera/mouse —
+  che si limita a tenere Dashboard e giochi come finestre distinte, con
+  EWMH funzionante (wmctrl/xdotool) e desktop virtuali da usare come
+  "spazi": 1 = Dashboard, 2-4 = giochi (il daemon li assegnera' in Fase 2).
+
+  Installazione (symlink: la modifica nel progetto vale subito):
+    ln -sf "<PROGETTO>/openbox/rc.xml" ~/.config/openbox/rc.xml
+
+  MULTIMONITOR: il "monitor 1" di Openbox e' il primo della sua lista (di norma
+  quello in alto a sinistra), NON l'output "primary" di RandR. openbox/display.sh
+  (chiamato da autostart) garantisce che l'output principale sia primario e stia
+  a +0+0, quindi sia il monitor 1. La regola generica sotto forza TUTTE le finestre
+  sul monitor 1 al momento della mappatura, anche se il programma chiede un'altra
+  posizione (i giochi lo fanno). Se un gioco sposta la finestra DOPO l'apertura,
+  il riposizionamento spetta al daemon (Fase 2).
+
+  Scorciatoie lasciate di proposito (da tastiera, in fase di sviluppo):
+    Ctrl+Alt+Q       esci dalla sessione (rete di sicurezza)
+    Ctrl+Alt+Destra  spazio successivo   \
+    Ctrl+Alt+Sinistra spazio precedente   > gestore degli spazi (spaces.py), per
+    Ctrl+Alt+Su      Dashboard (spazio 0) /  provare gli spazi senza controller
+  Il controller ha le sue combo (Select + D-pad, Select + L1 + R1): le legge
+  spaces.py da evdev. Le scorciatoie di tastiera si possono togliere piu' avanti.
+-->
+<openbox_config xmlns="http://openbox.org/3.4/rc" xmlns:xi="http://www.w3.org/2001/XInclude">
+
+  <resistance>
+    <strength>0</strength>
+    <screen_edge_strength>0</screen_edge_strength>
+  </resistance>
+
+  <focus>
+    <focusNew>yes</focusNew>
+    <followMouse>no</followMouse>
+    <focusLast>yes</focusLast>
+    <underMouse>no</underMouse>
+    <focusDelay>0</focusDelay>
+    <raiseOnFocus>no</raiseOnFocus>
+  </focus>
+
+  <placement>
+    <policy>Smart</policy>
+    <center>yes</center>
+    <monitor>Primary</monitor>
+    <primaryMonitor>1</primaryMonitor>
+  </placement>
+
+  <theme>
+    <name>Clearlooks</name>
+    <titleLayout></titleLayout>
+    <keepBorder>no</keepBorder>
+    <animateIconify>no</animateIconify>
+    <font place="ActiveWindow"><name>sans</name><size>8</size><weight>Bold</weight><slant>Normal</slant></font>
+    <font place="InactiveWindow"><name>sans</name><size>8</size><weight>Bold</weight><slant>Normal</slant></font>
+    <font place="MenuHeader"><name>sans</name><size>9</size><weight>Normal</weight><slant>Normal</slant></font>
+    <font place="MenuItem"><name>sans</name><size>9</size><weight>Normal</weight><slant>Normal</slant></font>
+    <font place="ActiveOnScreenDisplay"><name>sans</name><size>9</size><weight>Bold</weight><slant>Normal</slant></font>
+    <font place="InactiveOnScreenDisplay"><name>sans</name><size>9</size><weight>Bold</weight><slant>Normal</slant></font>
+  </theme>
+
+  <!-- Spazi: desktop virtuali. 1 = Dashboard, 2-4 = giochi. Nessun popup di
+       cambio desktop (popupTime 0): l'indicatore lo mostrera' la Dashboard. -->
+  <desktops>
+    <number>4</number>
+    <firstdesk>1</firstdesk>
+    <names>
+      <name>Dashboard</name>
+      <name>Gioco 1</name>
+      <name>Gioco 2</name>
+      <name>Gioco 3</name>
+    </names>
+    <popupTime>0</popupTime>
+  </desktops>
+
+  <resize>
+    <drawContents>yes</drawContents>
+    <popupShow>Never</popupShow>
+    <popupPosition>Center</popupPosition>
+    <popupFixedPosition><x>10</x><y>10</y></popupFixedPosition>
+  </resize>
+
+  <!-- Nessun margine riservato: nessun pannello/dock. -->
+  <margins>
+    <top>0</top>
+    <bottom>0</bottom>
+    <left>0</left>
+    <right>0</right>
+  </margins>
+
+  <dock>
+    <position>TopLeft</position>
+    <floatingX>0</floatingX>
+    <floatingY>0</floatingY>
+    <noStrut>yes</noStrut>
+    <stacking>Above</stacking>
+    <direction>Vertical</direction>
+    <autoHide>no</autoHide>
+    <hideDelay>300</hideDelay>
+    <showDelay>300</showDelay>
+    <moveButton>Middle</moveButton>
+  </dock>
+
+  <!-- Tastiera: nessuna scorciatoia tranne l'uscita di sicurezza. -->
+  <keyboard>
+    <chainQuitKey>C-g</chainQuitKey>
+    <keybind key="C-A-q">
+      <action name="Exit"><prompt>no</prompt></action>
+    </keybind>
+    <keybind key="C-A-Right">
+      <action name="Execute"><command>sh -c 'sh "$HOME/.config/openbox/spaces-ctl" next'</command></action>
+    </keybind>
+    <keybind key="C-A-Left">
+      <action name="Execute"><command>sh -c 'sh "$HOME/.config/openbox/spaces-ctl" prev'</command></action>
+    </keybind>
+    <keybind key="C-A-Up">
+      <action name="Execute"><command>sh -c 'sh "$HOME/.config/openbox/spaces-ctl" dashboard'</command></action>
+    </keybind>
+  </keyboard>
+
+  <!-- Mouse: nessun binding (niente menu sul desktop, niente spostamenti,
+       niente chiusura accidentale con il mouse). -->
+  <mouse>
+    <dragThreshold>8</dragThreshold>
+    <doubleClickTime>500</doubleClickTime>
+    <screenEdgeWarpTime>0</screenEdgeWarpTime>
+    <screenEdgeWarpMouse>false</screenEdgeWarpMouse>
+  </mouse>
+
+  <menu>
+    <hideDelay>200</hideDelay>
+    <middle>no</middle>
+    <submenuShowDelay>100</submenuShowDelay>
+    <submenuHideDelay>400</submenuHideDelay>
+    <showIcons>no</showIcons>
+    <manageDesktops>no</manageDesktops>
+  </menu>
+
+  <!-- Regole per applicazione. Si applicano nell'ordine: la regola generica
+       viene prima, quelle specifiche dopo (le ultime prevalgono). -->
+  <applications>
+
+    <!-- Tutto: senza decorazioni e SEMPRE sul monitor 1 (quello principale). -->
+    <application class="*">
+      <decor>no</decor>
+      <focus>yes</focus>
+      <position force="yes">
+        <x>center</x>
+        <y>center</y>
+        <monitor>1</monitor>
+      </position>
+    </application>
+
+    <!-- Dashboard: Chromium lanciato in modalita' app su http://localhost:3000
+         (WM_CLASS = localhost / Chromium). Resta sul desktop 1 (= spazio 0). -->
+    <application class="Chromium" name="localhost">
+      <decor>no</decor>
+      <desktop>1</desktop>
+      <focus>yes</focus>
+      <layer>normal</layer>
+    </application>
+
+  </applications>
+
+</openbox_config>

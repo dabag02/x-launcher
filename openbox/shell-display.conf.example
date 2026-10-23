@@ -1,0 +1,33 @@
+# =============================================================
+#  X-Launcher — layout dei monitor della sessione Openbox "Shell"
+#
+#  Copia questo file in:  ~/.config/x-launcher/shell-display.conf
+#  (mkdir -p ~/.config/x-launcher)
+#
+#  REGOLA DELLA SESSIONE: si lavora col SOLO monitor principale; tutti gli
+#  altri monitor vengono SPENTI. E' il comportamento di default: basta indicare
+#  l'output principale. (Il secondo monitor si riaccendera' solo se si trovera'
+#  un modo intelligente di usarlo per la Dashboard.)
+# =============================================================
+
+# Output principale: e' primario, sta a +0+0 e ospita Dashboard e giochi.
+MAIN_OUTPUT="DP-4"
+
+# Modo dell'output principale (opzionale; se lo togli resta quello attuale).
+MAIN_MODE="2560x1440"
+
+# Altri monitor: "off" (default) li spegne. Per tenerli accesi scrivi "keep"
+# ESPLICITAMENTE (e vedi XRANDR_ARGS / SECONDARY_SIDE qui sotto).
+SECONDARY="off"
+
+# ---- Solo se vuoi tenere acceso il secondo monitor (SECONDARY="keep") ----
+#SECONDARY="keep"
+#SECONDARY_SIDE="right"      # right | left | above | below  (senza XRANDR_ARGS)
+# Layout completo (con "keep" ha la precedenza). Esempio: il layout che XFCE
+# applicava il 9 ottobre 2026 — DP-4 principale, HDMI-0 sotto, ruotato di 180
+# gradi e scalato 0.8. Per ottenerlo dal tuo sistema: in XFCE, con il layout che
+# vuoi conservare, lancia  bash openbox/display.sh --capture
+#XRANDR_ARGS="--output DP-4 --primary --mode 2560x1440 --pos 0x0 --rotate normal --output HDMI-0 --mode 2160x1440 --scale 0.8x0.8 --rotate inverted --pos 458x1440"
+#
+# NOTA: con SECONDARY="off" (default) un eventuale XRANDR_ARGS conta solo per la
+# parte dell'output principale: gli altri output vengono comunque spenti.

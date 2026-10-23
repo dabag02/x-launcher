@@ -4616,18 +4616,18 @@ __export(bundle_exports, {
 });
 function readTextIfExists(filePath) {
   try {
-    return (0, import_fs21.existsSync)(filePath) ? (0, import_fs21.readFileSync)(filePath, "utf-8") : null;
+    return (0, import_fs22.existsSync)(filePath) ? (0, import_fs22.readFileSync)(filePath, "utf-8") : null;
   } catch (err) {
     writeLog("warning", `[CloudBackup] Lettura fallita per ${filePath}: ${err}`);
     return null;
   }
 }
 function collectAvatars() {
-  if (!(0, import_fs21.existsSync)(AVATAR_DIR)) return [];
+  if (!(0, import_fs22.existsSync)(AVATAR_DIR)) return [];
   try {
-    return (0, import_fs21.readdirSync)(AVATAR_DIR).filter((f) => !f.startsWith(".")).map((f) => ({
+    return (0, import_fs22.readdirSync)(AVATAR_DIR).filter((f) => !f.startsWith(".")).map((f) => ({
       filename: f,
-      dataBase64: (0, import_fs21.readFileSync)(import_path18.default.join(AVATAR_DIR, f)).toString("base64")
+      dataBase64: (0, import_fs22.readFileSync)(import_path18.default.join(AVATAR_DIR, f)).toString("base64")
     }));
   } catch (err) {
     writeLog("warning", `[CloudBackup] Lettura cartella avatars/ fallita: ${err}`);
@@ -4663,14 +4663,14 @@ function restoreFromBundle(compressed) {
   const kbImported = knowledgeBase.importEntries(bundle.knowledgeBase ?? []);
   if (bundle.appConf) {
     try {
-      (0, import_fs21.writeFileSync)(APP_CONF_PATH, bundle.appConf, "utf-8");
+      (0, import_fs22.writeFileSync)(APP_CONF_PATH, bundle.appConf, "utf-8");
     } catch (err) {
       writeLog("warning", `[CloudBackup] Scrittura app.conf fallita: ${err}`);
     }
   }
   if (bundle.env) {
     try {
-      (0, import_fs21.writeFileSync)(ENV_PATH, bundle.env, "utf-8");
+      (0, import_fs22.writeFileSync)(ENV_PATH, bundle.env, "utf-8");
     } catch (err) {
       writeLog("warning", `[CloudBackup] Scrittura .env fallita: ${err}`);
     }
@@ -4678,10 +4678,10 @@ function restoreFromBundle(compressed) {
   let avatarsRestored = 0;
   if (bundle.avatars?.length > 0) {
     try {
-      (0, import_fs21.mkdirSync)(AVATAR_DIR, { recursive: true });
+      (0, import_fs22.mkdirSync)(AVATAR_DIR, { recursive: true });
       for (const avatar of bundle.avatars) {
         try {
-          (0, import_fs21.writeFileSync)(import_path18.default.join(AVATAR_DIR, avatar.filename), Buffer.from(avatar.dataBase64, "base64"));
+          (0, import_fs22.writeFileSync)(import_path18.default.join(AVATAR_DIR, avatar.filename), Buffer.from(avatar.dataBase64, "base64"));
           avatarsRestored++;
         } catch (err) {
           writeLog("warning", `[CloudBackup] Avatar ${avatar.filename} non ripristinato: ${err}`);
@@ -4701,11 +4701,11 @@ function restoreFromBundle(compressed) {
     avatarsRestored
   };
 }
-var import_fs21, import_path18, import_zlib, APP_CONF_PATH, AVATAR_DIR, BACKUP_FILENAME;
+var import_fs22, import_path18, import_zlib, APP_CONF_PATH, AVATAR_DIR, BACKUP_FILENAME;
 var init_bundle = __esm({
   "src/backend/cloudBackup/bundle.ts"() {
     "use strict";
-    import_fs21 = require("fs");
+    import_fs22 = require("fs");
     import_path18 = __toESM(require("path"), 1);
     import_zlib = require("zlib");
     init_paths();
@@ -11226,7 +11226,7 @@ function resolveRemovableMediaRoot() {
 }
 
 // server.ts
-var import_fs22 = __toESM(require("fs"), 1);
+var import_fs23 = __toESM(require("fs"), 1);
 var import_os9 = __toESM(require("os"), 1);
 var import_child_process20 = require("child_process");
 init_processManager();
@@ -11304,6 +11304,52 @@ function focusGameWindow() {
   return success;
 }
 
+// src/backend/spacesClient.ts
+var import_net = __toESM(require("net"), 1);
+var import_fs21 = __toESM(require("fs"), 1);
+function spacesSocketPath() {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const runDir = `/run/user/${uid}`;
+  if (import_fs21.default.existsSync(runDir)) return `${runDir}/x-launcher-spaces.sock`;
+  return `/tmp/x-launcher-spaces-${uid}.sock`;
+}
+function sendToSpaces(req, timeoutMs = 500) {
+  return new Promise((resolve) => {
+    const sockPath = spacesSocketPath();
+    if (!import_fs21.default.existsSync(sockPath)) {
+      resolve(null);
+      return;
+    }
+    let done = false;
+    let buf = "";
+    const sock = import_net.default.createConnection(sockPath);
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    function finish(value) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(value);
+    }
+    sock.on("connect", () => sock.write(JSON.stringify(req) + "\n"));
+    sock.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      try {
+        finish(JSON.parse(buf.slice(0, nl)));
+      } catch {
+        finish(null);
+      }
+    });
+    sock.on("error", () => finish(null));
+    sock.on("close", () => finish(null));
+  });
+}
+async function isSpacesActive() {
+  return await sendToSpaces({ cmd: "state" }) !== null;
+}
+
 // server.ts
 init_activeDisplay();
 init_appConfig();
@@ -11319,7 +11365,7 @@ function binaryExists10(bin) {
 async function startServer() {
   const app = (0, import_express.default)();
   const AVATAR_DIR2 = import_path19.default.join(DATA_DIR, "avatars");
-  import_fs22.default.mkdirSync(AVATAR_DIR2, {
+  import_fs23.default.mkdirSync(AVATAR_DIR2, {
     recursive: true
   });
   writeLog(
@@ -11328,7 +11374,7 @@ async function startServer() {
   );
   writeLog(
     "system",
-    `[ENV] .env ${import_fs22.default.existsSync(ENV_PATH) ? "trovato" : "NON trovato"}: ${ENV_PATH}`
+    `[ENV] .env ${import_fs23.default.existsSync(ENV_PATH) ? "trovato" : "NON trovato"}: ${ENV_PATH}`
   );
   if (!process.env.NODE_ENV) {
     process.env.NODE_ENV = "production";
@@ -11596,11 +11642,42 @@ async function startServer() {
   app.get("/api/system/game-running", (_req, res) => {
     res.json(gameManager.isLastLaunchedGameRunning());
   });
-  app.post("/api/system/input-wake", (_req, res) => {
+  app.post("/api/system/input-wake", async (_req, res) => {
+    if (await isSpacesActive()) {
+      res.json({ success: true, handledByDaemon: true });
+      return;
+    }
     res.json({ success: wakeDashboard() });
   });
-  app.post("/api/system/input-focus-game", (_req, res) => {
+  app.post("/api/system/input-focus-game", async (_req, res) => {
+    if (await isSpacesActive()) {
+      res.json({ success: true, handledByDaemon: true });
+      return;
+    }
     res.json({ success: focusGameWindow() });
+  });
+  app.get("/api/spaces", async (_req, res) => {
+    const state = await sendToSpaces({ cmd: "state" });
+    if (!state) {
+      res.json({ active: false });
+      return;
+    }
+    res.json({ active: true, ...state });
+  });
+  app.post("/api/spaces/:action", async (req, res) => {
+    const action = String(req.params.action);
+    if (!["next", "prev", "dashboard", "switch"].includes(action)) {
+      res.status(400).json({ success: false, error: "azione non valida" });
+      return;
+    }
+    const payload = { cmd: action };
+    if (action === "switch") payload.space = req.body?.space;
+    const state = await sendToSpaces(payload);
+    if (!state) {
+      res.status(503).json({ success: false, active: false });
+      return;
+    }
+    res.json({ success: state.ok, active: true, ...state });
   });
   app.post("/api/system/active-display", (req, res) => {
     const { display, waylandDisplay, kind, resolution } = req.body ?? {};
@@ -11625,8 +11702,8 @@ async function startServer() {
     if (sessionInfo.kind === "kiosk") {
       const pidFile = import_path19.default.join(DATA_DIR, "gamescope-session.pid");
       try {
-        if (import_fs22.default.existsSync(pidFile)) {
-          const pid = parseInt(import_fs22.default.readFileSync(pidFile, "utf-8").trim(), 10);
+        if (import_fs23.default.existsSync(pidFile)) {
+          const pid = parseInt(import_fs23.default.readFileSync(pidFile, "utf-8").trim(), 10);
           if (Number.isFinite(pid) && pid > 0) {
             process.kill(pid, "SIGUSR1");
             restarted = true;
@@ -12027,12 +12104,12 @@ data: ${JSON.stringify(event)}
   app.get("/api/avatars/info", (_req, res) => {
     res.json({
       dir: AVATAR_DIR2,
-      exists: import_fs22.default.existsSync(AVATAR_DIR2)
+      exists: import_fs23.default.existsSync(AVATAR_DIR2)
     });
   });
   app.get("/api/avatars", (_req, res) => {
     try {
-      const avatars = import_fs22.default.readdirSync(AVATAR_DIR2).filter(
+      const avatars = import_fs23.default.readdirSync(AVATAR_DIR2).filter(
         (file) => /\.(png|jpg|jpeg|webp|gif)$/i.test(file)
       ).map((file) => ({
         name: file,

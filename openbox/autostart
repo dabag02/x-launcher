@@ -1,0 +1,83 @@
+#!/bin/sh
+# =============================================================
+#  X-Launcher — autostart della sessione Openbox "Shell" (Fase 1)
+#
+#  Viene eseguito da openbox-session all'avvio della sessione. Installazione
+#  (symlink, cosi' il percorso del progetto si ricava da solo):
+#    ln -sf "<PROGETTO>/openbox/autostart" ~/.config/openbox/autostart
+#
+#  Cosa fa:
+#   1. ricava la cartella del progetto dal symlink;
+#   2. dichiara un "desktop" per kiosk-launch.sh. Senza XDG_CURRENT_DESKTOP
+#      lo script concluderebbe "nessun DE sotto" e prenderebbe il vecchio ramo
+#      "sessione dedicata" (gamescope -e), che qui NON vogliamo: con la
+#      variabile impostata usa il ramo "sopra un desktop" (Chromium --kiosk,
+#      segnalazione del DISPLAY al daemon con kind "desktop", tray.py);
+#   3. spegne screensaver e DPMS;
+#   4. applica il layout dei monitor (display.sh): l'output principale diventa
+#      primario e va a +0+0, cosi' i giochi si aprono sul monitor giusto;
+#   5. lancia kiosk-launch.sh; quando la Dashboard si chiude, esce da Openbox
+#      (torna il login, come fa la sessione gamescope).
+#
+#  QUALE VERSIONE GIRA (dev.5): tutto dipende dalla cartella a cui punta il
+#  symlink di ~/.config/openbox/autostart.
+#   - kiosk-launch.sh, tray.py, spaces.py e .venv-tray vengono SEMPRE dalla
+#     cartella del progetto del symlink (readlink -f).
+#   - La Dashboard e il backend (porta 3000) sono invece quelli di xdash.service,
+#     cioe' /opt/x-launcher, a meno di --local-server. Per questo, se la cartella
+#     NON e' /opt/x-launcher (copia di sviluppo), qui si passa --local-server:
+#     kiosk-launch.sh avvia dist/server.cjs di QUELLA copia sulla porta 3001
+#     (serve "npm run build" / ./build.sh compile) e lascia xdash in pace.
+#   - Forzatura: X_LAUNCHER_LOCAL_SERVER=1 (sempre locale) o =0 (mai), da
+#     ~/.config/openbox/environment.
+# =============================================================
+
+AUTOSTART_LINK="${XDG_CONFIG_HOME:-$HOME/.config}/openbox/autostart"
+if [ -n "${X_LAUNCHER_DIR:-}" ]; then
+  PROJECT_DIR="$X_LAUNCHER_DIR"
+  HERE="$PROJECT_DIR/openbox"
+else
+  HERE="$(dirname "$(readlink -f "$AUTOSTART_LINK")")"
+  PROJECT_DIR="$(dirname "$HERE")"
+fi
+
+LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/x-launcher"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/openbox-session.log"
+{
+  echo "=== openbox autostart $(date -Iseconds) ==="
+  echo "PROJECT_DIR=$PROJECT_DIR  DISPLAY=${DISPLAY:-}"
+} >> "$LOG_FILE"
+
+if [ ! -x "$PROJECT_DIR/kiosk-launch.sh" ]; then
+  echo "ERRORE: $PROJECT_DIR/kiosk-launch.sh non trovato o non eseguibile." >> "$LOG_FILE"
+  exit 1
+fi
+
+export XDG_CURRENT_DESKTOP="Openbox"
+
+# server locale dedicato (porta 3001) per le copie di sviluppo, vedi sopra
+LOCAL_ARG=""
+case "${X_LAUNCHER_LOCAL_SERVER:-auto}" in
+  1|true)  LOCAL_ARG="--local-server" ;;
+  0|false) LOCAL_ARG="" ;;
+  *)       [ "$PROJECT_DIR" != "/opt/x-launcher" ] && LOCAL_ARG="--local-server" ;;
+esac
+echo "kiosk-launch.sh: ${LOCAL_ARG:-server di sistema (xdash, porta 3000)}" >> "$LOG_FILE"
+
+# wrapper per le scorciatoie di tastiera degli spazi (symlink idempotente)
+ln -sf "$HERE/spaces-ctl" "${XDG_CONFIG_HOME:-$HOME/.config}/openbox/spaces-ctl" 2>/dev/null
+
+xset s off -dpms s noblank 2>/dev/null
+
+(
+  # layout dei monitor PRIMA di Chromium (che sceglie il monitor all'apertura)
+  if [ -f "$HERE/display.sh" ]; then
+    timeout 25 bash "$HERE/display.sh" >> "$LOG_DIR/openbox-session.log" 2>&1 \
+      || echo "display.sh non riuscito (exit $?): layout dei monitor invariato." >> "$LOG_FILE"
+  fi
+  # shellcheck disable=SC2086
+  "$PROJECT_DIR/kiosk-launch.sh" $LOCAL_ARG >> "$LOG_DIR/kiosk-launch-openbox.log" 2>&1
+  echo "kiosk-launch.sh terminato ($(date -Iseconds)) — esco da Openbox." >> "$LOG_FILE"
+  openbox --exit
+) &

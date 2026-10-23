@@ -57,8 +57,22 @@ import urllib.request
 import urllib.error
 import json
 
-import pystray
-from PIL import Image, ImageDraw
+# Step 21 (v2.5.1-dev.4) — modalita' SHELL: nella sessione Openbox "Shell"
+# (openbox/autostart imposta XDG_CURRENT_DESKTOP=Openbox) non esiste un
+# systray e il demone serve a un altro scopo: ospitare il gestore degli spazi
+# (spaces.py). In quella modalita' pystray/PIL non servono e un loro eventuale
+# errore di import non deve fermare nulla; nelle altre sessioni (XFCE) il
+# comportamento resta ESATTAMENTE quello di prima: l'import fallito e' fatale.
+SHELL_MODE = (os.environ.get("XDG_CURRENT_DESKTOP", "") == "Openbox"
+              or os.environ.get("X_LAUNCHER_SHELL") == "1")
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except Exception:
+    if not SHELL_MODE:
+        raise
+    pystray = None
 
 # v1.1.71 — quando l'output è reindirizzato su file (kiosk-launch.sh, da
 # questa stessa versione, non più su /dev/null), Python bufferizza a
@@ -472,7 +486,31 @@ def on_quit_clicked(icon, item):
     icon.stop()
 
 
+def run_shell_mode():
+    """Sessione Openbox "Shell" (Step 21): niente icona di systray. Restano la
+    gestione del cursore e il reset dell'idle (non dipendono dal tray) e si
+    avvia il gestore degli spazi (spaces.py), che resta in primo piano."""
+    print("[tray] Modalita' SHELL (Openbox): nessuna icona di systray, "
+          "avvio il gestore degli spazi (spaces.py).")
+    print(f"[tray] DISPLAY={os.environ.get('DISPLAY', '(non impostato)')}")
+    threading.Thread(target=cursor_loop, daemon=True).start()
+    threading.Thread(target=idle_reset_loop, daemon=True).start()
+    try:
+        import spaces
+    except Exception:
+        import traceback
+        print("[tray] spaces.py non importabile — gestore degli spazi NON avviato:",
+              file=sys.stderr)
+        traceback.print_exc()
+        while True:
+            time.sleep(3600)
+    spaces.run_forever()
+
+
 def main():
+    if SHELL_MODE:
+        run_shell_mode()
+        return
     # v1.1.71 — diagnostica esplicita richiesta dall'utente dopo che il
     # fix v1.1.70 non ha risolto il problema: fino ad ora si è indagato
     # alla cieca perché kiosk-launch.sh buttava via l'intero output di

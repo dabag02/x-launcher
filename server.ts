@@ -29,6 +29,7 @@ import { spawn, execSync, execFileSync } from 'child_process';
 import { subscribeLaunchPhase, getLastLaunchPhase } from './src/backend/launchPhaseTracker';
 import * as processManager from './src/backend/processManager';
 import * as windowFocus from './src/backend/windowFocus';
+import { sendToSpaces, isSpacesActive } from './src/backend/spacesClient';
 import { setActiveDisplay, getActiveSessionInfo } from './src/backend/activeDisplay';
 import { readAppConfig, writeAppConfig, nextGamescopeResolution } from './src/backend/appConfig';
 import { DATA_DIR } from './src/backend/paths';
@@ -469,7 +470,15 @@ async function startServer() {
   // App.tsx) perché un gioco reale è in esecuzione, questa è l'unica
   // combo che l'input gate lascia comunque passare. Porta la finestra
   // Dashboard in primo piano via wmctrl.
-  app.post("/api/system/input-wake", (_req, res) => {
+  app.post("/api/system/input-wake", async (_req, res) => {
+    // v2.5.1-dev.4 (Step 21) — nella sessione Openbox "Shell" il gestore
+    // degli spazi (spaces.py) legge LUI il controller da evdev e porta alla
+    // Dashboard: se risponde, qui non si fa nulla, altrimenti ogni azione
+    // verrebbe eseguita due volte (una dal demone, una da Chromium).
+    if (await isSpacesActive()) {
+      res.json({ success: true, handledByDaemon: true });
+      return;
+    }
     res.json({ success: windowFocus.wakeDashboard() });
   });
 
@@ -479,8 +488,43 @@ async function startServer() {
   // inaffidabili su hardware reale). Porta in primo piano SPECIFICAMENTE
   // la finestra del gioco tracciato, correlata per PID/cgroup — non più
   // un ciclo fra tutte le finestre aperte.
-  app.post("/api/system/input-focus-game", (_req, res) => {
+  app.post("/api/system/input-focus-game", async (_req, res) => {
+    // v2.5.1-dev.4 (Step 21) — vedi input-wake: con il gestore degli spazi
+    // attivo i cambi di spazio li fa il demone via evdev.
+    if (await isSpacesActive()) {
+      res.json({ success: true, handledByDaemon: true });
+      return;
+    }
     res.json({ success: windowFocus.focusGameWindow() });
+  });
+
+  // GET /api/spaces — v2.5.1-dev.4 (Step 21). Stato del gestore degli spazi
+  // (spazio corrente e spazi occupati), per l'indicatore nella Dashboard.
+  // `active:false` fuori dalla sessione Openbox "Shell".
+  app.get("/api/spaces", async (_req, res) => {
+    const state = await sendToSpaces({ cmd: 'state' });
+    if (!state) {
+      res.json({ active: false });
+      return;
+    }
+    res.json({ active: true, ...state });
+  });
+
+  // POST /api/spaces/:action — next | prev | dashboard | switch ({ space }).
+  app.post("/api/spaces/:action", async (req, res) => {
+    const action = String(req.params.action);
+    if (!['next', 'prev', 'dashboard', 'switch'].includes(action)) {
+      res.status(400).json({ success: false, error: 'azione non valida' });
+      return;
+    }
+    const payload: Record<string, unknown> = { cmd: action };
+    if (action === 'switch') payload.space = req.body?.space;
+    const state = await sendToSpaces(payload);
+    if (!state) {
+      res.status(503).json({ success: false, active: false });
+      return;
+    }
+    res.json({ success: state.ok, active: true, ...state });
   });
 
   // POST /api/system/active-display — v2.2.19-dev.2. BUG REALE
