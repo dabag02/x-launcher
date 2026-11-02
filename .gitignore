@@ -1,10 +1,13 @@
 # Dipendenze — si rigenerano con npm install
 node_modules/
 
-# Build
+# Build — codice compilato, mai versionato
 dist/
 dist-server/
 *.tsbuildinfo
+
+# Ambiente Python del tray/overlay (generato da ./build.sh compile)
+.venv-tray/
 
 # Cache Python (tray.py)
 __pycache__/

@@ -23,6 +23,7 @@ import { BaseRunner } from './runners/base';
 import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary, expandHome } from './runners/implementations';
 import { downloadManager, resolveGogExe, resolveRunnerWineEnv, storeDir, slugFromId } from './downloadManager';
 import { metadataManager } from './metadataManager';
+import { cacheLibraryCovers, cacheGameCovers } from './coverCache';
 import { compatibilityManager } from './compatibilityManager';
 import * as db from './db';
 import { writeLog } from './logger';
@@ -1390,6 +1391,8 @@ class GameManager {
       db.upsertGames(enriched);
       this.notifyLibraryRefreshed();
       this.addLog(`[DAEMON] Metadati aggiornati per ${enriched.length} titoli.`, 'system');
+      // v2.7.2-dev.4 — copia locale delle copertine per l'overlay degli spazi (non blocca nulla)
+      void cacheLibraryCovers(enriched);
     });
   }
 
@@ -2662,6 +2665,7 @@ class GameManager {
         metadataManager.enrichGameMetadata(freshGame, true)
           .then(enriched => {
             db.upsertGames([enriched]);
+            void cacheGameCovers(enriched);   // v2.7.2-dev.4 — copertine dell'overlay degli spazi
             // Bug confermato dall'utente con test dal vivo: senza questa
             // riga, il titolo mostrato in libreria/sidebar tornava al nome
             // grezzo del file ROM alla sync successiva (anche solo

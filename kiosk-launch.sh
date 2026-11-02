@@ -33,15 +33,39 @@ X_LAUNCHER_FORCE_BORDERLESS="false"
 # possono girare in parallelo senza conflitti.
 X_LAUNCHER_LOCAL_SERVER="false"
 LOCAL_SERVER_PORT=3001
+# v2.6.7-dev.1 — sessione Openbox "Shell" (Step 21): la Dashboard si accorge di
+# essere in "modalità spazi" dal parametro ?spaces=1 dell'URL (stesso schema di
+# ?localdev=1) e libera il congelamento dell'input quando si torna al suo spazio
+# (vedi App.tsx / lib/spacesGate.ts). La passa openbox/autostart.
+X_LAUNCHER_SPACES_MODE="false"
+# v2.7.2-dev.1 — overlay degli spazi e dei servizi (overlay.py, ospitato da spaces.py):
+# con --spaces-overlay Select + D-pad apre un overlay a schermo intero invece di
+# cambiare spazio direttamente; con --no-spaces-overlay (o senza l'opzione) resta il
+# cambio diretto di sempre. La scelta viaggia a tray.py/spaces.py come variabile
+# d'ambiente X_LAUNCHER_SPACES_OVERLAY (1/0). La passa openbox/autostart.
+X_LAUNCHER_SPACES_OVERLAY_OPT="false"
 FORCED_BROWSER=""
 for arg in "$@"; do
   case "$arg" in
     --always-on-top) X_LAUNCHER_ALWAYS_ON_TOP="true" ;;
     --borderless)    X_LAUNCHER_FORCE_BORDERLESS="true" ;;
     --local-server)  X_LAUNCHER_LOCAL_SERVER="true" ;;
+    --spaces-mode)   X_LAUNCHER_SPACES_MODE="true" ;;
+    --spaces-overlay)    X_LAUNCHER_SPACES_OVERLAY_OPT="true" ;;
+    --no-spaces-overlay) X_LAUNCHER_SPACES_OVERLAY_OPT="false" ;;
+    # v2.6.7-dev.1 — un'opzione "--qualcosa" sconosciuta (es. passata da un
+    # autostart più nuovo di questo script) NON è il nome di un browser: va
+    # ignorata, non scambiata per FORCED_BROWSER.
+    --*) echo "[KIOSK] Opzione sconosciuta ignorata: $arg" ;;
     *) [ -z "$FORCED_BROWSER" ] && FORCED_BROWSER="$arg" ;;
   esac
 done
+if [ "$X_LAUNCHER_SPACES_OVERLAY_OPT" = "true" ]; then
+  export X_LAUNCHER_SPACES_OVERLAY=1
+  echo "[KIOSK] OVERLAY DEGLI SPAZI attivo (Select + D-pad apre l'overlay; senza --spaces-overlay: cambio diretto)."
+else
+  export X_LAUNCHER_SPACES_OVERLAY=0
+fi
 echo "[KIOSK] Always-on-top: ${X_LAUNCHER_ALWAYS_ON_TOP}" 
 echo "[KIOSK] Borderless forzato da CLI: ${X_LAUNCHER_FORCE_BORDERLESS}"
 
@@ -63,6 +87,14 @@ if [ "$X_LAUNCHER_LOCAL_SERVER" = "true" ]; then
   echo "[KIOSK]   ${PROJECT_DIR}"
   echo "[KIOSK] xdash (/opt, porta 3000) NON viene toccato."
   echo "=============================================================="
+fi
+# v2.6.7-dev.1 — aggiunge ?spaces=1 (o &spaces=1 se c'è già ?localdev=1).
+if [ "$X_LAUNCHER_SPACES_MODE" = "true" ]; then
+  case "$BROWSER_URL" in
+    *\?*) BROWSER_URL="${BROWSER_URL}&spaces=1" ;;
+    *)    BROWSER_URL="${BROWSER_URL}/?spaces=1" ;;
+  esac
+  echo "[KIOSK] MODALITA' SPAZI — la Dashboard gestisce il congelamento dell'input per spazio (URL: ${BROWSER_URL})."
 fi
 
 # --- v2.0.41-dev.7 — richiesta utente: rientro da Steam Big Picture.

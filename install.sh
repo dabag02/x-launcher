@@ -56,6 +56,20 @@
 #  ha invocato sudo (non per root) le cartelle e i symlink che una sessione
 #  Openbox pulita si aspetta — vedi setup_openbox_session() più sotto.
 #
+#  v2.7.1-Mercury — congelamento dei giochi negli spazi non correnti (spaces.py):
+#  l'installer copia nella cartella dell'utente anche l'esempio
+#  spaces-nofreeze.conf.example (giochi da escludere dal congelamento); il file
+#  attivo spaces-nofreeze.conf non viene mai creato né toccato. Il comando
+#  x-launcher-spaces ora accetta anche freeze on|off|status e thaw [scope].
+#
+#  v3.0.1-Mars — overlay degli spazi e dei servizi (overlay.py, copertine in
+#  ~/.local/share/x-launcher/covers/ riempite dal backend). L'installer: (1) controlla
+#  che il venv di /opt possa importare overlay.py (pillow + python-xlib), solo avviso;
+#  (2) se un symlink di ~/.config/openbox punta a una copia di SVILUPPO, in un
+#  terminale CHIEDE se ripuntarlo a /opt (prima lo lasciava e basta); senza terminale
+#  resta com'è, con --relink-openbox si ripunta sempre senza domande. I link
+#  /usr/local/bin/x-launcher e x-launcher-spaces vengono sempre ripuntati a /opt.
+#
 #  Uso:
 #    sudo ./install.sh                    # installa/aggiorna /opt/x-launcher
 #    sudo ./install.sh --relink-openbox   # idem, e riporta a /opt anche i symlink
@@ -83,6 +97,8 @@ KIOSK_SESSION_FILE="${KIOSK_SESSION_DIR}/xlauncher-kiosk.desktop"
 XLAUNCH_DESKTOP_FILE="/usr/share/applications/xlaunch-protocol.desktop"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # v2.6.6-Mercury — comando di controllo degli spazi, utile anche da riga di comando.
+# (v2.7.1-Mercury: accetta anche freeze on|off|status e thaw [scope];
+#  v3.0.1-Mars: anche overlay on|off|open|close|status|key K)
 SPACES_CTL_LINK="/usr/local/bin/x-launcher-spaces"
 
 UNINSTALL=0
@@ -115,6 +131,9 @@ done
 #                                 né toccata: senza, display.sh lavora in
 #                                 automatico (output principale = primario o piu'
 #                                 grande, gli altri spenti)
+#     spaces-nofreeze.conf.example  copia dell'esempio dei giochi da non congelare
+#                                 (la spaces-nofreeze.conf attiva NON viene mai
+#                                 creata né toccata)
 #   ~/.local/share/x-launcher/    cartella dei log della sessione
 #
 # Prudenza sui file dell'utente:
@@ -160,6 +179,16 @@ setup_openbox_session() {
       elif [ "$RELINK_OPENBOX" = 1 ]; then
         _as_user ln -sfn "$src" "$dst"
         echo "[INSTALL]   ripuntato $dst: $cur -> $src"
+      elif [ -t 0 ] && [ -t 1 ]; then
+        # v3.0.1-Mars — in un terminale si chiede, invece di lasciare il link alla copia di sviluppo
+        local _ans=""
+        read -rp "[INSTALL]   $dst punta a $cur (non è /opt: copia di sviluppo?). Ripuntarlo a $src? [S/n] " _ans || _ans=""
+        if [[ "$_ans" =~ ^[Nn]$ ]]; then
+          echo "[INSTALL]   lasciato $dst -> $cur"
+        else
+          _as_user ln -sfn "$src" "$dst"
+          echo "[INSTALL]   ripuntato $dst: $cur -> $src"
+        fi
       else
         echo "[INSTALL]   lasciato $dst -> $cur (non è /opt: copia di sviluppo?). Per ripuntarlo a /opt: sudo ./install.sh --relink-openbox"
       fi
@@ -183,6 +212,15 @@ setup_openbox_session() {
     fi
   fi
 
+  if [ -f "$INSTALL_DIR/openbox/spaces-nofreeze.conf.example" ]; then
+    _as_user cp -f "$INSTALL_DIR/openbox/spaces-nofreeze.conf.example" "$home/.config/x-launcher/spaces-nofreeze.conf.example"
+    if [ -f "$home/.config/x-launcher/spaces-nofreeze.conf" ]; then
+      echo "[INSTALL]   spaces-nofreeze.conf esistente: non toccato (esempio aggiornato in spaces-nofreeze.conf.example)"
+    else
+      echo "[INSTALL]   congelamento dei giochi attivo per tutti (esclusioni: copia ~/.config/x-launcher/spaces-nofreeze.conf.example in spaces-nofreeze.conf)"
+    fi
+  fi
+
   # Dipendenze della sessione: solo avvisi, mai bloccanti.
   local missing="" t
   for t in openbox wmctrl xdotool xrandr python3; do
@@ -198,6 +236,15 @@ setup_openbox_session() {
   fi
   if [ ! -x "$INSTALL_DIR/.venv-tray/bin/python3" ]; then
     echo "[INSTALL]   ⚠ ${INSTALL_DIR}/.venv-tray assente: esegui ./build.sh compile prima di installare (tray.py e spaces.py girano con quel python)."
+  elif [ -f "$INSTALL_DIR/overlay.py" ]; then
+    # v3.0.1-Mars — overlay degli spazi: solo avviso (senza, Select + D-pad cambia spazio direttamente)
+    if (cd "$INSTALL_DIR" && "$INSTALL_DIR/.venv-tray/bin/python3" -c 'import overlay; assert overlay.HAVE_PIL and overlay.HAVE_XLIB' &>/dev/null); then
+      echo "[INSTALL]   overlay degli spazi: pronto (pillow + python-xlib nel venv)"
+    else
+      echo "[INSTALL]   ⚠ overlay degli spazi non utilizzabile con il venv di ${INSTALL_DIR} (manca pillow o python-xlib?): esegui ./build.sh compile nella cartella del progetto e reinstalla. Nel frattempo Select + D-pad cambia spazio direttamente."
+    fi
+  else
+    echo "[INSTALL]   ⚠ ${INSTALL_DIR}/overlay.py assente: nessun overlay degli spazi (cambio diretto)."
   fi
 }
 
@@ -336,7 +383,7 @@ echo ""
 echo "[INSTALL] Completato."
 echo "[INSTALL] - Avvio da riga di comando, qualunque cartella: x-launcher"
 echo "[INSTALL] - Sessione Kiosk (Wayland/gamescope, senza desktop): selezionabile come 'X-Launcher Kiosk' dal menu sessioni alla schermata di login LightDM."
-echo "[INSTALL] - Sessione Openbox 'Shell' (Xorg + Openbox, Dashboard e giochi in spazi separati; Select + D-pad per cambiare spazio): selezionabile come 'Openbox' dal greeter LightDM (richiede il pacchetto openbox). Comando di controllo: x-launcher-spaces state|next|prev|dashboard|switch N"
+echo "[INSTALL] - Sessione Openbox 'Shell' (Xorg + Openbox, Dashboard e giochi in spazi separati; Select + D-pad per cambiare spazio): selezionabile come 'Openbox' dal greeter LightDM (richiede il pacchetto openbox). Comando di controllo: x-launcher-spaces state|next|prev|dashboard|switch N|clients|freeze on|off|status|thaw [scope]|overlay on|off|open|close|status. Select + D-pad apre l'overlay degli spazi e dei servizi (spegnerlo: X_LAUNCHER_SPACES_OVERLAY=0 in ~/.config/openbox/environment)."
 echo "[INSTALL] - Link xlaunch://<id-gioco> (da browser, script esterni, altre integrazioni) ora avviano il gioco direttamente, aprendo la Dashboard nascosta in background se non è già in esecuzione."
 echo "[INSTALL] - Per disinstallare: sudo ${INSTALL_DIR}/install.sh --uninstall (oppure rilancia questo script con --uninstall)"
 echo ""

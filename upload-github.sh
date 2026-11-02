@@ -4,6 +4,14 @@
 #  su GitHub, con esclusione automatica dei file di backup (.bak, .bak0,
 #  .bak1, .bak2, ecc.) ovunque si trovino nell'albero del progetto.
 #
+#  v3.0.1-Mars — esclude SEMPRE anche il codice compilato e gli ambienti
+#  generati: dist/ (build Vite + server.cjs), dist-server/, node_modules/,
+#  .venv-tray/ (venv Python del tray/overlay), __pycache__/ e *.pyc,
+#  *.tsbuildinfo. Le regole vengono aggiunte al .gitignore se mancano, le
+#  cartelle già finite per errore nel repository vengono tolte dal
+#  tracciamento (git rm --cached: i file su disco restano) e, dopo
+#  "git add", si verifica che niente di tutto questo sia in staging.
+#
 #  Uso:
 #    chmod +x upload-github.sh
 #    ./upload-github.sh
@@ -52,13 +60,49 @@ if ! grep -qE '^\*\.bak\*?$' "$GITIGNORE" 2>/dev/null; then
 fi
 
 # -----------------------------------------------------------------------
+# 2b) Codice compilato e ambienti generati — mai versionati
+#     (stessa lista nel .gitignore, nella rimozione dal tracciamento e nel
+#      controllo finale sullo staging)
+# -----------------------------------------------------------------------
+EXCLUDE_DIRS=(dist dist-server node_modules .venv-tray __pycache__)
+EXCLUDE_GLOBS=('*.pyc' '*.tsbuildinfo')
+
+for d in "${EXCLUDE_DIRS[@]}"; do
+  if ! grep -qE "^/?${d//./\\.}/?$" "$GITIGNORE" 2>/dev/null; then
+    {
+      echo ""
+      echo "# Codice compilato / ambiente generato — aggiunto da upload-github.sh"
+      echo "${d}/"
+    } >> "$GITIGNORE"
+    verde "Aggiunta la regola '${d}/' al .gitignore."
+  fi
+done
+for g in "${EXCLUDE_GLOBS[@]}"; do
+  if ! grep -qxF "$g" "$GITIGNORE" 2>/dev/null; then
+    printf '\n# Codice compilato — aggiunto da upload-github.sh\n%s\n' "$g" >> "$GITIGNORE"
+    verde "Aggiunta la regola '${g}' al .gitignore."
+  fi
+done
+
+# Se in passato qualcosa di tutto questo è finito nel repository, lo si toglie
+# dal tracciamento (i file restano su disco): .gitignore da solo non basta per
+# file già tracciati.
+TRACKED_EXCL=$(git ls-files 2>/dev/null | grep -E '(^|/)(dist|dist-server|node_modules|\.venv-tray|__pycache__)/|\.pyc$|\.tsbuildinfo$' || true)
+if [ -n "$TRACKED_EXCL" ]; then
+  giallo "Questi file compilati/generati risultano già tracciati — li tolgo dal repository (restano sul disco):"
+  echo "$TRACKED_EXCL" | head -20
+  [ "$(echo "$TRACKED_EXCL" | wc -l)" -gt 20 ] && echo "... e altri $(( $(echo "$TRACKED_EXCL" | wc -l) - 20 ))"
+  echo "$TRACKED_EXCL" | xargs -r -d '\n' git rm --cached -q --
+fi
+
+# -----------------------------------------------------------------------
 # 3) Ricerca file .bak* effettivamente presenti — solo informativo,
 #    il .gitignore sopra li tiene già fuori da Git
 # -----------------------------------------------------------------------
 echo
 echo "--- Ricerca file di backup (.bak, .bak0, .bak1, .bak2, ...) ---"
 BAK_FILES=$(find . -type f \( -iname "*.bak" -o -iregex ".*\.bak[0-9]+$" \) \
-              -not -path "./node_modules/*" -not -path "./.git/*" 2>/dev/null || true)
+              -not -path "./node_modules/*" -not -path "./.venv-tray/*" -not -path "./dist/*" -not -path "./.git/*" 2>/dev/null || true)
 if [ -n "$BAK_FILES" ]; then
   giallo "Trovati (ignorati automaticamente da Git):"
   echo "$BAK_FILES"
@@ -81,6 +125,14 @@ if [[ "$add_choice" =~ ^[Nn]$ ]]; then
 fi
 
 git add .
+
+# Rete di sicurezza: nulla di compilato/generato in staging, qualunque cosa dica il .gitignore.
+STAGED_EXCL=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(dist|dist-server|node_modules|\.venv-tray|__pycache__)/|\.pyc$|\.tsbuildinfo$' || true)
+if [ -n "$STAGED_EXCL" ]; then
+  giallo "Rimuovo dallo staging file compilati/generati (non vanno versionati):"
+  echo "$STAGED_EXCL" | head -20
+  echo "$STAGED_EXCL" | xargs -r -d '\n' git reset -q --
+fi
 
 # Rete di sicurezza aggiuntiva: se per qualunque motivo un .bak* fosse
 # comunque finito in staging (es. .gitignore modificato a mano dopo),

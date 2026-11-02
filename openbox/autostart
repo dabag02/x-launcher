@@ -30,6 +30,17 @@
 #     (serve "npm run build" / ./build.sh compile) e lascia xdash in pace.
 #   - Forzatura: X_LAUNCHER_LOCAL_SERVER=1 (sempre locale) o =0 (mai), da
 #     ~/.config/openbox/environment.
+#
+#  MODALITA' SPAZI (v2.6.7-dev.1): passa --spaces-mode a kiosk-launch.sh, cosi'
+#  la Dashboard libera il congelamento dell'input quando si torna al suo spazio
+#  (si puo' lanciare un secondo gioco con il primo in un altro spazio).
+#  Disattivabile con X_LAUNCHER_SPACES_MODE=0 (stesso file environment).
+#
+#  OVERLAY DEGLI SPAZI (v2.7.2-dev.1): passa --spaces-overlay a kiosk-launch.sh, cosi'
+#  Select + D-pad apre l'overlay a schermo intero (spazi e servizi, overlay.py) invece
+#  di cambiare spazio direttamente. Per tornare al cambio diretto:
+#  X_LAUNCHER_SPACES_OVERLAY=0 in ~/.config/openbox/environment (oppure, a sessione
+#  avviata, `x-launcher-spaces overlay off`). Select + L1 + R1 (Dashboard) funziona sempre.
 # =============================================================
 
 AUTOSTART_LINK="${XDG_CONFIG_HOME:-$HOME/.config}/openbox/autostart"
@@ -63,7 +74,31 @@ case "${X_LAUNCHER_LOCAL_SERVER:-auto}" in
   0|false) LOCAL_ARG="" ;;
   *)       [ "$PROJECT_DIR" != "/opt/x-launcher" ] && LOCAL_ARG="--local-server" ;;
 esac
-echo "kiosk-launch.sh: ${LOCAL_ARG:-server di sistema (xdash, porta 3000)}" >> "$LOG_FILE"
+# modalità spazi (default attiva nella sessione Shell)
+SPACES_ARG="--spaces-mode"
+case "${X_LAUNCHER_SPACES_MODE:-1}" in
+  0|false) SPACES_ARG="" ;;
+esac
+# Protezione contro versioni miste: un kiosk-launch.sh VECCHIO tratterebbe
+# --spaces-mode come nome del browser da forzare. Si passa l'opzione solo se lo
+# script la conosce.
+if [ -n "$SPACES_ARG" ] && ! grep -q -- '--spaces-mode' "$PROJECT_DIR/kiosk-launch.sh" 2>/dev/null; then
+  echo "ATTENZIONE: $PROJECT_DIR/kiosk-launch.sh non conosce --spaces-mode (versione vecchia?): opzione NON passata. Aggiornalo insieme a openbox/autostart." >> "$LOG_FILE"
+  SPACES_ARG=""
+fi
+# overlay degli spazi (default attivo nella sessione Shell), stessa protezione
+OVERLAY_ARG="--spaces-overlay"
+case "${X_LAUNCHER_SPACES_OVERLAY:-1}" in
+  0|false) OVERLAY_ARG="" ;;
+esac
+if [ -n "$OVERLAY_ARG" ] && ! grep -q -- '--spaces-overlay' "$PROJECT_DIR/kiosk-launch.sh" 2>/dev/null; then
+  echo "ATTENZIONE: $PROJECT_DIR/kiosk-launch.sh non conosce --spaces-overlay (versione vecchia?): opzione NON passata. Aggiornalo insieme a openbox/autostart." >> "$LOG_FILE"
+  OVERLAY_ARG=""
+fi
+if [ -n "$OVERLAY_ARG" ] && [ ! -f "$PROJECT_DIR/overlay.py" ]; then
+  echo "ATTENZIONE: $PROJECT_DIR/overlay.py non trovato: l'overlay degli spazi ripiegherà sul cambio diretto." >> "$LOG_FILE"
+fi
+echo "kiosk-launch.sh: ${LOCAL_ARG:-server di sistema (xdash, porta 3000)} ${SPACES_ARG:-(senza modalità spazi)} ${OVERLAY_ARG:-(senza overlay degli spazi)}" >> "$LOG_FILE"
 
 # wrapper per le scorciatoie di tastiera degli spazi (symlink idempotente)
 ln -sf "$HERE/spaces-ctl" "${XDG_CONFIG_HOME:-$HOME/.config}/openbox/spaces-ctl" 2>/dev/null
@@ -77,7 +112,7 @@ xset s off -dpms s noblank 2>/dev/null
       || echo "display.sh non riuscito (exit $?): layout dei monitor invariato." >> "$LOG_FILE"
   fi
   # shellcheck disable=SC2086
-  "$PROJECT_DIR/kiosk-launch.sh" $LOCAL_ARG >> "$LOG_DIR/kiosk-launch-openbox.log" 2>&1
+  "$PROJECT_DIR/kiosk-launch.sh" $LOCAL_ARG $SPACES_ARG $OVERLAY_ARG >> "$LOG_DIR/kiosk-launch-openbox.log" 2>&1
   echo "kiosk-launch.sh terminato ($(date -Iseconds)) — esco da Openbox." >> "$LOG_FILE"
   openbox --exit
 ) &

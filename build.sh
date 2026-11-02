@@ -43,7 +43,7 @@ compile() {
 # solo a sessione avviata, nel log del tray: ora lo si vede già in build.
 check_tray_sources() {
   local f err
-  for f in tray.py spaces.py; do
+  for f in tray.py spaces.py overlay.py; do
     if [ ! -f "$DIR/$f" ]; then
       echo "[BUILD] ⚠ $f non trovato in $DIR."
       continue
@@ -88,13 +88,20 @@ compile_tray() {
   elif [ -f "$DIR/spaces.py" ] && ! (cd "$DIR" && "$DIR/.venv-tray/bin/python3" -c 'import spaces' &>/dev/null); then
     echo "[BUILD] ⚠ spaces.py non importabile con il python del venv — verifica gli errori con: cd \"$DIR\" && .venv-tray/bin/python3 -c 'import spaces'"
   fi
+  # v2.7.2-dev.1 — overlay degli spazi (overlay.py): disegna con Pillow e parla con X via
+  # python-xlib. Avviso, mai blocco: senza, il cambio di spazio resta quello diretto.
+  if [ -f "$DIR/overlay.py" ] && ! (cd "$DIR" && "$DIR/.venv-tray/bin/python3" -c 'import overlay; assert overlay.HAVE_PIL and overlay.HAVE_XLIB' &>/dev/null); then
+    echo "[BUILD] ⚠ overlay.py non utilizzabile con il python del venv (manca pillow o python-xlib?) — l'overlay degli spazi non partirebbe: cd \"$DIR\" && .venv-tray/bin/python3 -c 'import overlay'"
+  fi
 
   echo "[BUILD] ✅ Tray pronta (.venv-tray)."
 }
 
 start() {
   echo "[BUILD] Avvio daemon + browser..."
-  ./kiosk-launch.sh "${2:-}"
+  # v2.6.7-dev.2 — inoltra TUTTE le opzioni (prima solo la prima): servono ad es.
+  # "./build.sh start --local-server --spaces-mode".
+  ./kiosk-launch.sh "${@:2}"
 }
 
 case "$ACTION" in

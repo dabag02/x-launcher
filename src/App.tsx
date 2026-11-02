@@ -65,6 +65,7 @@ import { AudioProvider, useAudio } from './components/AudioProvider';
 import { VirtualKeyboard, SuggestionItem } from './components/VirtualKeyboard';
 import { GamepadTester } from './components/GamepadTester';
 import { useGamepad } from './hooks/useGamepad';
+import { evaluateSpacesGate, type SpacesInfo } from './lib/spacesGate';
 import { useCloudBackupProviders } from './hooks/useCloudBackupProviders';
 import { useNotifications } from './hooks/useNotifications';
 import { useHostname } from './hooks/useHostname';
@@ -862,7 +863,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v2.6.6-Mercury');
+  const [appVersion, setAppVersion] = useState('v2.7.2-dev.5');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1160,6 +1161,110 @@ function MainApp() {
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
   }, [logDiag]);
+
+  // v2.6.7-dev.1 — MODALITA' SPAZI (Step 21, sessione Openbox "Shell").
+  // Attivata da kiosk-launch.sh --spaces-mode (parametro ?spaces=1 nell'URL,
+  // stesso schema di ?localdev=1; lo passa openbox/autostart). Letto una sola
+  // volta all'avvio. Fuori da questa modalita' non cambia NIENTE.
+  //
+  // Fa due cose, entrambe col gestore degli spazi (spaces.py) via /api/spaces:
+  //  1. GATE DELL'INPUT. Nelle altre sessioni il congelamento (isFocusFrozen)
+  //     scatta al lancio del gioco e dura finche' il gioco vive, perche' la
+  //     Dashboard resta sotto il gioco e reagirebbe ai suoi tasti. Qui Dashboard
+  //     e gioco stanno in spazi diversi: la Dashboard e' congelata SOLO quando
+  //     non e' lo spazio corrente, e torna libera quando ci si ritorna (cosi' si
+  //     puo' lanciare un secondo gioco). Regole in lib/spacesGate.ts.
+  //  2. DIAGNOSTICA [SPACES-DIAG] (nel daemon.log e nella Debug Console): per
+  //     capire se cambiando spazio la Dashboard perde davvero il controller
+  //     — visibilityState, hasFocus, spazio corrente e ogni bottone che la
+  //     Dashboard RICEVE davvero dal Gamepad API (indici standard: 0 A, 1 B,
+  //     2 X, 3 Y, 4 L1, 5 R1, 6 L2, 7 R2, 8 Select, 9 Start, 12-15 D-pad su,
+  //     giu', sinistra, destra). Se premendo bottoni nello spazio del gioco
+  //     NON compaiono righe, Chromium non riceve il pad (finestra nascosta).
+  const [isSpacesMode] = useState<boolean>(() => {
+    try { return new URLSearchParams(window.location.search).get('spaces') === '1'; } catch { return false; }
+  });
+  const isFocusFrozenRef = useRef(isFocusFrozen);
+  useEffect(() => { isFocusFrozenRef.current = isFocusFrozen; }, [isFocusFrozen]);
+  const setFocusFrozenRef = useRef(setFocusFrozen);
+  useEffect(() => { setFocusFrozenRef.current = setFocusFrozen; }, [setFocusFrozen]);
+  // awaiting = lancio appena fatto: la Dashboard resta congelata finche' il
+  // gestore non porta in uno spazio di gioco (o scade il timeout, vedi spacesGate).
+  const spacesGateRef = useRef<{ awaiting: boolean; since: number }>({ awaiting: false, since: 0 });
+  const spacesInfoRef = useRef<SpacesInfo | null>(null);
+  // Stato mostrato dal badge "Modalità spazi" nel quick-menu (sotto la versione),
+  // aggiornato solo quando cambia davvero: serve a vedere a colpo d'occhio che la
+  // modalità è attiva e in che spazio ci si trova.
+  const [spacesView, setSpacesView] = useState<SpacesInfo | null>(null);
+  useEffect(() => {
+    if (!isSpacesMode) return;
+    const ctx = () => `visibilityState=${document.visibilityState}, hasFocus=${document.hasFocus()}, `
+      + `spazio=${spacesInfoRef.current?.current ?? '?'}, congelato=${isFocusFrozenRef.current}`;
+    logDiag(`[SPACES-DIAG] modalità spazi attiva — ${ctx()}`);
+
+    const pollSpaces = setInterval(async () => {
+      try {
+        const res = await fetch('/api/spaces');
+        const j = await res.json();
+        const info: SpacesInfo = j?.active
+          ? {
+              active: true,
+              current: Number(j.current) || 0,
+              gameSpaces: Array.isArray(j.spaces) ? j.spaces.filter((s: { kind?: string }) => s?.kind === 'game').length : 0,
+            }
+          : { active: false, current: 0, gameSpaces: 0 };
+        const prev = spacesInfoRef.current;
+        spacesInfoRef.current = info;
+        if (!prev || prev.active !== info.active || prev.current !== info.current || prev.gameSpaces !== info.gameSpaces) {
+          logDiag(`[SPACES-DIAG] spazio corrente=${info.current}, spazi di gioco=${info.gameSpaces}, gestore attivo=${info.active}`);
+          setSpacesView(info);
+        }
+        const out = evaluateSpacesGate({
+          gameRunning: gameStillRunningRef.current,
+          awaitingSwitch: spacesGateRef.current.awaiting,
+          awaitingSinceMs: spacesGateRef.current.since,
+          nowMs: Date.now(),
+          info,
+        });
+        spacesGateRef.current.awaiting = out.awaitingSwitch;
+        if (out.freeze !== null && out.freeze !== isFocusFrozenRef.current) {
+          logDiag(`[SPACES-DIAG] gate input → ${out.freeze ? 'CONGELATO' : 'LIBERO'}: ${out.reason}`);
+          setFocusFrozenRef.current(out.freeze);
+        }
+      } catch { /* backend momentaneamente non raggiungibile */ }
+    }, 400);
+
+    const prevPressed = new Map<number, Set<number>>();
+    let lastPadCount = -1;
+    const pollPads = setInterval(() => {
+      const raw = typeof navigator.getGamepads === 'function' ? navigator.getGamepads() : [];
+      const pads = Array.from(raw).filter((p): p is Gamepad => !!p);
+      if (pads.length !== lastPadCount) {
+        lastPadCount = pads.length;
+        logDiag(`[SPACES-DIAG] getGamepads: ${pads.length} controller visibili — ${ctx()}`);
+      }
+      for (const pad of pads) {
+        const now = new Set<number>();
+        pad.buttons.forEach((b, idx) => { if (b.pressed) now.add(idx); });
+        const before = prevPressed.get(pad.index) ?? new Set<number>();
+        now.forEach((idx) => {
+          if (!before.has(idx)) logDiag(`[SPACES-DIAG] la Dashboard ha ricevuto il bottone ${idx} (pad ${pad.index}) — ${ctx()}`);
+        });
+        prevPressed.set(pad.index, now);
+      }
+    }, 80);
+
+    const onFocus = () => logDiag(`[SPACES-DIAG] finestra: focus — ${ctx()}`);
+    const onBlur = () => logDiag(`[SPACES-DIAG] finestra: blur — ${ctx()}`);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      clearInterval(pollSpaces);
+      clearInterval(pollPads);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [isSpacesMode, logDiag]);
 
   const { state: gamepadState, isJustPressed } = useGamepad();
   const { play } = useAudio();
@@ -2752,6 +2857,10 @@ Vuoi provare ad avviarlo comunque?`);
       // isLastLaunchedGameRunning(), che esclude già i launcher condivisi.
       setFocusFrozen(true);
       gameStillRunningRef.current = true;
+      // v2.6.7-dev.1 — modalità spazi: dal lancio la Dashboard resta congelata
+      // finche' il gestore degli spazi non porta allo spazio del gioco (vedi
+      // lib/spacesGate.ts). Innocuo fuori da quella modalità.
+      spacesGateRef.current = { awaiting: true, since: Date.now() };
       let consecutiveFailures = 0;
       const pollGameRunning = setInterval(async () => {
         try {
@@ -3591,7 +3700,12 @@ Vuoi provare ad avviarlo comunque?`);
             // Dashboard è rimasta in primo piano — congelare comunque
             // l'input la renderebbe inutilizzabile senza una seconda
             // combo di risveglio per uscirne.
-            if (data?.success) setFocusFrozen(true);
+            // v2.6.7-dev.1 — con il gestore degli spazi attivo (handledByDaemon)
+            // la rotta non fa nulla: i cambi di spazio li fa il demone via
+            // evdev e il gate di spacesGate.ts decide il congelamento. Ri-armare
+            // il freeze qui lascerebbe la Dashboard bloccata se il demone non
+            // ha nessuno spazio verso cui passare.
+            if (data?.success && !data?.handledByDaemon) setFocusFrozen(true);
           })
           .catch(() => {});
         play('back');
@@ -6482,6 +6596,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               {isLocalDevServer && (
                 <div className="text-center text-[9px] font-black uppercase tracking-widest text-red-500">
                   Server locale · :{window.location.port || '80'}
+                </div>
+              )}
+              {/* v2.6.7-dev.2 — badge "Modalità spazi" (kiosk-launch.sh --spaces-mode):
+                  stessa posizione e stile del badge "Server locale", per sapere
+                  a colpo d'occhio se la modalità è attiva (e in che spazio si è)
+                  senza leggere i log. */}
+              {isSpacesMode && (
+                <div className="text-center text-[9px] font-black uppercase tracking-widest text-sky-400">
+                  Modalità spazi · {spacesView?.active
+                    ? `spazio ${spacesView.current} · giochi ${spacesView.gameSpaces}`
+                    : 'gestore non raggiungibile'}
                 </div>
               )}
               {/* v2.5.0-Mercury — countdown prima del riavvio di gamescope
