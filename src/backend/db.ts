@@ -27,6 +27,8 @@ import { DATA_DIR } from './paths';
 // install/uninstall, corretto solo da un riavvio" — serve tracciare CHI
 // scrive cosa e quando, invece di continuare a ipotizzare sulla carta.
 import { writeLog } from './logger';
+import { sanitizeCompatRow } from './restoreSafety';
+import { hardenDataPermissions } from './dataPermissions';
 
 // ---------------------------------------------------------------------------
 // Percorso DB
@@ -46,6 +48,9 @@ const db = new Database(DB_PATH);
 // WAL mode: scritture non bloccano le letture
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+
+// v3.0.2-dev.4 — cartella dati 0700, DB/.env/token 0600 (audit di sicurezza, punto 5).
+hardenDataPermissions();
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -1491,16 +1496,25 @@ export function exportCompatProfilesRaw(): Record<string, unknown>[] {
 export function importCompatProfilesRaw(rows: Record<string, unknown>[]): { imported: number; skipped: number } {
   let imported = 0;
   let skipped = 0;
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const cols = Object.keys(row);
+  // v3.0.2-dev.4 — il bundle e' input NON fidato (audit di sicurezza, punto 4): prima i NOMI delle colonne
+  // venivano da Object.keys(riga) e finivano nell'SQL (iniezione). Ora le colonne ammesse sono quelle REALI
+  // della tabella e ogni riga e i suoi valori sono ripuliti (restoreSafety.sanitizeCompatRow).
+  const allowed = new Set((db.prepare('PRAGMA table_info(compat_profiles)').all() as { name: string }[]).map(r => r.name));
+  for (const raw of (Array.isArray(rows) ? rows : [])) {
+    const clean = sanitizeCompatRow(raw, allowed);
+    if (!clean) { skipped++; continue; }
+    if (clean.notes.length > 0) {
+      writeLog('warning', `[CloudBackup] Profilo ${String(clean.row.game_id)}: ${clean.notes.join('; ')}`);
+    }
+    const cols = Object.keys(clean.row);
     if (cols.length === 0) { skipped++; continue; }
     const colList = cols.join(', ');
     const placeholders = cols.map(c => `@${c}`).join(', ');
     try {
-      db.prepare(`INSERT OR REPLACE INTO compat_profiles (${colList}) VALUES (${placeholders})`).run(row as Record<string, string | number | null>);
+      db.prepare(`INSERT OR REPLACE INTO compat_profiles (${colList}) VALUES (${placeholders})`).run(clean.row);
       imported++;
     } catch (err) {
-      writeLog('warning', `[CloudBackup] Riga compat_profiles saltata (${row.game_id ?? '?'}): ${err}`);
+      writeLog('warning', `[CloudBackup] Riga compat_profiles saltata (${String(clean.row.game_id ?? '?')}): ${err}`);
       skipped++;
     }
   }

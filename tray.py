@@ -86,6 +86,33 @@ sys.stderr.reconfigure(line_buffering=True)
 
 WINDOW_TITLE = "X-Launcher HTPC"
 DAEMON_URL = os.environ.get("X_LAUNCHER_URL", "http://localhost:3000")
+
+# v3.0.2-dev.3 — il demone richiede un token (audit di sicurezza). Lo crea al primo avvio in
+# ~/.local/share/x-launcher/api-token (0600). Letto a ogni richiesta, non una volta sola: il file
+# puo' comparire dopo l'avvio del tray e non c'e' motivo di tenerlo in memoria piu' del necessario.
+API_TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".local", "share", "x-launcher", "api-token")
+
+
+def _auth_headers(extra=None):
+    """Header per il demone: il token se il file esiste (altrimenti niente: un demone con
+    X_LAUNCHER_AUTH=off funziona senza)."""
+    headers = dict(extra or {})
+    try:
+        with open(API_TOKEN_FILE, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+        if token:
+            headers["X-XLauncher-Token"] = token
+    except OSError:
+        pass
+    return headers
+
+
+def _daemon_get(path, timeout=3):
+    """GET autenticato verso il demone; ritorna il corpo (bytes)."""
+    req = urllib.request.Request(f"{DAEMON_URL}{path}", headers=_auth_headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
 POLL_INTERVAL_S = 2
 
 # v1.1.68 — menu contestuale con gli ultimi giochi lanciati (richiesta
@@ -132,10 +159,9 @@ def detect_language() -> str:
     già usato dal frontend). Fallback 'it' se il daemon non risponde
     ancora o il campo manca — stesso default storico del resto dell'app."""
     try:
-        with urllib.request.urlopen(f"{DAEMON_URL}/api/config", timeout=3) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            lang = data.get("language")
-            return lang if lang in TRANSLATIONS else "it"
+        data = json.loads(_daemon_get("/api/config").decode("utf-8"))
+        lang = data.get("language")
+        return lang if lang in TRANSLATIONS else "it"
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return "it"
 
@@ -149,9 +175,7 @@ def fetch_recent_games():
     Lista vuota (non un'eccezione) se il daemon non risponde — stesso
     principio difensivo usato da detect_language() qui sopra."""
     try:
-        url = f"{DAEMON_URL}/api/games/recent?limit={RECENT_GAMES_LIMIT}"
-        with urllib.request.urlopen(url, timeout=3) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return json.loads(_daemon_get(f"/api/games/recent?limit={RECENT_GAMES_LIMIT}").decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return []
 
@@ -164,7 +188,7 @@ def launch_game(game_id: str):
         req = urllib.request.Request(
             f"{DAEMON_URL}/api/launch",
             data=json.dumps({"id": game_id}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)

@@ -21,6 +21,7 @@ import { readWineReg, lastPathSegment, WineRegKey } from '../wineRegistry';
 import { notificationEngine } from '../notificationEngine';
 import { existsSync } from 'fs';
 import { execSync } from 'child_process';
+import { findFirst, EXE_EXCLUDES_STD } from '../safeExec';
 
 /**
  * Replica minima di GameManager.addLog(): i plugin non hanno un
@@ -189,14 +190,8 @@ function windowsPathToLinux(driveC: string, winPath: string): string {
 function findExeInKnownDir(absoluteDir: string): string | null {
   if (!existsSync(absoluteDir)) return null;
   try {
-    const result = execSync(
-      `find "${absoluteDir}" -maxdepth 3 -iname "*.exe" ` +
-      `! -iname "unins*" ! -iname "*crashhandler*" ! -iname "*crashreporter*" ` +
-      `! -iname "vcredist*" ! -iname "vc_redist*" ! -iname "dxsetup*" ` +
-      `! -iname "*explorer*" ! -iname "*helper*" ! -iname "*updater*" ` +
-      `| head -1`,
-      { encoding: 'utf-8', timeout: 8000 }
-    ).trim();
+    // v3.0.2-dev.5 — find senza shell (safeExec.ts).
+    const result = findFirst(absoluteDir, { maxDepth: 3, inames: ['*.exe'], excludeInames: [...EXE_EXCLUDES_STD] });
     return result || null;
   } catch {
     return null;

@@ -74,8 +74,21 @@ if ! command -v node &>/dev/null; then
   info "Node.js non trovato. Installazione..."
   case "$DISTRO_FAMILY" in
     arch)   $PKG_INSTALL nodejs npm base-devel ;;
-    debian) curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-            sudo apt-get install -y nodejs build-essential ;;
+    debian) # v3.0.2-dev.6 — niente piu' "curl | sudo bash": lo script NodeSource viene scaricato in un
+            # file temporaneo e lanciato solo dopo conferma (puoi leggerlo prima: $NS_TMP).
+            NS_TMP="$(mktemp /tmp/nodesource-setup.XXXXXX)"
+            curl -fsSL https://deb.nodesource.com/setup_lts.x -o "$NS_TMP" || { rm -f "$NS_TMP"; error "Download NodeSource fallito"; exit 1; }
+            warn "Sta per essere eseguito come root lo script NodeSource scaricato in $NS_TMP"
+            read -r -p "Eseguirlo? [s/N] " _ans
+            if [[ "$_ans" =~ ^[sSyY]$ ]]; then
+              sudo -E bash "$NS_TMP"
+              rm -f "$NS_TMP"
+              sudo apt-get install -y nodejs build-essential
+            else
+              rm -f "$NS_TMP"
+              error "Installa Node.js LTS a mano (oppure: sudo apt install nodejs npm) e rilancia lo script"
+              exit 1
+            fi ;;
     fedora) sudo dnf install -y nodejs npm gcc-c++ make ;;
   esac
 fi
@@ -230,7 +243,7 @@ case "$DISTRO_FAMILY" in
     check_recommended "steam"       "sudo pacman -S steam  (o ProtonUp-Qt via Flathub, vedi sotto)" "Steam"
     check_recommended "protonup"    "pip install --user protonup-ng  oppure  ProtonUp-Qt da Flathub" "ProtonUp CLI"
     check_recommended "lutris"      "sudo pacman -S lutris" "Lutris (EAC/BattlEye)"
-    check_recommended "ollama"      "curl -fsSL https://ollama.com/install.sh | sh" "Ollama (AI Advisor)"
+    check_recommended "ollama"      "scarica https://ollama.com/install.sh, leggilo e poi eseguilo (curl -fsSL -o /tmp/ollama-install.sh https://ollama.com/install.sh && less /tmp/ollama-install.sh && sh /tmp/ollama-install.sh)" "Ollama (AI Advisor)"
     check_recommended "mangohud"    "sudo pacman -S mangohud" "MangoHud"
     check_recommended "gamemoderun" "sudo pacman -S gamemode" "GameMode"
     check_recommended "zenity"      "sudo pacman -S zenity" "Zenity (selezione file — Sfoglia per installer launcher terzi)"
@@ -242,7 +255,7 @@ case "$DISTRO_FAMILY" in
     check_recommended "steam"       "sudo apt install steam  (richiede repository multiverse/non-free — o ProtonUp-Qt da Flathub, vedi sotto)" "Steam"
     check_recommended "protonup"    "pip install --user protonup-ng  oppure  ProtonUp-Qt da Flathub" "ProtonUp CLI"
     check_recommended "lutris"      "sudo apt install lutris  (potrebbe richiedere il repository di Lutris, vedi lutris.net)" "Lutris (EAC/BattlEye)"
-    check_recommended "ollama"      "curl -fsSL https://ollama.com/install.sh | sh" "Ollama (AI Advisor)"
+    check_recommended "ollama"      "scarica https://ollama.com/install.sh, leggilo e poi eseguilo (curl -fsSL -o /tmp/ollama-install.sh https://ollama.com/install.sh && less /tmp/ollama-install.sh && sh /tmp/ollama-install.sh)" "Ollama (AI Advisor)"
     check_recommended "mangohud"    "sudo apt install mangohud" "MangoHud"
     check_recommended "gamemoderun" "sudo apt install gamemode" "GameMode"
     check_recommended "zenity"      "sudo apt install zenity" "Zenity (selezione file — Sfoglia per installer launcher terzi)"
@@ -254,7 +267,7 @@ case "$DISTRO_FAMILY" in
     check_recommended "steam"       "sudo dnf install steam  (richiede RPM Fusion nonfree — o ProtonUp-Qt da Flathub, vedi sotto)" "Steam"
     check_recommended "protonup"    "pip install --user protonup-ng  oppure  ProtonUp-Qt da Flathub" "ProtonUp CLI"
     check_recommended "lutris"      "sudo dnf install lutris  (richiede RPM Fusion)" "Lutris (EAC/BattlEye)"
-    check_recommended "ollama"      "curl -fsSL https://ollama.com/install.sh | sh" "Ollama (AI Advisor)"
+    check_recommended "ollama"      "scarica https://ollama.com/install.sh, leggilo e poi eseguilo (curl -fsSL -o /tmp/ollama-install.sh https://ollama.com/install.sh && less /tmp/ollama-install.sh && sh /tmp/ollama-install.sh)" "Ollama (AI Advisor)"
     check_recommended "mangohud"    "sudo dnf install mangohud" "MangoHud"
     check_recommended "gamemoderun" "sudo dnf install gamemode" "GameMode"
     check_recommended "zenity"      "sudo dnf install zenity" "Zenity (selezione file — Sfoglia per installer launcher terzi)"
@@ -268,6 +281,40 @@ esac
 # installazione separata possibile né necessaria.
 info "FSR (Wine): nessuna installazione separata — disponibile automaticamente"
 info "con Wine >= 7.x (verificato: già installato sopra se mancante)."
+
+# v3.2.0-Mars — font comune di Dashboard e overlay: Noto Sans in assets/fonts/.
+# Se mancano, si copiano dal pacchetto Noto Sans della distribuzione (stessi file che
+# fontconfig usa già), con la licenza OFL. Senza, Dashboard e overlay usano i font di sistema.
+SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FONT_DEST="$SETUP_DIR/assets/fonts"
+NOTO_STYLES="Regular Italic Medium MediumItalic Bold BoldItalic Black BlackItalic LightItalic"
+mkdir -p "$FONT_DEST"
+NOTO_MISSING=""
+for _s in $NOTO_STYLES; do
+  [ -f "$FONT_DEST/NotoSans-${_s}.ttf" ] && continue
+  _src=""
+  for _d in /usr/share/fonts/noto /usr/share/fonts/truetype/noto /usr/share/fonts/google-noto /usr/share/fonts/google-noto-vf /usr/share/fonts/TTF; do
+    [ -f "$_d/NotoSans-${_s}.ttf" ] && { _src="$_d/NotoSans-${_s}.ttf"; break; }
+  done
+  if [ -n "$_src" ]; then cp "$_src" "$FONT_DEST/" && info "Font: copiato $(basename "$_src")"; else NOTO_MISSING="$NOTO_MISSING NotoSans-${_s}.ttf"; fi
+done
+if [ ! -f "$FONT_DEST/OFL.txt" ]; then
+  for _l in /usr/share/licenses/noto-fonts/LICENSE /usr/share/doc/fonts-noto-core/copyright /usr/share/licenses/google-noto-sans-fonts/OFL.txt; do
+    [ -f "$_l" ] && { cp "$_l" "$FONT_DEST/OFL.txt"; break; }
+  done
+fi
+if [ -z "$NOTO_MISSING" ]; then
+  success "Font Noto Sans per Dashboard e overlay → presenti in assets/fonts/"
+else
+  case "$DISTRO_FAMILY" in
+    arch)   _hint="sudo pacman -S noto-fonts" ;;
+    debian) _hint="sudo apt install fonts-noto-core" ;;
+    fedora) _hint="sudo dnf install google-noto-sans-fonts" ;;
+    *)      _hint="installa i font Noto Sans" ;;
+  esac
+  warn "Font Noto Sans mancanti in assets/fonts/:${NOTO_MISSING}. Installa il pacchetto ($_hint) e rilancia questo script;"
+  warn "senza, Dashboard e overlay usano i font di sistema. (Il 200 corsivo non serve: si usa il Light corsivo.)"
+fi
 
 echo ""
 success "Setup completato!"

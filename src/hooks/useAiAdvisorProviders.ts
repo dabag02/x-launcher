@@ -10,6 +10,7 @@
 // limita a spostare *dove vive* la logica: stessa API (stessi nomi
 // restituiti) di prima, per un diff minimo nel chiamante.
 import React, { useState, useEffect } from 'react';
+import i18n from '../i18n/i18n';
 
 export interface CloudProviderState {
   enabled: boolean;
@@ -162,13 +163,13 @@ export function useAiAdvisorProviders(showSettings: boolean, cloudProviderIds: s
       .then(data => {
         setCloudProviderState(prev => ({
           ...prev,
-          [id]: { ...prev[id], testing: false, testResult: { success: Boolean(data?.success), message: data?.message ?? 'Nessuna risposta.' } },
+          [id]: { ...prev[id], testing: false, testResult: { success: Boolean(data?.success), message: data?.message ?? i18n.t('settings:aiAdvisor.noResponse') } },
         }));
       })
       .catch(() => {
         setCloudProviderState(prev => ({
           ...prev,
-          [id]: { ...prev[id], testing: false, testResult: { success: false, message: 'Richiesta fallita — daemon non raggiungibile?' } },
+          [id]: { ...prev[id], testing: false, testResult: { success: false, message: i18n.t('settings:aiAdvisor.requestFailed') } },
         }));
       });
   }, [cloudProviderState]);

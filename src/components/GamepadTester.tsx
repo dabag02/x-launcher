@@ -36,7 +36,6 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
   // resto della tab che lo ospita, anche se il componente è in un file
   // diverso.
   const { t } = useTranslation('settings');
-  const isLight = theme === 'light';
   const pressed = (btn: ButtonName) => state.buttons.has(btn);
 
   // Deflessione stick: piccolo offset visivo proporzionale al valore
@@ -45,29 +44,28 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
   const [lx, ly, rx, ry] = state.axes;
   const stickOffset = (v: number) => Math.max(-6, Math.min(6, v * 6));
 
-  const litFill   = '#3b82f6';        // blue-500, coerente con l'accent del progetto
-  const idleFillD = 'rgba(255,255,255,0.08)';
-  const idleFillL = 'rgba(0,0,0,0.06)';
-  const idleStrokeD = 'rgba(255,255,255,0.18)';
-  const idleStrokeL = 'rgba(0,0,0,0.15)';
-  const idleFill   = isLight ? idleFillL : idleFillD;
-  const idleStroke = isLight ? idleStrokeL : idleStrokeD;
-  const labelColor = isLight ? '#9ca3af' : 'rgba(255,255,255,0.35)';
+  // v3.1.7-dev.6 — colori del disegno dal tema (themes/<id>.json, pad-*). Passati come stile
+  // (non come attributo fill/stroke): var() negli attributi SVG non è garantito fuori da
+  // Chromium. Il secondo argomento di var() è il valore del tema scuro di prima.
+  const litFill    = 'var(--xl-pad-lit, #3b82f6)';                    // blue-500, accent del progetto
+  const litLabel   = 'var(--xl-pad-lit-label, #ffffff)';
+  const idleFill   = 'var(--xl-pad-idle-fill, rgba(255,255,255,0.08))';
+  const idleStroke = 'var(--xl-pad-idle-stroke, rgba(255,255,255,0.18))';
+  const labelColor = 'var(--xl-pad-label, rgba(255,255,255,0.35))';
+  const stickCap   = 'var(--xl-pad-stick, rgba(255,255,255,0.45))';
+  const bodyFill   = 'var(--xl-pad-body, rgba(255,255,255,0.03))';
 
   const faceBtn = (btn: ButtonName, cx: number, cy: number, label: string) => (
     <g key={btn}>
       <circle
         cx={cx} cy={cy} r={11}
-        fill={pressed(btn) ? litFill : idleFill}
-        stroke={pressed(btn) ? litFill : idleStroke}
         strokeWidth={1.5}
-        style={{ transition: 'fill 60ms linear, stroke 60ms linear' }}
+        style={{ fill: pressed(btn) ? litFill : idleFill, stroke: pressed(btn) ? litFill : idleStroke, transition: 'fill 60ms linear, stroke 60ms linear' }}
       />
       <text
         x={cx} y={cy + 4} textAnchor="middle"
         fontSize="9" fontWeight="900"
-        fill={pressed(btn) ? '#ffffff' : labelColor}
-        style={{ transition: 'fill 60ms linear', pointerEvents: 'none' }}
+        style={{ fill: pressed(btn) ? litLabel : labelColor, transition: 'fill 60ms linear', pointerEvents: 'none' }}
       >
         {label}
       </text>
@@ -78,16 +76,13 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
     <g key={btn}>
       <rect
         x={x} y={y} width={w} height={h} rx={4}
-        fill={pressed(btn) ? litFill : idleFill}
-        stroke={pressed(btn) ? litFill : idleStroke}
         strokeWidth={1.5}
-        style={{ transition: 'fill 60ms linear, stroke 60ms linear' }}
+        style={{ fill: pressed(btn) ? litFill : idleFill, stroke: pressed(btn) ? litFill : idleStroke, transition: 'fill 60ms linear, stroke 60ms linear' }}
       />
       <text
         x={x + w / 2} y={y + h / 2 + 3} textAnchor="middle"
         fontSize="7.5" fontWeight="900"
-        fill={pressed(btn) ? '#ffffff' : labelColor}
-        style={{ pointerEvents: 'none' }}
+        style={{ fill: pressed(btn) ? litLabel : labelColor, pointerEvents: 'none' }}
       >
         {label}
       </text>
@@ -96,11 +91,10 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
 
   const stick = (cx: number, cy: number, ox: number, oy: number, l3: ButtonName) => (
     <g key={`stick-${cx}`}>
-      <circle cx={cx} cy={cy} r={15} fill={idleFill} stroke={idleStroke} strokeWidth={1.5} />
+      <circle cx={cx} cy={cy} r={15} strokeWidth={1.5} style={{ fill: idleFill, stroke: idleStroke }} />
       <circle
         cx={cx + ox} cy={cy + oy} r={9}
-        fill={pressed(l3) ? litFill : (isLight ? '#d1d5db' : 'rgba(255,255,255,0.45)')}
-        style={{ transition: 'fill 60ms linear' }}
+        style={{ fill: pressed(l3) ? litFill : stickCap, transition: 'fill 60ms linear' }}
       />
     </g>
   );
@@ -113,8 +107,8 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
         // "questo è un normale stop di navigazione"): segnala che qui la
         // Dashboard si comporta diversamente dal solito, non solo che
         // l'elemento ha il focus.
-        ? "ring-2 ring-amber-400 " + (isLight ? "bg-amber-50 border-amber-200" : "bg-amber-500/5 border-amber-500/20")
-        : isLight ? "bg-gray-50 border-gray-200" : "bg-white/5 border-white/5"
+        ? "ring-2 ring-xl-notice-400 " + ('bg-xl-notice-tint border-xl-notice-tint-border-soft')
+        : 'bg-xl-box border-xl-border-subtle'
     )}>
       {/* v1.1.8 — schema ridisegnato più alto (viewBox 140→190px) per
           risolvere l'affollamento segnalato. La sagoma del corpo è
@@ -129,9 +123,8 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
         {/* Corpo del gamepad — sagoma neutra a farfalla, scalata in altezza */}
         <path
           d="M 40 74 Q 10 74 8 122 Q 6 169 30 173 Q 50 176 58 142 L 162 142 Q 170 176 190 173 Q 214 169 212 122 Q 210 74 180 74 Q 165 54 140 57 L 80 57 Q 55 54 40 74 Z"
-          fill={isLight ? '#ffffff' : 'rgba(255,255,255,0.03)'}
-          stroke={idleStroke}
           strokeWidth={1.5}
+          style={{ fill: bodyFill, stroke: idleStroke }}
         />
 
         {/* Dorsali alti L1/R1 */}
@@ -177,7 +170,7 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
             {connected ? t('input.testInputLive') : t('input.noControllerDetected')}
           </span>
         </div>
-        <p className={cn("text-[10px] leading-relaxed", isLight ? "text-gray-500" : "text-white/40")}>
+        <p className={cn("text-[10px] leading-relaxed", 'text-xl-fg-40')}>
           {captureActive
             ? t('input.testModeActive')
             : connected
@@ -194,14 +187,14 @@ export const GamepadTester: React.FC<GamepadTesterProps> = ({ state, connected, 
           <div className={cn(
             "w-2.5 h-2.5 rounded-full shrink-0 transition-colors",
             !captureActive
-              ? "bg-green-500"
+              ? "bg-xl-success-500"
               : exitHoldProgress > 0
-                ? "bg-yellow-400"
-                : "bg-red-500"
+                ? "bg-xl-warning-400"
+                : "bg-xl-danger-500"
           )} />
           <span className={cn(
             "text-[9px] font-black uppercase tracking-widest",
-            !captureActive ? "text-green-400" : exitHoldProgress > 0 ? "text-yellow-400" : "text-red-400"
+            !captureActive ? "text-xl-success-400" : exitHoldProgress > 0 ? "text-xl-warning-400" : "text-xl-danger-400"
           )}>
             {!captureActive ? t('input.navNormal') : exitHoldProgress > 0 ? t('input.exitInProgress') : t('input.testModeHint')}
           </span>

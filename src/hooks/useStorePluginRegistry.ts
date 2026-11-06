@@ -14,6 +14,7 @@
 // App.tsx invariato, così come i punti che leggono soltanto
 // pluginRegistry altrove nel file (es. il useMemo di pluginStateMap).
 import { useState, useEffect } from 'react';
+import i18n from '../i18n/i18n';
 
 export interface StorePluginEntry {
   id: string;
@@ -41,7 +42,7 @@ export function useStorePluginRegistry(activeSettingsTab: string) {
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(data => {
         if (Array.isArray(data)) setPluginRegistry(data);
-        else throw new Error('Risposta non è un array');
+        else throw new Error(i18n.t('settings:plugins.notAnArray'));
       })
       .catch(e => setPluginLoadError(String(e)));
   };

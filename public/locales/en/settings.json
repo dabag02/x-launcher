@@ -35,7 +35,16 @@
     "backupRunning": "Backup running...",
     "restoreNow": "Restore",
     "restoreRunning": "Restoring...",
-    "disconnect": "Disconnect"
+    "disconnect": "Disconnect",
+    "status": {
+      "authStarting": "⏳ Starting authentication...",
+      "connected": "✅ Connected.",
+      "unknownError": "Unknown error.",
+      "networkError": "❌ Network error.",
+      "disconnecting": "⏳ Disconnecting...",
+      "authSuccess": "✅ Authenticated successfully!",
+      "authTimeout": "⏱ Timeout — try again or use the terminal."
+    }
   },
   "language": {
     "label": "Language",
@@ -79,7 +88,13 @@
     "freeSpace": "{{free}} free",
     "usedPercentTotal": "{{percent}}% used · {{total}} total",
     "folderNotCreated": "folder not created yet",
-    "loadingEllipsis": "Loading..."
+    "loadingEllipsis": "Loading...",
+    "runnerProgress": {
+      "downloadStarting": "⏳ Starting download...",
+      "installError": "Error during installation.",
+      "uninstallStarting": "⏳ Starting uninstall...",
+      "uninstallError": "Error during uninstall."
+    }
   },
   "plugins": {
     "intro": "Enable or disable store plugins. Installed games stay visible even with the plugin disabled, but DRM titles won't be launchable.",
@@ -88,7 +103,8 @@
     "reload": "↻ Reload",
     "drmFree": "DRM-free",
     "drm": "DRM",
-    "requires": "requires: {{tool}}"
+    "requires": "requires: {{tool}}",
+    "notAnArray": "Response is not an array"
   },
   "input": {
     "connectedDevices": "Connected Devices",
@@ -155,7 +171,9 @@
     "apiKeyStoredPlaceholder": "•••••••• (saved)",
     "testing": "testing…",
     "testConnection": "Test connection",
-    "removeKey": "Remove key"
+    "removeKey": "Remove key",
+    "noResponse": "No response.",
+    "requestFailed": "Request failed — daemon unreachable?"
   },
   "cloudProviderNotes": {
     "gemini": "Real free tier with rate limits. On this tier, prompts and responses may be used by Google to improve its models — for sensitive data, use the paid tier.",

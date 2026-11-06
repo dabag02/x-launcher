@@ -1,12 +1,221 @@
 @import "tailwindcss";
 
+/* v3.1.7-dev.2 — font comune a Dashboard e overlay: Noto Sans, file in assets/fonts/ (copiati dal
+   pacchetto noto-fonts di Arch, licenza OFL in assets/fonts/OFL.txt). Prima la Dashboard usava il
+   sans-serif di sistema scelto da fontconfig (sull'HTPC: Noto Sans, gli stessi file), quindi
+   l'aspetto non cambia. Pesi presenti: 400, 500, 700, 900 (normale e corsivo) e 300 corsivo.
+   Il 200 corsivo (font-extralight italic, titolo della libreria) non esiste nel pacchetto: con i
+   font di sistema Chromium usava il Light (300), per questo il Light corsivo è dichiarato per
+   200-300 (senza, il CSS sceglierebbe il Thin, più sottile).
+   Se un file manca, quel peso ricade sul font di sistema (resto dell'elenco in --font-sans). */
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-LightItalic.ttf") format("truetype");
+  font-weight: 200 300;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-Italic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-MediumItalic.ttf") format("truetype");
+  font-weight: 500;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-BoldItalic.ttf") format("truetype");
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-Black.ttf") format("truetype");
+  font-weight: 900;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "X-Launcher Sans";
+  src: url("../assets/fonts/NotoSans-BlackItalic.ttf") format("truetype");
+  font-weight: 900;
+  font-style: italic;
+  font-display: block;
+}
+
 @theme {
+  --font-sans: "X-Launcher Sans", ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+    'Segoe UI Symbol', 'Noto Color Emoji';
   --color-bg-primary: #0b0c0f;
   --color-bg-secondary: #161920;
   --color-bg-sidebar: #12141a;
   --color-bg-card: #1c212a;
   --color-bg-footer: #090a0d;
   --color-accent: #2563eb; /* blue-600 */
+}
+
+/* v3.1.7-dev.1 — colori con nome dei temi (themes/<id>.json → src/theme/themes.ts → variabili
+   --xl-<nome> su <html>). Classi: bg-xl-<nome>, text-xl-<nome>, border-xl-<nome>, ring-…, shadow-…
+   (funzionano anche i modificatori di opacità, es. bg-xl-sidebar/90, bg-xl-ink/5).
+   `inline` perché il valore è una variabile impostata a runtime; il secondo argomento di var()
+   è il tema scuro, valido prima che il JavaScript applichi il tema.
+   Le variabili --color-bg-* qui sopra restano quelle di sempre (usate da body).
+   v3.1.7-dev.3 — due gruppi:
+   - ruoli (cambiano tra scuro e chiaro): sfondi, testo, bordi, campi, ink (bianco delle
+     sovrapposizioni semitrasparenti), contrast (bianco su scuro, nero su chiaro);
+   - scale di stato/marchio (primary = blu, danger = rosso, success = verde, warning = giallo,
+     special = viola, info = azzurro, neutral = grigio), con i valori di Tailwind.
+   Restano fissi i colori disegnati sopra le copertine e i colori dei marchi (es. Steam). */
+@theme inline {
+  --color-xl-bg: var(--xl-bg, #0b0c0f);
+  --color-xl-surface: var(--xl-surface, #161920);
+  --color-xl-sidebar: var(--xl-sidebar, #12141a);
+  --color-xl-card: var(--xl-card, #1c212a);
+  --color-xl-footer: var(--xl-footer, #090a0d);
+  --color-xl-panel: var(--xl-panel, #0b0c0f);
+  --color-xl-text: var(--xl-text, oklch(96.7% 0.003 264.542));
+  --color-xl-accent-text: var(--xl-accent-text, oklch(70.7% 0.165 254.624));
+  --color-xl-on-accent: var(--xl-on-accent, #ffffff);
+  --color-xl-border: var(--xl-border, color-mix(in oklab, #fff 10%, transparent));
+  --color-xl-item: var(--xl-item, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-ink: var(--xl-ink, #ffffff);
+  --color-xl-contrast: var(--xl-contrast, #ffffff);
+  --color-xl-border-subtle: var(--xl-border-subtle, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-field: var(--xl-field, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-field-border: var(--xl-field-border, color-mix(in oklab, #fff 10%, transparent));
+  --color-xl-control: var(--xl-control, #1a1d27);
+  --color-xl-control-text: var(--xl-control-text, #ffffff);
+  --color-xl-control-border: var(--xl-control-border, color-mix(in oklab, #fff 10%, transparent));
+  --color-xl-well: var(--xl-well, color-mix(in oklab, #000 80%, transparent));
+  --color-xl-well-border: var(--xl-well-border, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-shade: var(--xl-shade, #000000);
+  --color-xl-modal: var(--xl-modal, #12141a);
+  --color-xl-scrim: var(--xl-scrim, color-mix(in oklab, #000 95%, transparent));
+  --color-xl-inset: var(--xl-inset, color-mix(in oklab, #000 40%, transparent));
+  --color-xl-box: var(--xl-box, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-box-faint: var(--xl-box-faint, color-mix(in oklab, #fff 2%, transparent));
+  --color-xl-box-faint-border: var(--xl-box-faint-border, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-fill-5: var(--xl-fill-5, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-fill-10: var(--xl-fill-10, color-mix(in oklab, #fff 10%, transparent));
+  --color-xl-hover-fill: var(--xl-hover-fill, color-mix(in oklab, #fff 7%, transparent));
+  --color-xl-button: var(--xl-button, color-mix(in oklab, #fff 10%, transparent));
+  --color-xl-button-text: var(--xl-button-text, currentColor);
+  --color-xl-border-strong: var(--xl-border-strong, color-mix(in oklab, #fff 20%, transparent));
+  --color-xl-primary-tint: var(--xl-primary-tint, color-mix(in oklab, oklch(54.6% 0.245 262.881) 10%, transparent));
+  --color-xl-primary-tint-border: var(--xl-primary-tint-border, color-mix(in oklab, oklch(62.3% 0.214 259.815) 30%, transparent));
+  --color-xl-special-tint: var(--xl-special-tint, color-mix(in oklab, oklch(62.7% 0.265 303.9) 10%, transparent));
+  --color-xl-special-tint-border: var(--xl-special-tint-border, color-mix(in oklab, oklch(62.7% 0.265 303.9) 20%, transparent));
+  --color-xl-accent-text-soft: var(--xl-accent-text-soft, oklch(80.9% 0.105 251.813));
+  --color-xl-icon-muted: var(--xl-icon-muted, color-mix(in oklab, #fff 30%, transparent));
+  --color-xl-fg-20: var(--xl-fg-20, color-mix(in oklab, #fff 20%, transparent));
+  --color-xl-fg-25: var(--xl-fg-25, color-mix(in oklab, #fff 25%, transparent));
+  --color-xl-fg-30: var(--xl-fg-30, color-mix(in oklab, #fff 30%, transparent));
+  --color-xl-fg-40: var(--xl-fg-40, color-mix(in oklab, #fff 40%, transparent));
+  --color-xl-fg-50: var(--xl-fg-50, color-mix(in oklab, #fff 50%, transparent));
+  --color-xl-fg-60: var(--xl-fg-60, color-mix(in oklab, #fff 60%, transparent));
+  --color-xl-fg-80: var(--xl-fg-80, color-mix(in oklab, #fff 80%, transparent));
+  --color-xl-veil: var(--xl-veil, #0b0c0ffa);
+  --color-xl-sidebar-glass: var(--xl-sidebar-glass, #12141ae6);
+  --color-xl-keyboard-glass: var(--xl-keyboard-glass, #12141af2);
+  --color-xl-notice-tint-border-soft: var(--xl-notice-tint-border-soft, color-mix(in oklab, oklch(76.9% 0.188 70.08) 20%, transparent));
+  --color-xl-pad-lit: var(--xl-pad-lit, #3b82f6);
+  --color-xl-pad-lit-label: var(--xl-pad-lit-label, #ffffff);
+  --color-xl-pad-idle-fill: var(--xl-pad-idle-fill, rgba(255,255,255,0.08));
+  --color-xl-pad-idle-stroke: var(--xl-pad-idle-stroke, rgba(255,255,255,0.18));
+  --color-xl-pad-label: var(--xl-pad-label, rgba(255,255,255,0.35));
+  --color-xl-pad-stick: var(--xl-pad-stick, rgba(255,255,255,0.45));
+  --color-xl-pad-body: var(--xl-pad-body, rgba(255,255,255,0.03));
+  --color-xl-notice-tint: var(--xl-notice-tint, color-mix(in oklab, oklch(76.9% 0.188 70.08) 5%, transparent));
+  --color-xl-notice-tint-border: var(--xl-notice-tint-border, color-mix(in oklab, oklch(76.9% 0.188 70.08) 30%, transparent));
+  --color-xl-notice-text: var(--xl-notice-text, color-mix(in oklab, oklch(82.8% 0.189 84.429) 80%, transparent));
+  --color-xl-inset-soft: var(--xl-inset-soft, color-mix(in oklab, #000 40%, transparent));
+  --color-xl-console: var(--xl-console, color-mix(in oklab, #000 40%, transparent));
+  --color-xl-console-border: var(--xl-console-border, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-fill-5-strong: var(--xl-fill-5-strong, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-fill-10-strong: var(--xl-fill-10-strong, color-mix(in oklab, #fff 10%, transparent));
+  --color-xl-fill-20: var(--xl-fill-20, color-mix(in oklab, #fff 20%, transparent));
+  --color-xl-box-primary: var(--xl-box-primary, color-mix(in oklab, #fff 5%, transparent));
+  --color-xl-pane: var(--xl-pane, color-mix(in oklab, #fff 2%, transparent));
+  --color-xl-pane-3: var(--xl-pane-3, color-mix(in oklab, #fff 3%, transparent));
+  --color-xl-primary-border: var(--xl-primary-border, color-mix(in oklab, oklch(62.3% 0.214 259.815) 40%, transparent));
+  --color-xl-primary-border-soft: var(--xl-primary-border-soft, color-mix(in oklab, #fff 10%, transparent));
+  --color-xl-border-heavy: var(--xl-border-heavy, color-mix(in oklab, #fff 30%, transparent));
+  --color-xl-alt-text-700: var(--xl-alt-text-700, currentColor);
+  --color-xl-primary-text-dim: var(--xl-primary-text-dim, color-mix(in oklab, oklch(80.9% 0.105 251.813) 70%, transparent));
+  --color-xl-fg-25-alt: var(--xl-fg-25-alt, color-mix(in oklab, #fff 25%, transparent));
+  --color-xl-fg-50-alt: var(--xl-fg-50-alt, color-mix(in oklab, #fff 50%, transparent));
+  --color-xl-fg-70: var(--xl-fg-70, color-mix(in oklab, #fff 70%, transparent));
+  --color-xl-chip-text: var(--xl-chip-text, color-mix(in oklab, #fff 40%, transparent));
+  --color-xl-lutris-text: var(--xl-lutris-text, color-mix(in oklab, #fff 50%, transparent));
+  --color-xl-lutris-badge-text: var(--xl-lutris-badge-text, oklch(85.2% 0.199 91.936));
+  --color-xl-lutris-badge: var(--xl-lutris-badge, color-mix(in oklab, oklch(85.2% 0.199 91.936) 10%, transparent));
+  --color-xl-lutris-badge-border: var(--xl-lutris-badge-border, color-mix(in oklab, oklch(85.2% 0.199 91.936) 20%, transparent));
+  --color-xl-primary-200: var(--xl-primary-200, oklch(88.2% 0.059 254.128));
+  --color-xl-primary-300: var(--xl-primary-300, oklch(80.9% 0.105 251.813));
+  --color-xl-primary-400: var(--xl-primary-400, oklch(70.7% 0.165 254.624));
+  --color-xl-primary-500: var(--xl-primary-500, oklch(62.3% 0.214 259.815));
+  --color-xl-primary-600: var(--xl-primary-600, oklch(54.6% 0.245 262.881));
+  --color-xl-danger-300: var(--xl-danger-300, oklch(80.8% 0.114 19.571));
+  --color-xl-danger-400: var(--xl-danger-400, oklch(70.4% 0.191 22.216));
+  --color-xl-danger-500: var(--xl-danger-500, oklch(63.7% 0.237 25.331));
+  --color-xl-danger-600: var(--xl-danger-600, oklch(57.7% 0.245 27.325));
+  --color-xl-danger-700: var(--xl-danger-700, oklch(50.5% 0.213 27.518));
+  --color-xl-success-300: var(--xl-success-300, oklch(87.1% 0.15 154.449));
+  --color-xl-success-400: var(--xl-success-400, oklch(79.2% 0.209 151.711));
+  --color-xl-success-500: var(--xl-success-500, oklch(72.3% 0.219 149.579));
+  --color-xl-success-600: var(--xl-success-600, oklch(62.7% 0.194 149.214));
+  --color-xl-success-700: var(--xl-success-700, oklch(52.7% 0.154 150.069));
+  --color-xl-notice-300: var(--xl-notice-300, oklch(87.9% 0.169 91.605));
+  --color-xl-notice-400: var(--xl-notice-400, oklch(82.8% 0.189 84.429));
+  --color-xl-notice-500: var(--xl-notice-500, oklch(76.9% 0.188 70.08));
+  --color-xl-emerald-400: var(--xl-emerald-400, oklch(76.5% 0.177 163.223));
+  --color-xl-emerald-500: var(--xl-emerald-500, oklch(69.6% 0.17 162.48));
+  --color-xl-cyan-400: var(--xl-cyan-400, oklch(78.9% 0.154 211.53));
+  --color-xl-cyan-500: var(--xl-cyan-500, oklch(71.5% 0.143 215.221));
+  --color-xl-warning-300: var(--xl-warning-300, oklch(90.5% 0.182 98.111));
+  --color-xl-warning-400: var(--xl-warning-400, oklch(85.2% 0.199 91.936));
+  --color-xl-warning-500: var(--xl-warning-500, oklch(79.5% 0.184 86.047));
+  --color-xl-special-300: var(--xl-special-300, oklch(82.7% 0.119 306.383));
+  --color-xl-special-400: var(--xl-special-400, oklch(71.4% 0.203 305.504));
+  --color-xl-special-500: var(--xl-special-500, oklch(62.7% 0.265 303.9));
+  --color-xl-special-600: var(--xl-special-600, oklch(55.8% 0.288 302.321));
+  --color-xl-caution-400: var(--xl-caution-400, oklch(75% 0.183 55.934));
+  --color-xl-caution-500: var(--xl-caution-500, oklch(70.5% 0.213 47.604));
+  --color-xl-caution-600: var(--xl-caution-600, oklch(64.6% 0.222 41.116));
+  --color-xl-info-400: var(--xl-info-400, oklch(74.6% 0.16 232.661));
+  --color-xl-neutral-400: var(--xl-neutral-400, oklch(70.7% 0.022 261.325));
+  --color-xl-neutral-500: var(--xl-neutral-500, oklch(55.1% 0.027 264.364));
+  --color-xl-neutral-600: var(--xl-neutral-600, oklch(44.6% 0.03 256.802));
+  --color-xl-neutral-700: var(--xl-neutral-700, oklch(37.3% 0.034 259.733));
 }
 
 @layer base {

@@ -29,6 +29,7 @@ import { getThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { ProtonRunner, resolveProtonBin, gameLaunchLogPath } from './runners/implementations';
 import * as processManager from './processManager';
 import { Game } from '../types';
+import { findFirst, findAll, EXE_EXCLUDES_STD } from './safeExec';
 import * as db from './db';
 
 export const SHARED_LAUNCHERS_DIR = path.join(DATA_DIR, 'shared-launchers');
@@ -423,34 +424,15 @@ export function findGameExeInSharedPrefix(launcherId: string, gameTitle: string)
     const base = path.join(driveC, sub);
     if (!existsSync(base)) continue;
 
-    let allDirs: string[];
-    try {
-      const result = execSync(
-        `find "${base}" -maxdepth 6 -type d 2>/dev/null`,
-        { encoding: 'utf-8', timeout: 8000 }
-      );
-      allDirs = result.split('\n').filter(Boolean);
-    } catch {
-      continue;
-    }
+    // v3.0.2-dev.5 — find senza shell (safeExec.ts): un nome di cartella non viene mai reinterpretato.
+    const allDirs: string[] = findAll(base, { maxDepth: 6, type: 'd' });
 
     for (const dir of allDirs) {
       const normalizedDir = normalize(path.basename(dir));
       if (!normalizedDir) continue;
       if (!normalizedDir.includes(normalizedTitle) && !normalizedTitle.includes(normalizedDir)) continue;
-      try {
-        const exeResult = execSync(
-          `find "${dir}" -maxdepth 3 -iname "*.exe" ` +
-          `! -iname "unins*" ! -iname "*crashhandler*" ! -iname "*crashreporter*" ` +
-          `! -iname "vcredist*" ! -iname "vc_redist*" ! -iname "dxsetup*" ` +
-          `! -iname "*explorer*" ! -iname "*helper*" ! -iname "*updater*" ` +
-          `| head -1`,
-          { encoding: 'utf-8', timeout: 8000 }
-        ).trim();
-        if (exeResult) return exeResult;
-      } catch {
-        // continua col prossimo candidato
-      }
+      const exeResult = findFirst(dir, { maxDepth: 3, inames: ['*.exe'], excludeInames: [...EXE_EXCLUDES_STD] });
+      if (exeResult) return exeResult;
     }
   }
   return null;

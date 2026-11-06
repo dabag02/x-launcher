@@ -78,6 +78,18 @@ EnvironmentFile=-/home/TUOUTENTE/.local/share/x-launcher/.env
 # Sicurezza: limita accesso al filesystem
 ProtectSystem=full
 NoNewPrivileges=true
+# v3.0.2-dev.6 — restrizioni ulteriori, scelte apposta SOLO fra quelle che non toccano i giochi.
+# Il demone avvia Wine/Proton/gamescope, quindi NON si usano (rompono i giochi):
+#   PrivateTmp (nasconde /tmp/.X11-unix), ProtectHome (serve ~/.local/share e i prefix Wine),
+#   RestrictNamespaces (bubblewrap/pressure-vessel di Proton e umu), MemoryDenyWriteExecute (Wine/JIT),
+#   ProtectControlGroups (i giochi girano in scope systemd --user), ProtectKernelTunables.
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# famiglie di socket realmente usate: locali, rete, netlink (interfacce di rete)
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

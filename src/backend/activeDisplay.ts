@@ -44,13 +44,29 @@ export type SessionKind = 'desktop' | 'kiosk';
 let activeSessionKind: SessionKind = 'desktop';
 let activeGamescopeResolution: string | undefined;
 
-export function setActiveDisplay(display?: string, waylandDisplay?: string, kind?: SessionKind, resolution?: string): void {
-  activeDisplay = display && display.trim() !== '' ? display.trim() : undefined;
-  activeWaylandDisplay = waylandDisplay && waylandDisplay.trim() !== '' ? waylandDisplay.trim() : undefined;
+/** DISPLAY X11 valido (":0", ":1.0"). Un valore come "host:0" punterebbe i giochi a un altro server X. */
+export function isValidX11Display(v: unknown): v is string { return typeof v === 'string' && /^:\d{1,3}(\.\d{1,2})?$/.test(v.trim()); }
+/** WAYLAND_DISPLAY valido ("wayland-0", "gamescope-0"): solo un nome di socket, mai un percorso. */
+export function isValidWaylandDisplay(v: unknown): v is string { return typeof v === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,31}-\d{1,3}$/.test(v.trim()); }
+const VALID_RESOLUTIONS = new Set(['HD', 'FullHD', 'QHD', '4K']);
+
+/**
+ * v3.0.2-dev.5 (audit punto 9) — i valori sono validati: display/waylandDisplay diventano il DISPLAY di TUTTI i
+ * processi grafici lanciati dopo. Un valore non valido NON viene applicato. Ritorna false se qualcosa e' stato rifiutato.
+ */
+export function setActiveDisplay(display?: string, waylandDisplay?: string, kind?: SessionKind, resolution?: string): boolean {
+  const d = display && display.trim() !== '' ? display.trim() : undefined;
+  const w = waylandDisplay && waylandDisplay.trim() !== '' ? waylandDisplay.trim() : undefined;
+  if ((d !== undefined && !isValidX11Display(d)) || (w !== undefined && !isValidWaylandDisplay(w))) return false;
+  if (kind !== undefined && kind !== 'kiosk' && kind !== 'desktop') return false;
+  if (resolution !== undefined && resolution !== '' && !VALID_RESOLUTIONS.has(resolution)) return false;
+  activeDisplay = d;
+  activeWaylandDisplay = w;
   if (kind === 'kiosk' || kind === 'desktop') {
     activeSessionKind = kind;
   }
   activeGamescopeResolution = kind === 'kiosk' && resolution ? resolution : undefined;
+  return true;
 }
 
 /** Stato per il pulsante "Modalità Gamescope" — non per lo spawn dei giochi (vedi getActiveDisplayEnv per quello). */

@@ -1,0 +1,26 @@
+# =============================================================
+#  X-Launcher — giochi da NON congelare nella sessione Openbox "Shell"
+#
+#  Copia questo file in:  ~/.config/x-launcher/spaces-nofreeze.conf
+#  (mkdir -p ~/.config/x-launcher)
+#
+#  Di norma i giochi che non stanno nello spazio corrente vengono congelati
+#  (cgroup freezer: niente input dal controller, niente CPU). Un gioco elencato
+#  qui NON viene mai congelato. Il file e' riletto a ogni congelamento: non serve
+#  riavviare la sessione.
+#
+#  Una voce per riga: il nome dello scope (senza ".scope") oppure un PREFISSO.
+#  Le righe vuote e quello che segue un # sono ignorati.
+#  Per vedere gli scope in uso:  systemctl --user list-units 'xlauncher-game-*'
+#  oppure  x-launcher-spaces state
+#  (v3.2.1-Mars: vale anche per la Dashboard, scope 'xlauncher-dashboard-*';
+#   per lasciarla sempre attiva: riga  xlauncher-dashboard)
+#
+#  Disattivare il congelamento per tutti:  X_LAUNCHER_SPACES_FREEZE=0
+#  Solo per la Dashboard:  X_LAUNCHER_SPACES_FREEZE_DASHBOARD=0
+#  (in ~/.config/openbox/environment), oppure a runtime  x-launcher-spaces freeze off
+# =============================================================
+
+# Esempi (togli il # per attivarli):
+# xlauncher-game-minecraft          # tutti gli scope che iniziano cosi'
+# xlauncher-game-mio-gioco-online-1700000000

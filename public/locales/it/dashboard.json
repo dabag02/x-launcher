@@ -70,7 +70,34 @@
     "startTyping": "Inizia a digitare...",
     "paste": "Incolla",
     "clipboardEmpty": "Clipboard vuota",
-    "clipboardUnavailable": "Clipboard non disponibile"
+    "clipboardUnavailable": "Clipboard non disponibile",
+    "tips": {
+      "windowed": "Avvia in finestra — il fix più citato per blocchi/freeze da fullscreen esclusivo sotto Wine/Proton",
+      "noborder": "Finestra senza bordi — abbinato a -windowed per un \"fullscreen\" senza i problemi del fullscreen esclusivo",
+      "dx9": "Forza DirectX 9 — spesso meno stranezze sotto Wine/DXVK delle versioni successive dello stesso gioco",
+      "nointro": "Salta i video di apertura — causa frequente di crash sotto Wine per problemi di codec",
+      "novid": "Come -nointro, variante Source engine (Half-Life 2, CS:S, TF2, Portal, Left 4 Dead)",
+      "high": "Priorità processo alta — suggerito per stutter su giochi Source/più datati",
+      "nojoy": "Disattiva il rilevamento joystick del gioco — utile se confligge col rilevamento controller della Dashboard",
+      "retroarchCrt": "Filtro CRT pronto all'uso (crt-easymode) — --appendconfig= risulta ignorato da RetroArch, questo è il flag verificato funzionante",
+      "retroarchVerbose": "Log verboso — primo passo per diagnosticare un core o una ROM che non parte",
+      "retroarchMaxFrames": "Chiude RetroArch dopo N frame — utile solo per test automatizzati, non per l'uso normale",
+      "winedebug": "Silenzia il log di debug di Wine — meno rumore, leggero overhead in meno",
+      "winearch": "Forza un prefix a 64 bit",
+      "wineesync": "Abilita esync — sincronizzazione più leggera, utile su kernel meno recenti",
+      "winefsync": "Abilita fsync — equivalente più moderno di esync, kernel recenti",
+      "wineLargeAddressAware": "Permette a giochi a 32 bit di usare più di 2GB di RAM — fix molto citato",
+      "winemenubuilder": "Disattiva la creazione automatica di collegamenti/voci di menu da parte di Wine",
+      "d3d11Native": "Forza la DLL nativa invece di quella integrata — utile per problemi grafici specifici",
+      "protonLog": "Abilita il log di Proton su file — primo passo di ogni diagnosi",
+      "protonNoEsync": "Disattiva esync — a volte necessario per compatibilità",
+      "protonNoFsync": "Disattiva fsync — stesso motivo di NO_ESYNC",
+      "protonWined3d": "Forza WineD3D al posto di DXVK/VKD3D — utile se DXVK dà problemi specifici",
+      "protonLargeAddressAware": "Equivalente Proton del fix RAM per giochi a 32 bit",
+      "dxvkHud": "Overlay DXVK con FPS a schermo — diagnostica rapida, non modifica nulla",
+      "dxvkAsync": "Riduce lo stutter da compilazione shader — uno dei fix più citati in assoluto"
+    },
+    "crtFilter": "📺 Filtro CRT"
   },
   "notif": {
     "launchBlockedTitle": "Avvio bloccato — {{title}}",
@@ -95,6 +122,27 @@
   },
   "launcherDescriptions": {
     "ea_app_launcher": "Launcher EA App — richiesto da alcuni giochi EA comprati su Epic, GOG, Amazon Games o Steam. Installalo una sola volta: verrà condiviso da tutti i giochi che lo richiedono.",
-    "ubisoft_connect_launcher": "Launcher Ubisoft Connect — richiesto da alcuni giochi Ubisoft comprati su Epic, GOG o Amazon Games. Installalo una sola volta: verrà condiviso da tutti i giochi che lo richiedono."
+    "ubisoft_connect_launcher": "Launcher Ubisoft Connect — richiesto da alcuni giochi Ubisoft comprati su Epic, GOG o Amazon Games. Installalo una sola volta: verrà condiviso da tutti i giochi che lo richiedono.",
+    "steam_bigpicture_launcher": "Passa a Steam in modalità Big Picture, con la tua libreria Steam completa e l'interfaccia controller-first nativa di Valve."
+  },
+  "splash": {
+    "launchingFrom": "Avvio da {{store}}...",
+    "launching": "Avvio in corso...",
+    "verifying": "Verifica dell'ambiente",
+    "done": "Pronto.",
+    "failed": "Avvio non riuscito.",
+    "timeout": "Tempo scaduto — avvio interrotto.",
+    "cancelled": "Avvio annullato."
+  },
+  "logPanel": {
+    "pauseScroll": "Pausa auto-scroll",
+    "resumeScroll": "Riprendi auto-scroll",
+    "copyLogs": "Copia log negli appunti",
+    "downloadLogs": "Scarica log come file",
+    "empty": "Nessun log.",
+    "emptyFiltered": "Nessun log per il filtro selezionato.",
+    "entries_one": "{{count}} voce",
+    "entries_other": "{{count}} voci",
+    "filterActive": " · filtro attivo ({{count}})"
   }
 }

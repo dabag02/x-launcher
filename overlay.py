@@ -34,7 +34,7 @@ Variabili:
     X_LAUNCHER_OVERLAY_TOGGLES=bt,wifi,lan   servizi attivabili con A (default vuoto)
     X_LAUNCHER_OVERLAY_GRAB=0                non prendere il pad in esclusiva
     X_LAUNCHER_OVERLAY_IDLE_S=60             chiusura automatica senza input
-    X_LAUNCHER_OVERLAY_FONT=/percorso.ttf    font da usare
+    X_LAUNCHER_OVERLAY_FONT=/percorso.ttf    font da usare (default: assets/fonts/NotoSans-*.ttf)
     XL_OVERLAY_DUMP=/percorso.png            (test) salva ogni fotogramma disegnato
 """
 import json
@@ -48,6 +48,7 @@ import time
 
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps
+    Image.MAX_IMAGE_PIXELS = 40_000_000     # Pillow rifiuta (DecompressionBombError) oltre il doppio
     HAVE_PIL = True
     PIL_ERR = ""
 except Exception as _e:  # noqa
@@ -70,21 +71,41 @@ SERVICE_REFRESH_S = 3.0
 # ordine di navigazione della riga dei servizi
 ITEMS = ["bt", "wifi", "lan", "vminus", "vol", "vplus"]
 
-BG = (13, 17, 23)
-PANEL = (22, 27, 34)
-CARD_SEL = (31, 38, 48)
-LINE = (45, 54, 68)
-TEXT = (240, 243, 246)
-MUTED = (163, 173, 187)
-ACCENT = (94, 194, 255)
-ACCENT_INK = (6, 18, 28)
-GREEN = (74, 222, 128)
-GREY = (107, 118, 134)
-AMBER = (255, 180, 84)
-# Same colours as the Dashboard footer legend (Tailwind green-500 / red-500, black glyph).
-BTN_A = (34, 197, 94)
-BTN_B = (239, 68, 68)
+# v3.1.7-dev.7 — tavolozza di riserva = tema scuro della Dashboard (stessi valori di
+# themes/dark.json, sezione "overlay"); vale solo se il file del tema manca o non si legge.
+BG = (11, 12, 15)              # sfondo (Dashboard: bg)
+PANEL = (22, 25, 32)           # riquadri dei servizi e carte (Dashboard: header, surface)
+CARD_SEL = (28, 33, 42)        # carta selezionata (Dashboard: card)
+LINE = (35, 36, 39)            # bordi (Dashboard: border, bianco al 10%)
+TEXT = (243, 244, 246)         # testo (Dashboard: text)
+MUTED = (133, 134, 135)       # testo secondario (Dashboard: fg-50)
+ACCENT = (43, 127, 255)        # selezione (Dashboard: primary-500, il blu dei focus)
+ACCENT_INK = (255, 255, 255)   # testo sul blu (Dashboard: on-accent)
+GREEN = (0, 201, 80)
+GREY = (106, 114, 130)
+AMBER = (255, 185, 0)
+# Same colours as the Dashboard footer legend (green-500 / red-500, black glyph).
+BTN_A = (0, 201, 80)
+BTN_B = (251, 44, 54)
 BTN_INK = (0, 0, 0)
+DASH_CARD = (21, 93, 252)      # riquadro della Dashboard: il blu del logo "X" (primary-600)
+
+# v3.1.7-dev.1 — tavolozza dal tema della Dashboard (themes/<id>.json, sezione "overlay").
+# Le costanti qui sopra sono la tavolozza di riserva (= tema scuro): restano se il file del
+# tema manca, non si legge o non ha una chiave. Nome nel JSON -> nome della costante.
+THEME_KEYS = {
+    "bg": "BG", "panel": "PANEL", "card-selected": "CARD_SEL", "line": "LINE", "text": "TEXT",
+    "muted": "MUTED", "accent": "ACCENT", "accent-ink": "ACCENT_INK", "green": "GREEN",
+    "grey": "GREY", "amber": "AMBER", "button-a": "BTN_A", "button-b": "BTN_B",
+    "button-ink": "BTN_INK", "dashboard-card": "DASH_CARD",
+}
+# Se la sezione "overlay" non ha una chiave, la si ricava da questo colore della Dashboard
+# ("colors"), purché sia scritto come #rrggbb.
+THEME_FROM_COLORS = {"bg": "bg", "panel": "surface", "card-selected": "card", "text": "text",
+                     "accent": "accent-text"}
+FALLBACK_PALETTE = {k: globals()[v] for k, v in THEME_KEYS.items()}
+DEFAULT_THEME = "dark"
+_THEME_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 STR = {
     "it": {
@@ -115,19 +136,96 @@ def _app_conf_path():
         os.path.expanduser("~"), ".local", "share", "x-launcher", "app.conf")
 
 
-def _conf_language():
-    """Language chosen in the Dashboard (app.conf `language=`), or None."""
+def _conf_value(key):
+    """Value of `key=` in app.conf (written by the Dashboard), or None."""
     try:
         with open(_app_conf_path(), "r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
-                if line.startswith("language="):
+                if line.startswith(key + "="):
                     v = line.split("=", 1)[1].strip().lower()
                     if v:
                         return v
     except Exception:
         pass
     return None
+
+
+def _conf_language():
+    """Language chosen in the Dashboard (app.conf `language=`), or None."""
+    return _conf_value("language")
+
+
+def _theme_id():
+    """Theme chosen in the Dashboard (app.conf `theme=`), default 'dark'."""
+    v = _conf_value("theme")
+    return v if v and _THEME_ID_RE.match(v) else DEFAULT_THEME
+
+
+def _theme_dirs():
+    here = os.path.dirname(os.path.abspath(__file__))
+    dirs = []
+    env = os.environ.get("X_LAUNCHER_THEMES")
+    if env:
+        dirs.append(env)
+    dirs.append(os.path.join(here, "themes"))
+    return dirs
+
+
+def _hex_rgb(v):
+    if isinstance(v, str) and re.match(r"^#[0-9a-fA-F]{6}$", v.strip()):
+        v = v.strip()
+        return (int(v[1:3], 16), int(v[3:5], 16), int(v[5:7], 16))
+    return None
+
+
+def load_palette(theme_id, log=None):
+    """Palette for `theme_id`: fallback palette, then colours derived from the theme's "colors",
+    then its "overlay" section. An unknown theme falls back to 'dark', then to the fallback palette."""
+    pal = dict(FALLBACK_PALETTE)
+    data = None
+    for cand in ((theme_id, DEFAULT_THEME) if theme_id != DEFAULT_THEME else (DEFAULT_THEME,)):
+        for d in _theme_dirs():
+            fp = os.path.join(d, cand + ".json")
+            try:
+                if os.path.getsize(fp) > 64 * 1024:
+                    raise ValueError("file too large")
+                with open(fp, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if not isinstance(data, dict):
+                    data = None
+                    raise ValueError("not an object")
+                break
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                if log:
+                    log("overlay: cannot read theme %s (%s)" % (fp, e))
+        if data is not None:
+            if cand != theme_id and log:
+                log("overlay: theme '%s' not found, using '%s'" % (theme_id, cand))
+            break
+    if data is None:
+        return pal
+    colors = data.get("colors") if isinstance(data.get("colors"), dict) else {}
+    for k, ck in THEME_FROM_COLORS.items():
+        rgb = _hex_rgb(colors.get(ck))
+        if rgb:
+            pal[k] = rgb
+    over = data.get("overlay") if isinstance(data.get("overlay"), dict) else {}
+    for k in THEME_KEYS:
+        rgb = _hex_rgb(over.get(k))
+        if rgb:
+            pal[k] = rgb
+    return pal
+
+
+def apply_palette(pal):
+    """Rebinds the module colours used by the renderer (read at draw time)."""
+    g = globals()
+    for k, name in THEME_KEYS.items():
+        if k in pal:
+            g[name] = pal[k]
 
 
 def _lang():
@@ -419,10 +517,24 @@ class Services:
 
 
 # --------------------------------------------------------------------------- disegno
+# v3.1.7-dev.2 — font comune alla Dashboard: Noto Sans in assets/fonts/ (stessi file usati da
+# src/index.css). Se mancano si torna a fontconfig e poi a DejaVu, come prima.
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+FONT_FILES = {False: "NotoSans-Regular.ttf", True: "NotoSans-Bold.ttf",
+              # v3.1.7-dev.7 — titolo nello stile dell'intestazione "COLLEZIONE" della Dashboard
+              # (font-extralight italic: con il pacchetto Arch è il Light corsivo, vedi index.css)
+              "title": "NotoSans-LightItalic.ttf"}
+
+
 def _find_font_path(bold):
     env = os.environ.get("X_LAUNCHER_OVERLAY_FONT")
     if env and os.path.exists(env):
         return env
+    p = os.path.join(FONT_DIR, FONT_FILES[bold if bold == "title" else bool(bold)])
+    if os.path.isfile(p):
+        return p
+    if bold == "title":
+        return _find_font_path(False)       # senza il Light corsivo: il regolare, come prima
     try:
         r = subprocess.run(["fc-match", "-f", "%{file}", "sans:bold" if bold else "sans"],
                            capture_output=True, text=True, timeout=2.0)
@@ -449,6 +561,8 @@ class Renderer:
         self._art_cache = {}     # (path, mtime, w, h) -> RGB crop, a few entries (covers stay in memory)
         self._masks = {}
         self._paths = {}
+        self._aa = {}            # maschere con antialias, per geometria (le misure si ripetono a ogni fotogramma)
+        self._img = None         # immagine del fotogramma in corso (le forme vi si incollano con la maschera)
 
     def font(self, size, bold=False):
         key = (size, bold)
@@ -518,6 +632,10 @@ class Renderer:
             if im is None:
                 try:
                     with Image.open(path) as src:
+                        # copertine enormi o "bombe di decompressione": rifiutate prima di decodificarle
+                        if src.width * src.height > 40_000_000:
+                            raise ValueError("immagine troppo grande")
+                        src.draft("RGB", (w * 2, h * 2))     # JPEG: decodifica gia' ridotta
                         src = src.convert("RGB")
                     # banner: centred; poster: keep the upper part (logo/characters), where covers carry the subject
                     im = ImageOps.fit(src, (w, h), method=Image.LANCZOS,
@@ -531,23 +649,75 @@ class Renderer:
                 return im
         return None
 
+    # ----- forme con antialias (v3.1.7-dev.8)
+    # Pillow disegna forme e linee senza antialias (solo il testo è sfumato): bordi arrotondati,
+    # cerchi, frecce e icone risultavano seghettati rispetto alla Dashboard. Ogni forma è disegnata
+    # come maschera a AA_SCALE volte la risoluzione, ridotta con una media (Image.reduce) e usata per
+    # incollare il colore. Le maschere restano in memoria per geometria: dal secondo fotogramma il
+    # costo è quello di un incollaggio.
+    AA_SCALE = 4
+    AA_CACHE_MAX = 400
+
+    def _aa_mask(self, key, w, h, draw):
+        m = self._aa.get(key)
+        if m is None:
+            K = self.AA_SCALE
+            big = Image.new("L", (max(1, w) * K, max(1, h) * K), 0)
+            draw(ImageDraw.Draw(big), K)
+            m = big.reduce(K)
+            if len(self._aa) >= self.AA_CACHE_MAX:
+                self._aa.clear()
+            self._aa[key] = m
+        return m
+
+    def _paint(self, color, x, y, mask):
+        self._img.paste(color, (x, y, x + mask.size[0], y + mask.size[1]), mask)
+
     def paste_rounded(self, img, im, box, r):
-        key = (im.size, r)
-        mask = self._masks.get(key)
-        if mask is None:
-            mask = Image.new("L", im.size, 0)
-            ImageDraw.Draw(mask).rounded_rectangle((0, 0, im.size[0] - 1, im.size[1] - 1), radius=r, fill=255)
-            self._masks[key] = mask
+        w, h = im.size
+        mask = self._aa_mask(("rr", w, h, r, 0), w, h,
+                             lambda md, K: md.rounded_rectangle((0, 0, w * K - 1, h * K - 1), radius=r * K, fill=255))
         img.paste(im, (box[0], box[1]), mask)
 
-    @staticmethod
-    def rrect(d, box, r, fill=None, outline=None, width=1):
-        d.rounded_rectangle(box, radius=r, fill=fill, outline=outline, width=width)
+    def rrect(self, d, box, r, fill=None, outline=None, width=1):
+        """Come ImageDraw.rounded_rectangle (box con estremi inclusi), con antialias."""
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        w, h = x1 - x0 + 1, y1 - y0 + 1
+        if w <= 0 or h <= 0:
+            return
+        r = max(0, min(int(r), w // 2, h // 2))
+        if fill is not None:
+            self._paint(fill, x0, y0, self._aa_mask(("rr", w, h, r, 0), w, h,
+                        lambda md, K: md.rounded_rectangle((0, 0, w * K - 1, h * K - 1), radius=r * K, fill=255)))
+        if outline is not None and width > 0:
+            def ring(md, K):
+                md.rounded_rectangle((0, 0, w * K - 1, h * K - 1), radius=r * K, fill=255)
+                if w > 2 * width and h > 2 * width:
+                    md.rounded_rectangle((width * K, width * K, (w - width) * K - 1, (h - width) * K - 1),
+                                         radius=max(0, r - width) * K, fill=0)
+            self._paint(outline, x0, y0, self._aa_mask(("ring", w, h, r, width), w, h, ring))
+
+    def ellipse(self, d, box, fill):
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        w, h = x1 - x0 + 1, y1 - y0 + 1
+        if w > 0 and h > 0:
+            self._paint(fill, x0, y0, self._aa_mask(("el", w, h), w, h,
+                        lambda md, K: md.ellipse((0, 0, w * K - 1, h * K - 1), fill=255)))
 
     # ----- icone (griglia 24, centrate in cx, cy con lato side)
     def icon(self, d, kind, cx, cy, side, color, lw):
-        u = side / 24.0
-        ox, oy = cx - side / 2.0, cy - side / 2.0
+        cx, cy = int(round(cx)), int(round(cy))
+        half = int(side / 2.0 + lw + 2)
+        n = 2 * half + 1
+        mask = self._aa_mask(("ic", kind, side, lw), n, n,
+                             lambda md, K: self._icon_shape(md, kind, half + 0.5, half + 0.5, side, 255, lw, K))
+        self._paint(color, cx - half, cy - half, mask)
+
+    @staticmethod
+    def _icon_shape(d, kind, cx, cy, side, color, lw, K=1):
+        u = side / 24.0 * K
+        ox, oy = (cx - side / 2.0) * K, (cy - side / 2.0) * K
+        lw = max(1, int(round(lw * K)))
 
         def P(x, y):
             return (ox + x * u, oy + y * u)
@@ -573,6 +743,17 @@ class Renderer:
             d.line([P(12, 5), P(12, 19)], fill=color, width=lw)
 
     def arrow(self, d, direction, cx, cy, size, color):
+        cx, cy = int(round(cx)), int(round(cy))
+        half = int(size / 2.0 + 2)
+        n = 2 * half + 1
+
+        def shape(md, K):
+            pts = self._arrow_pts(direction, (half + 0.5) * K, (half + 0.5) * K, size * K)
+            md.polygon(pts, fill=255)
+        self._paint(color, cx - half, cy - half, self._aa_mask(("ar", direction, size), n, n, shape))
+
+    @staticmethod
+    def _arrow_pts(direction, cx, cy, size):
         h = size / 2.0
         if direction == "l":
             pts = [(cx + h * 0.6, cy - h), (cx - h * 0.8, cy), (cx + h * 0.6, cy + h)]
@@ -582,7 +763,7 @@ class Renderer:
             pts = [(cx - h, cy + h * 0.6), (cx, cy - h * 0.8), (cx + h, cy + h * 0.6)]
         else:
             pts = [(cx - h, cy - h * 0.6), (cx, cy + h * 0.8), (cx + h, cy - h * 0.6)]
-        d.polygon(pts, fill=color)
+        return pts
 
     # ----- schermata
     def render(self, W, H, model):
@@ -592,12 +773,15 @@ class Renderer:
         def S(v):
             return int(round(v * s))
         img = Image.new("RGB", (W, H), BG)
+        self._img = img
         d = ImageDraw.Draw(img)
         zone, sel, svc_i = model["zone"], model["sel"], model["svc"]
         entries, snap = model["entries"], model["services"]
 
         # titolo
-        self.text(d, S(56), S(30), t["title"], S(30), TEXT, True)
+        # v3.1.7-dev.7 — come "COLLEZIONE" nella Dashboard: Light corsivo, maiuscolo, 36 px su una
+        # base di 1920 = 24 px sulla base di 1280 dell'overlay; centrato in altezza sui riquadri dei servizi.
+        self.text_vc(d, S(56), S(28) + S(25), t["title"].upper(), S(24), TEXT, "title")
 
         # ---- servizi in alto a destra
         tw, th, gap = S(138), S(50), S(8)
@@ -634,7 +818,7 @@ class Renderer:
             self.text(d, x + S(43), y + S(9), t[key], S(13), TEXT if avail else MUTED, True, maxw=tw - S(62))
             self.text(d, x + S(43), y + S(28), label, S(11), MUTED, False, maxw=tw - S(52))
             dc = status_color(avail, on)
-            d.ellipse([x + tw - S(16), y + S(8), x + tw - S(9), y + S(15)], fill=dc)
+            self.ellipse(d, [x + tw - S(16), y + S(8), x + tw - S(9), y + S(15)], fill=dc)
             pos[key] = (x, y)
             x += tw + gap
         # volume - / valore / +
@@ -717,7 +901,7 @@ class Renderer:
         cy = hy + cd // 2
         for (k, _label), (kw, lw, label) in zip(items, widths):
             if k in ("A", "B"):
-                d.ellipse((hx, hy, hx + kw, hy + cd), fill=BTN_A if k == "A" else BTN_B)
+                self.ellipse(d, (hx, hy, hx + kw, hy + cd), fill=BTN_A if k == "A" else BTN_B)
             else:
                 self.rrect(d, (hx, hy, hx + kw, hy + cd), cd // 2, fill=LINE)
             mid = hx + kw // 2
@@ -735,7 +919,7 @@ class Renderer:
 
 def _entry_colors(title, kind):
     if kind == "dashboard":
-        return (5, 8, 12), ACCENT
+        return DASH_CARD, ACCENT_INK        # iniziali bianche sul blu, come la "X" del logo
     h = sum(ord(c) * (i + 3) for i, c in enumerate(title)) % 5
     pal = [((36, 72, 71), (214, 239, 233)), ((74, 58, 36), (243, 220, 180)), ((58, 44, 84), (226, 214, 248)),
            ((80, 44, 52), (248, 214, 220)), ((40, 62, 92), (212, 228, 248))]
@@ -760,6 +944,8 @@ class SpacesOverlay:
         self.log = log
         self.lang = _lang()
         self.t = load_strings(self.lang, log)
+        self.theme = _theme_id()
+        apply_palette(load_palette(self.theme, log))
         self.lock = threading.RLock()
         self.q = queue.Queue()
         self.opened = False
@@ -824,6 +1010,11 @@ class SpacesOverlay:
                 if self.renderer is not None:
                     self.renderer.t = self.t
                 self.log("overlay: language is now %s" % lang)
+            theme = _theme_id()
+            if theme != self.theme:
+                self.theme = theme
+                apply_palette(load_palette(theme, self.log))
+                self.log("overlay: theme is now %s" % theme)
             entries = self.mgr.overlay_entries()
             cur = self.mgr.overlay_current_space()
             idx = next((i for i, e in enumerate(entries) if e["space"] == cur), 0)

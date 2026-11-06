@@ -10,7 +10,7 @@ import { notificationEngine } from './src/backend/notificationEngine';
 import { knowledgeBase } from './src/backend/knowledgeBase';
 import * as db from './src/backend/db';
 import * as attemptTracker from './src/backend/aiProviders/attemptTracker';
-import { readAppConfig, writeAppConfig, hasLanguageBeenSet } from './src/backend/appConfig';
+import { readAppConfig, writeAppConfig, hasLanguageBeenSet, hasThemeBeenSet } from './src/backend/appConfig';
 import { getSystemInfo } from './src/backend/systemInfo';
 import { DATA_DIR, ENV_PATH } from './src/backend/paths';
 import { THIRD_PARTY_LAUNCHERS, getThirdPartyLauncherDefinition } from './src/backend/plugins/thirdPartyLaunchers';
@@ -34,6 +34,11 @@ import { setActiveDisplay, getActiveSessionInfo } from './src/backend/activeDisp
 import { readAppConfig, writeAppConfig, nextGamescopeResolution } from './src/backend/appConfig';
 import { DATA_DIR } from './src/backend/paths';
 import { requestLaunchCancel } from './src/backend/splashOrchestrator';
+import { requestGuard, buildAllowedHosts, isExposedBind } from './src/backend/requestGuard';
+import { isValidRunnerId } from './src/backend/runnerSafety';
+import { hardenDataPermissions } from './src/backend/dataPermissions';
+import { parseHttpUrl } from './src/backend/urlSafety';
+import { loadOrCreateToken, authMiddleware, authenticate, NonceStore, TOKEN_FILE_NAME } from './src/backend/authToken';
 
 // Stesso pattern già usato in altri moduli backend (downloadManager.ts,
 // runners/implementations.ts, plugins/gogPlugin.ts, plugins/epicPlugin.ts)
@@ -85,6 +90,61 @@ async function startServer() {
     process.env.NODE_ENV = 'production';
   }
   const PORT = parseInt(process.env.PORT || '3000', 10);
+
+  // v3.0.2-dev.2 (audit di sicurezza, punto 1) — il demone ascolta di default SOLO su
+  // 127.0.0.1 (prima 0.0.0.0: tutte le rotte erano aperte a tutta la rete, senza login).
+  // Per raggiungerlo da un altro dispositivo: X_LAUNCHER_BIND=0.0.0.0 e
+  // X_LAUNCHER_ALLOWED_HOSTS=nome-o-ip-dell'HTPC (altrimenti il controllo di `Host` rifiuta).
+  const BIND_HOST = (process.env.X_LAUNCHER_BIND || '').trim() || '127.0.0.1';
+  const ALLOWED_HOSTS = buildAllowedHosts(process.env.X_LAUNCHER_ALLOWED_HOSTS);
+
+  // PRIMA di tutto il resto: rifiuta `Host` non consentiti (DNS rebinding) e, sulle rotte /api,
+  // richieste cross-site e `Origin` estranee (CSRF dal browser). Non tocca curl e gli script.
+  app.use(requestGuard(ALLOWED_HOSTS, (reason, r) => {
+    writeLog('warning', `[SECURITY] Richiesta rifiutata (${reason}): ${(r as { originalUrl?: string }).originalUrl ?? ''}`);
+  }));
+
+  // v3.0.2-dev.6 — header di sicurezza. Le risposte /api non vanno mai in cache (contengono stato,
+  // percorsi e, per alcune rotte, dati personali); niente sniffing del tipo e Referer limitato verso l'esterno (i trailer YouTube incorporati ne hanno bisogno);
+  // la Dashboard non deve essere incorniciata da altri siti (clickjacking).
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+
+  // v3.0.2-dev.3 — autenticazione. Token in DATA_DIR/api-token (0600); script e tray.py lo mandano
+  // nell'header X-XLauncher-Token, il browser lo ottiene con un codice monouso (vedi authToken.ts).
+  // X_LAUNCHER_AUTH=off la spegne (solo per diagnosi: il demone torna senza autenticazione).
+  const AUTH_ENABLED = (process.env.X_LAUNCHER_AUTH || '').trim().toLowerCase() !== 'off';
+  const API_TOKEN = loadOrCreateToken(DATA_DIR);
+  const NONCES = new NonceStore();
+  let lastAuthLog = 0;
+  app.use(authMiddleware({
+    token: API_TOKEN,
+    nonces: NONCES,
+    enabled: AUTH_ENABLED,
+    onReject: (what) => {
+      const now = Date.now();                      // al massimo una riga ogni 30 s: un tab vecchio non riempie il log
+      if (now - lastAuthLog < 30_000) return;
+      lastAuthLog = now;
+      writeLog('warning', `[SECURITY] Accesso negato: ${what}`);
+    },
+  }));
+
+  // POST /api/auth/nonce — codice monouso (60 s) per aprire il browser senza mettere il token nella
+  // riga di comando. Richiede l'header col token: il solo cookie del browser non basta.
+  app.post('/api/auth/nonce', (req, res) => {
+    if (!AUTH_ENABLED) { res.json({ success: true, nonce: null }); return; }
+    if (authenticate(req.headers, API_TOKEN) !== 'token') {
+      res.status(401).json({ success: false, message: 'Serve il token nell\'header.' });
+      return;
+    }
+    res.json({ success: true, nonce: NONCES.issue() });
+  });
 
   app.use(express.json());
 
@@ -537,7 +597,13 @@ async function startServer() {
   // Vedi activeDisplay.ts per la diagnosi completa.
   app.post("/api/system/active-display", (req, res) => {
     const { display, waylandDisplay, kind, resolution } = req.body ?? {};
-    setActiveDisplay(display, waylandDisplay, kind, resolution);
+    // v3.0.2-dev.5 (audit punto 9) — DISPLAY/WAYLAND_DISPLAY diventano l'ambiente di tutti i giochi lanciati
+    // dopo: si accettano solo ":N[.M]" e "<nome>-N". Valori non validi non vengono applicati.
+    if (!setActiveDisplay(display, waylandDisplay, kind, resolution)) {
+      writeLog('warning', `[ACTIVE-DISPLAY] Valori rifiutati (non validi): DISPLAY=${JSON.stringify(display)?.slice(0, 40)} WAYLAND_DISPLAY=${JSON.stringify(waylandDisplay)?.slice(0, 40)} kind=${JSON.stringify(kind)?.slice(0, 20)}`);
+      res.status(400).json({ success: false, message: 'Valori non validi.' });
+      return;
+    }
     writeLog('system', `[ACTIVE-DISPLAY] Sessione attiva segnalata: kind=${kind ?? 'desktop'} DISPLAY=${display ?? '(non impostato)'} WAYLAND_DISPLAY=${waylandDisplay ?? '(non impostato)'}${resolution ? ` risoluzione=${resolution}` : ''}`);
     res.json({ success: true });
   });
@@ -631,7 +697,9 @@ async function startServer() {
     }
     const validTypes = ['debug', 'info', 'system', 'warning', 'error', 'auth', 'download', 'launch'];
     const type = validTypes.includes(req.body?.type) ? req.body.type : 'debug';
-    gameManager.addLog(message, type);
+    // v3.0.2-dev.4 — niente a-capo/caratteri di controllo (log injection: righe false nel log) e lunghezza limitata.
+    const cleanMessage = message.replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 2000);
+    gameManager.addLog(cleanMessage, type);
     res.json({ success: true });
   });
 
@@ -642,10 +710,16 @@ async function startServer() {
   // coerenza con quella convenzione (helper per-file, non un'utility
   // condivisa), non un'astrazione nuova da mantenere.
   app.post("/api/open-url", (req, res) => {
-    const url = req.body?.url;
-    if (!url || typeof url !== 'string') {
+    // v3.0.2-dev.5 (audit punto 7) — solo http/https "puliti": un valore che inizia con '-' sarebbe un'OPZIONE per
+    // Firefox, e con xdg-open schemi come file:// o xlaunch:// aprirebbero cose che non sono pagine web.
+    if (!req.body?.url || typeof req.body.url !== 'string') {
       return res.status(400).json({ success: false, message: 'url required' });
     }
+    const parsedUrl = parseHttpUrl(req.body.url);
+    if (!parsedUrl) {
+      return res.status(400).json({ success: false, message: 'Sono ammessi solo indirizzi http o https.' });
+    }
+    const url = parsedUrl.toString();
     try {
       execSync('which firefox', { stdio: 'ignore' });
       spawn('firefox', [url], { detached: true, stdio: 'ignore' }).unref();
@@ -711,7 +785,9 @@ async function startServer() {
   app.post("/api/downloads/installer-select", (req, res) => {
     const gameId = req.body.gameId ?? req.body.id;
     const filePath = req.body.path;
-    if (!gameId || !filePath) return res.status(400).json({ success: false, message: 'gameId e path richiesti' });
+    if (typeof gameId !== 'string' || typeof filePath !== 'string' || !gameId || !filePath) {
+      return res.status(400).json({ success: false, message: 'gameId e path richiesti (stringhe)' });
+    }
     res.json(downloadManager.confirmInstallerPath(gameId, filePath));
   });
 
@@ -723,7 +799,7 @@ async function startServer() {
     const dirPath = req.query.path as string;
     if (!dirPath) return res.status(400).json({ error: 'path richiesto' });
     const extensions = typeof req.query.extensions === 'string' && req.query.extensions.length > 0
-      ? req.query.extensions.split(',')
+      ? req.query.extensions.split(',').slice(0, 30).map(e => e.slice(0, 16))
       : undefined;
     res.json(listDirectory(dirPath, extensions));
   });
@@ -747,6 +823,7 @@ async function startServer() {
   // Il client apre una EventSource su /api/runners/install-stream?id=<id>
   app.post("/api/runners/download", async (req, res) => {
     const { id } = req.body;
+    if (!isValidRunnerId(id)) { res.status(400).json({ success: false, message: 'Identificativo runner non valido.' }); return; }
     await compatibilityManager.downloadProton(id, (msg) => gameManager.addLog(msg, 'system'));
     await gameManager.refreshRunners();
     res.json({ success: true });
@@ -755,7 +832,7 @@ async function startServer() {
   // GET /api/runners/install-stream?id=<id> — SSE con progress messaggi
   app.get("/api/runners/install-stream", async (req, res) => {
     const id = req.query.id as string;
-    if (!id) { res.status(400).end(); return; }
+    if (!isValidRunnerId(id)) { res.status(400).end(); return; }
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -786,7 +863,7 @@ async function startServer() {
   // GET /api/runners/uninstall-stream?id=<id> — SSE simmetrico a install-stream
   app.get("/api/runners/uninstall-stream", async (req, res) => {
     const id = req.query.id as string;
-    if (!id) { res.status(400).end(); return; }
+    if (!isValidRunnerId(id)) { res.status(400).end(); return; }
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -1017,7 +1094,13 @@ async function startServer() {
   });
 
   app.post("/api/launch", async (req, res) => {
-    const { id, launchArgsOverride } = req.body;
+    const { id, launchArgsOverride } = req.body ?? {};
+    // v3.0.2-dev.5 — tipi verificati: id stringa, argomenti temporanei (se presenti) stringa di lunghezza ragionevole.
+    if (typeof id !== 'string' || id.length === 0 || id.length > 300
+        || (launchArgsOverride !== undefined && (typeof launchArgsOverride !== 'string' || launchArgsOverride.length > 4000))) {
+      res.status(400).json({ success: false, message: 'Richiesta di lancio non valida.' });
+      return;
+    }
     const result = await gameManager.launchGame(id, launchArgsOverride);
     if (!result.success) {
       const game = gameManager.getGames().find((g: any) => g.id === id);
@@ -1297,6 +1380,8 @@ async function startServer() {
       // scritto, anche solo il default 'it'" (avvio successivo, rispetta
       // quanto persistito) — vedi hasLanguageBeenSet() in appConfig.ts.
       languageIsUserSet: hasLanguageBeenSet(),
+      // v3.1.7-dev.1 — false finché app.conf non ha `theme=` (vedi hasThemeBeenSet()).
+      themeIsUserSet: hasThemeBeenSet(),
       // Richiesta utente — preset "Filtro CRT" per RetroArch: il percorso
       // assoluto va risolto qui (il progetto può girare da /opt/x-launcher
       // o da un checkout di sviluppo in una cartella qualsiasi), non
@@ -1418,6 +1503,10 @@ async function startServer() {
 
   app.post('/api/ai/providers/:id', async (req, res) => {
     const { enabled, apiKey, baseUrl, model, priority, tokenBudget } = req.body;
+    if (baseUrl !== undefined && baseUrl !== null && baseUrl !== '' && !parseHttpUrl(baseUrl)) {
+      res.status(400).json({ success: false, message: 'L\'indirizzo del provider deve essere http o https.' });
+      return;
+    }
     // v0.99.90 — fix: prima questa route sovrascriveva SEMPRE apiKey/
     // baseUrl/model con quanto ricevuto, incluso undefined→null. Il
     // frontend non ha mai il vero valore dell'API key (mascherata come
@@ -1474,6 +1563,9 @@ async function startServer() {
   // gratis.
   app.post('/api/ai/providers/:id/test', async (req, res) => {
     const { apiKey, baseUrl, model } = req.body;
+    if (baseUrl !== undefined && baseUrl !== null && baseUrl !== '' && !parseHttpUrl(baseUrl)) {
+      return res.json({ success: false, message: 'L\'indirizzo del provider deve essere http o https.' });
+    }
     // v0.99.90 — fallback sui valori già salvati: se l'utente sta solo
     // testando una configurazione già attiva senza aver ridigitato la
     // key (che non vede mai in chiaro, vedi mascheramento nella GET), il
@@ -1622,7 +1714,10 @@ async function startServer() {
   // chiamata reale al modello — deve essere quasi istantaneo se Ollama
   // gira, e non deve far aspettare l'apertura di Impostazioni se non gira.
   app.get('/api/ai/ollama/models', async (_req, res) => {
-    const baseUrl = db.getAiProviderCredential('ollama')?.baseUrl || 'http://localhost:11434';
+    const storedBase = db.getAiProviderCredential('ollama')?.baseUrl;
+    // v3.0.2-dev.5 (audit punto 12) — l'indirizzo di Ollama puo' essere locale o in LAN (e' il suo uso normale),
+    // quindi non si bloccano gli indirizzi privati; si accetta pero' solo http/https senza credenziali.
+    const baseUrl = (storedBase && parseHttpUrl(storedBase)) ? storedBase : 'http://localhost:11434';
     try {
       const response = await fetch(`${baseUrl.replace(/\/$/, '')}/api/tags`, {
         signal: AbortSignal.timeout(2000),
@@ -1896,8 +1991,19 @@ async function startServer() {
     res.status(500).json({ success: false, message });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
-    writeLog('system', `Daemon started on http://0.0.0.0:${PORT}`);
+  app.listen(PORT, BIND_HOST, () => {
+    writeLog('system', `Daemon started on http://${BIND_HOST}:${PORT}`);
+    // v3.0.2-dev.4 — cartella dati 0700, DB/.env/token 0600 (anche i file nati dopo l'avvio, es. tokens.json).
+    const tightened = hardenDataPermissions();
+    if (tightened.length > 0) writeLog('system', `[SECURITY] Permessi stretti su: ${tightened.join(', ')}`);
+    if (AUTH_ENABLED) {
+      writeLog('system', `Autenticazione attiva — token in ${path.join(DATA_DIR, TOKEN_FILE_NAME)}`);
+    } else {
+      writeLog('warning', `[SECURITY] X_LAUNCHER_AUTH=off: le rotte NON richiedono autenticazione.`);
+    }
+    if (isExposedBind(BIND_HOST)) {
+      writeLog('warning', `[SECURITY] Il demone e' raggiungibile dalla rete (${BIND_HOST}). Host accettati: ${Array.from(ALLOWED_HOSTS).join(', ')}.${AUTH_ENABLED ? '' : ' Senza autenticazione chiunque nella rete puo\' avviare programmi come questo utente.'}`);
+    }
     writeLog('system', `Log file: ${LOG_PATH_EXPORT}`);
   });
 }

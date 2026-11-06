@@ -23,6 +23,20 @@ set -euo pipefail
 
 DAEMON_URL="${XLAUNCHER_URL:-http://localhost:3000}"
 
+# v3.0.2-dev.3 — il demone richiede un token (audit di sicurezza, SECURITY-AUDIT.md). Lo crea al primo
+# avvio in ~/.local/share/x-launcher/api-token (0600). xl_curl = curl che lo aggiunge come header
+# (passato via -K da un descrittore, non come argomento: non compare in `ps`). Letto a ogni chiamata.
+XL_TOKEN_FILE="$HOME/.local/share/x-launcher/api-token"
+xl_curl() {
+  local t=""
+  [ -r "$XL_TOKEN_FILE" ] && t="$(tr -d '[:space:]' < "$XL_TOKEN_FILE" 2>/dev/null)"
+  if [ -n "$t" ]; then
+    curl -K <(printf 'header = "X-XLauncher-Token: %s"\n' "$t") "$@"
+  else
+    curl "$@"
+  fi
+}
+
 die() { echo "Errore: $*" >&2; exit 1; }
 
 need_bin() {
@@ -38,7 +52,7 @@ need_bin python3
 # lato client, così lo script funziona anche se in futuro quel parametro
 # dovesse cambiare comportamento.
 _fetch_games() {
-  curl -sf "${DAEMON_URL}/api/games?store=All" || die "impossibile contattare il daemon su ${DAEMON_URL} — è attivo?"
+  xl_curl -sf "${DAEMON_URL}/api/games?store=All" || die "impossibile contattare il daemon su ${DAEMON_URL} — è attivo?"
 }
 
 cmd_list() {
@@ -87,7 +101,7 @@ cmd_launch() {
   id="$(echo "$game_json"    | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")"
   title="$(echo "$game_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")"
   echo "Lancio: $title ($id)"
-  curl -sf -X POST "${DAEMON_URL}/api/launch" \
+  xl_curl -sf -X POST "${DAEMON_URL}/api/launch" \
     -H 'Content-Type: application/json' \
     -d "{\"id\":\"${id}\"}" | python3 -m json.tool
   echo
@@ -106,7 +120,7 @@ cmd_verify() {
   game_json="$(_find_game_json "$query")" || die "nessun gioco trovato per \"$query\""
   id="$(echo "$game_json"    | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")"
   title="$(echo "$game_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")"
-  curl -sf -X PATCH "${DAEMON_URL}/api/games/${id}/verify" \
+  xl_curl -sf -X PATCH "${DAEMON_URL}/api/games/${id}/verify" \
     -H 'Content-Type: application/json' \
     -d "{\"method\":\"${method}\"}" >/dev/null
   echo "✅ $title marcato come verificato ($method)."
@@ -119,7 +133,7 @@ cmd_unverify() {
   game_json="$(_find_game_json "$query")" || die "nessun gioco trovato per \"$query\""
   id="$(echo "$game_json"    | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")"
   title="$(echo "$game_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")"
-  curl -sf -X DELETE "${DAEMON_URL}/api/games/${id}/verify" >/dev/null
+  xl_curl -sf -X DELETE "${DAEMON_URL}/api/games/${id}/verify" >/dev/null
   echo "Badge di verifica rimosso per $title."
 }
 

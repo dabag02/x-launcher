@@ -8,6 +8,7 @@
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { DATA_DIR } from './paths';
+import { isSafeAvatarUrl } from './restoreSafety';
 
 const CONFIG_PATH = path.join(DATA_DIR, 'app.conf');
 
@@ -43,6 +44,14 @@ export type Language = 'it' | 'en';
 // e persistita qui (stesso file bash-readable) così gamescope-session.sh
 // la legge direttamente all'avvio senza passare dal backend Node.
 export type GamescopeResolution = 'HD' | 'FullHD' | 'QHD' | '4K';
+
+// v3.1.7-dev.1 — id del tema della Dashboard (file themes/<id>.json). Non un enum chiuso: i temi
+// sono predisposti per essere aggiunti come file; qui si controlla solo la forma dell'id. Un id
+// valido ma senza file viene ignorato dal frontend e dall'overlay (ricadono su 'dark').
+export const THEME_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+export function isValidThemeId(v: unknown): v is string {
+  return typeof v === 'string' && THEME_ID_RE.test(v);
+}
 
 // Ordine di ciclo del pulsante "Modalità Gamescope" — HD → FullHD → QHD →
 // 4K → di nuovo HD. Tenuto qui (non solo in gamescope-session.sh) perché
@@ -85,6 +94,8 @@ export interface AppConfig {
   // qui — persistito lato server, sopravvive sia al riavvio sia al cambio
   // di browser. null = nessun avatar selezionato (default).
   avatarUrl: string | null;
+  // v3.1.7-dev.1 — tema della Dashboard, letto anche da overlay.py. Prima solo in localStorage.
+  theme: string;
 }
 
 const DEFAULTS: AppConfig = {
@@ -93,6 +104,7 @@ const DEFAULTS: AppConfig = {
   language: 'it',
   avatarUrl: null,
   gamescopeResolution: 'QHD',
+  theme: 'dark',
 };
 
 function parseConfFile(raw: string): Partial<AppConfig> {
@@ -116,6 +128,9 @@ function parseConfFile(raw: string): Partial<AppConfig> {
     }
     if (key === 'gamescopeResolution' && (val === 'HD' || val === 'FullHD' || val === 'QHD' || val === '4K')) {
       out.gamescopeResolution = val;
+    }
+    if (key === 'theme' && isValidThemeId(val)) {
+      out.theme = val;
     }
   }
   return out;
@@ -159,8 +174,28 @@ export function hasLanguageBeenSet(): boolean {
   }
 }
 
+// v3.1.7-dev.1 — come hasLanguageBeenSet(): true se `theme=` è già scritto in app.conf. Il
+// frontend lo usa per copiarvi, la prima volta, il tema che prima stava solo nel browser.
+export function hasThemeBeenSet(): boolean {
+  if (!existsSync(CONFIG_PATH)) return false;
+  try {
+    return parseConfFile(readFileSync(CONFIG_PATH, 'utf-8')).theme !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 export function writeAppConfig(partial: Partial<AppConfig>): AppConfig {
   const current = readAppConfig();
+  // v3.1.7-dev.1 — PATCH /api/config passa qui il corpo della richiesta: un tema con id non
+  // valido non viene scritto (il file è letto anche da bash e da Python).
+  if (partial.theme !== undefined && !isValidThemeId(partial.theme)) {
+    partial = { ...partial };
+    delete partial.theme;
+  }
+  // Riga `theme=` solo se il tema è già nel file o arriva ora: scrivere un'altra preferenza non
+  // deve far risultare "scelto" il tema di default (vedi hasThemeBeenSet()).
+  const writeTheme = partial.theme !== undefined || hasThemeBeenSet();
   const next = { ...current, ...partial };
   // Se viene scritto solo displayMode, deriva fullscreen per compatibilità
   // con qualunque consumatore esterno che legga ancora la vecchia chiave.
@@ -174,8 +209,20 @@ export function writeAppConfig(partial: Partial<AppConfig>): AppConfig {
     `language=${next.language}`,
     `avatarUrl=${next.avatarUrl ?? ''}`,
     `gamescopeResolution=${next.gamescopeResolution}`,
+    ...(writeTheme ? [`theme=${next.theme}`] : []),
     '',
   ].join('\n');
   writeFileSync(CONFIG_PATH, body, 'utf-8');
   return next;
+}
+
+/**
+ * v3.0.2-dev.4 — ripristino di app.conf da un bundle Cloud Backup (input non fidato). Non si scrive il testo
+ * del bundle: se ne leggono solo le chiavi note con valori validi (parseConfFile controlla gli enum;
+ * avatarUrl deve essere `/avatars/<nome sicuro>`) e il file viene riscritto da writeAppConfig().
+ */
+export function restoreAppConfFromText(raw: string): AppConfig {
+  const parsed = parseConfFile(raw);
+  if (parsed.avatarUrl !== undefined && !isSafeAvatarUrl(parsed.avatarUrl)) delete parsed.avatarUrl;
+  return writeAppConfig(parsed);
 }

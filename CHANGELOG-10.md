@@ -1,6 +1,6 @@
-# CHANGELOG-10 — da v2.6.7-dev.1
+# CHANGELOG-10 — da v2.6.7-dev.1 (milestone v2.7.1-Mercury)
 
-Prosegue da CHANGELOG-9.md (chiuso su MILESTONE STABILE v2.6.6-Mercury).
+Prosegue da CHANGELOG-9.md (chiuso su MILESTONE STABILE v2.6.6-Mercury). Chiuso a sua volta su MILESTONE STABILE v2.7.1-Mercury (vedi in fondo); il ciclo successivo apre CHANGELOG-11.md.
 
 ## v2.6.7-dev.1
 
@@ -84,4 +84,24 @@ Prosegue da CHANGELOG-9.md (chiuso su MILESTONE STABILE v2.6.6-Mercury).
 
 - **Fatto** (Xvfb + Openbox reali, `systemctl` simulato, finestre xterm associate a scope finti): scongelamento dei residui all'avvio; congelamento dei giochi non correnti; scongelamento prima del cambio; andirivieni rapido 2-1-2-1 (il gioco corrente resta scongelato); esclusione via file; `freeze off` (scongela tutto) / `on`; freeze che fallisce (errore contato, nessun blocco); chiusura del gioco corrente (ritorno alla Dashboard, l'altro resta congelato); SIGTERM con giochi congelati (scongelati). Compilazione di `spaces.py`.
 - **Non fatto / da verificare su hardware**: il vero freezer di systemd (provato a mano dall'utente, non dal demone); **chiusura dal Process Manager di uno scope congelato**: un SIGKILL funziona anche su un cgroup congelato, un SIGTERM resta in attesa fino al thaw; se la chiusura dalla Dashboard di un gioco in un altro spazio non funziona, il rimedio immediato è `x-launcher-spaces thaw <scope>` prima del kill (da integrare nel backend se serve); giochi che perdono la connessione di rete se congelati a lungo.
+
+## Congelato — MILESTONE STABILE v2.7.1-Mercury
+
+Ciclo chiuso qui (dev.1→dev.3), confermato funzionante dall'utente su hardware reale (sessione Openbox: modalità spazi e congelamento dei giochi). Salto di minor version (2.6→2.7) a segnare il passaggio dalla sessione "Shell" funzionante ma ancora ingenua a una sessione **in cui ogni spazio è davvero isolato**: la Dashboard si libera nel suo spazio, il gioco di un altro spazio non riceve più gli input del controller. Patch a 1 per scelta esplicita dell'utente (non allineata all'ultima dev).
+
+**Modalità spazi (dev.1, dev.2)**: opzione `--spaces-mode` di `kiosk-launch.sh` (aggiunge `?spaces=1` all'URL, combinabile con `--local-server`), passata di default da `openbox/autostart` (`X_LAUNCHER_SPACES_MODE=0` per disattivarla) solo se `kiosk-launch.sh` la conosce; `src/lib/spacesGate.ts` (funzione pura) decide il congelamento dell'input della Dashboard in base allo spazio corrente: la Dashboard resta bloccata solo mentre non è lo spazio corrente (o subito dopo un lancio, con rilascio automatico dopo 45 s se il gioco non compare), e si può quindi lanciare un secondo gioco con il primo in un altro spazio. Diagnostica `[SPACES-DIAG]` (focus, visibilità, bottoni ricevuti dal Gamepad API, decisioni del gate); badge azzurro "Modalità spazi · spazio N · giochi M" nel quick-menu. Protezioni contro le versioni miste (`autostart` e `kiosk-launch.sh` aggiornati insieme; opzioni `--…` sconosciute ignorate invece di diventare il browser forzato); `./build.sh start` inoltra tutte le opzioni; `spaces.py` logga con i millisecondi.
+
+**Congelamento dei giochi (dev.3)**: i giochi `xlauncher-game-*` che non stanno nello spazio corrente vengono congelati con il cgroup freezer (`systemctl --user freeze`) e scongelati **prima** di mostrarli; rivalutazione al momento di congelare (un andirivieni rapido non congela mai il gioco corrente); scongelamento dei residui all'avvio, all'uscita e su SIGTERM/SIGINT/SIGHUP; esclusioni in `~/.config/x-launcher/spaces-nofreeze.conf`, `X_LAUNCHER_SPACES_FREEZE=0`, comandi `x-launcher-spaces freeze on|off|status` e `thaw [scope]`. Non congelabili: giochi Steam via URI e il quarto gioco. **Bug preesistente corretto**: `ControlServer._handle` sovrascriveva un metodo interno di `threading.Thread` (Python 3.13), quindi il socket di controllo non rispondeva.
+
+**Installazione (milestone)**: `install.sh` copia in `~/.config/x-launcher/` anche `spaces-nofreeze.conf.example` (nuovo file `openbox/spaces-nofreeze.conf.example`; il file attivo non viene mai creato né toccato) e riepiloga i nuovi comandi di `x-launcher-spaces`. I symlink in `/opt` restano quelli della 2.6.6, già verificati: `~/.config/openbox/{rc.xml,autostart,spaces-ctl}` → `/opt/x-launcher/openbox/…` e `/usr/local/bin/x-launcher-spaces` → `/opt/x-launcher/openbox/spaces-ctl` (stesso wrapper: i nuovi sottocomandi non richiedono link nuovi); verificati in sandbox con home e cartella di installazione finte, installazione pulita, seconda esecuzione, symlink verso una copia di sviluppo (lasciato com'è), `--relink-openbox` e disinstallazione.
+
+**Confermato dall'utente su hardware reale**: la Dashboard si sblocca al cambio di spazio e durante il gioco gli input non interferiscono; i giochi vengono congelati quando si torna alla Dashboard e ripresi al ritorno nel loro spazio (Wine e Proton).
+
+### Resta aperto (non incluso in questa milestone)
+
+- **Chiusura dal Process Manager di uno scope congelato**: SIGKILL funziona su un cgroup congelato, SIGTERM resta in attesa fino al thaw; se serve, il backend deve fare `x-launcher-spaces thaw <scope>` prima del kill. Da verificare su hardware.
+- **Misura del consumo di risorse con Wine** (ventole/CPU) con il congelamento attivo, e comportamento dei giochi online da congelati a lungo (rete).
+- **Regola sul quarto lancio** (blocco con notifica), **indicatore dello spazio/congelamento** nella Dashboard (oggi il badge mostra spazio e numero di giochi, non lo stato del freezer), blocco tracciato solo sull'ultimo gioco lanciato (`gameStillRunningRef`), giochi Steam via URI nella sessione Shell.
+- **Fase 5** — gestione di sistema senza desktop (spegnimento via logind, audio, risoluzione `xrandr`) e watchdog se il WM cade.
+- **Bug da indagare**: `GET /api/process-manager/list` che risponde `[]` con un gioco vivo.
 

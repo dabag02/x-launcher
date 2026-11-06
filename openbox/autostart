@@ -34,6 +34,8 @@
 #  MODALITA' SPAZI (v2.6.7-dev.1): passa --spaces-mode a kiosk-launch.sh, cosi'
 #  la Dashboard libera il congelamento dell'input quando si torna al suo spazio
 #  (si puo' lanciare un secondo gioco con il primo in un altro spazio).
+#  v3.2.1-Mars: kiosk-launch.sh avvia anche il browser in uno scope, cosi' spaces.py
+#  congela la Dashboard negli altri spazi (X_LAUNCHER_SPACES_FREEZE_DASHBOARD=0 per spegnerlo).
 #  Disattivabile con X_LAUNCHER_SPACES_MODE=0 (stesso file environment).
 #
 #  OVERLAY DEGLI SPAZI (v2.7.2-dev.1): passa --spaces-overlay a kiosk-launch.sh, cosi'

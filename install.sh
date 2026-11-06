@@ -62,6 +62,9 @@
 #  attivo spaces-nofreeze.conf non viene mai creato né toccato. Il comando
 #  x-launcher-spaces ora accetta anche freeze on|off|status e thaw [scope].
 #
+#  v3.2.1-Mars — congelamento anche della Dashboard fuori dallo spazio 0: nessun file
+#  nuovo da installare (lo scope lo crea kiosk-launch.sh); l'installer non cambia.
+#
 #  v3.0.1-Mars — overlay degli spazi e dei servizi (overlay.py, copertine in
 #  ~/.local/share/x-launcher/covers/ riempite dal backend). L'installer: (1) controlla
 #  che il venv di /opt possa importare overlay.py (pillow + python-xlib), solo avviso;
@@ -69,6 +72,13 @@
 #  terminale CHIEDE se ripuntarlo a /opt (prima lo lasciava e basta); senza terminale
 #  resta com'è, con --relink-openbox si ripunta sempre senza domande. I link
 #  /usr/local/bin/x-launcher e x-launcher-spaces vengono sempre ripuntati a /opt.
+#
+#  v3.2.0-Mars — temi come file (themes/dark.json, themes/light.json, letti dalla
+#  Dashboard in build e da overlay.py a runtime) e font comune Noto Sans in
+#  assets/fonts/ (Dashboard e overlay). Entrambe le cartelle arrivano in /opt con la
+#  copia del progetto; l'installer controlla solo che ci siano (avviso, mai blocco):
+#  senza i temi l'overlay usa la tavolozza interna, senza i font Dashboard e overlay
+#  usano i font di sistema. Il tema scelto è in app.conf (theme=), per utente.
 #
 #  Uso:
 #    sudo ./install.sh                    # installa/aggiorna /opt/x-launcher
@@ -310,6 +320,28 @@ else
   rm -rf "$INSTALL_DIR/.git" "$INSTALL_DIR/.env" 2>/dev/null || true
 fi
 
+# v3.2.0-Mars — controllo di temi e font (vedi intestazione): solo avvisi.
+THEME_FILES_MISSING=""
+for _t in dark light; do
+  [ -f "$INSTALL_DIR/themes/${_t}.json" ] || THEME_FILES_MISSING="$THEME_FILES_MISSING themes/${_t}.json"
+done
+if [ -n "$THEME_FILES_MISSING" ]; then
+  echo "[INSTALL] ⚠ Mancano i file dei temi:${THEME_FILES_MISSING} — l'overlay degli spazi userà la tavolozza interna (tema scuro)."
+else
+  echo "[INSTALL] Temi: themes/dark.json, themes/light.json"
+fi
+FONT_FILES_MISSING=""
+for _f in Regular Italic Medium MediumItalic Bold BoldItalic Black BlackItalic LightItalic; do
+  [ -f "$INSTALL_DIR/assets/fonts/NotoSans-${_f}.ttf" ] || FONT_FILES_MISSING="$FONT_FILES_MISSING NotoSans-${_f}.ttf"
+done
+if [ -n "$FONT_FILES_MISSING" ]; then
+  echo "[INSTALL] ⚠ Font Noto Sans mancanti in ${PROJECT_DIR}/assets/fonts/:${FONT_FILES_MISSING}"
+  echo "[INSTALL]   Dashboard e overlay useranno i font di sistema. Per completarli: ./setup-linux.sh (li copia dal pacchetto"
+  echo "[INSTALL]   Noto Sans della distribuzione, su Arch noto-fonts), poi rilancia questo installer."
+else
+  echo "[INSTALL] Font: Noto Sans (9 file) in ${INSTALL_DIR}/assets/fonts/"
+fi
+
 # Permessi: leggibile/eseguibile da tutti, scrivibile solo da root —
 # coerente con "disponibile globalmente, impostazioni per-utente altrove".
 #
@@ -384,6 +416,7 @@ echo "[INSTALL] Completato."
 echo "[INSTALL] - Avvio da riga di comando, qualunque cartella: x-launcher"
 echo "[INSTALL] - Sessione Kiosk (Wayland/gamescope, senza desktop): selezionabile come 'X-Launcher Kiosk' dal menu sessioni alla schermata di login LightDM."
 echo "[INSTALL] - Sessione Openbox 'Shell' (Xorg + Openbox, Dashboard e giochi in spazi separati; Select + D-pad per cambiare spazio): selezionabile come 'Openbox' dal greeter LightDM (richiede il pacchetto openbox). Comando di controllo: x-launcher-spaces state|next|prev|dashboard|switch N|clients|freeze on|off|status|thaw [scope]|overlay on|off|open|close|status. Select + D-pad apre l'overlay degli spazi e dei servizi (spegnerlo: X_LAUNCHER_SPACES_OVERLAY=0 in ~/.config/openbox/environment)."
+echo "[INSTALL] - Temi Scuro/Chiaro (quick-menu → Cambia Tema): seguono anche l'overlay degli spazi; la scelta è in ~/.local/share/x-launcher/app.conf (theme=). Badge \"Modalità spazi\" nel quick-menu: solo con la copia di sviluppo (mostrarlo anche qui: X_LAUNCHER_SPACES_BADGE=1 in ~/.config/openbox/environment)."
 echo "[INSTALL] - Link xlaunch://<id-gioco> (da browser, script esterni, altre integrazioni) ora avviano il gioco direttamente, aprendo la Dashboard nascosta in background se non è già in esecuzione."
 echo "[INSTALL] - Per disinstallare: sudo ${INSTALL_DIR}/install.sh --uninstall (oppure rilancia questo script con --uninstall)"
 echo ""

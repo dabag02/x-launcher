@@ -35,7 +35,16 @@
     "backupRunning": "Backup in corso...",
     "restoreNow": "Ripristina",
     "restoreRunning": "Ripristino in corso...",
-    "disconnect": "Disconnetti"
+    "disconnect": "Disconnetti",
+    "status": {
+      "authStarting": "⏳ Avvio autenticazione...",
+      "connected": "✅ Connesso.",
+      "unknownError": "Errore sconosciuto.",
+      "networkError": "❌ Errore di rete.",
+      "disconnecting": "⏳ Disconnessione in corso...",
+      "authSuccess": "✅ Autenticato con successo!",
+      "authTimeout": "⏱ Timeout — riprova o usa il terminale."
+    }
   },
   "language": {
     "label": "Lingua",
@@ -79,7 +88,13 @@
     "freeSpace": "{{free}} liberi",
     "usedPercentTotal": "{{percent}}% usato · {{total}} totali",
     "folderNotCreated": "cartella non ancora creata",
-    "loadingEllipsis": "Lettura in corso..."
+    "loadingEllipsis": "Lettura in corso...",
+    "runnerProgress": {
+      "downloadStarting": "⏳ Avvio download...",
+      "installError": "Errore durante l'installazione.",
+      "uninstallStarting": "⏳ Avvio disinstallazione...",
+      "uninstallError": "Errore durante la disinstallazione."
+    }
   },
   "plugins": {
     "intro": "Attiva o disattiva i plugin store. I giochi installati rimangono visibili anche con il plugin disattivato, ma quelli con DRM non potranno essere avviati.",
@@ -88,7 +103,8 @@
     "reload": "↻ Ricarica",
     "drmFree": "DRM-free",
     "drm": "DRM",
-    "requires": "richiede: {{tool}}"
+    "requires": "richiede: {{tool}}",
+    "notAnArray": "Risposta non è un array"
   },
   "input": {
     "connectedDevices": "Dispositivi connessi",
@@ -155,7 +171,9 @@
     "apiKeyStoredPlaceholder": "•••••••• (salvata)",
     "testing": "test…",
     "testConnection": "Testa connessione",
-    "removeKey": "Rimuovi key"
+    "removeKey": "Rimuovi key",
+    "noResponse": "Nessuna risposta.",
+    "requestFailed": "Richiesta fallita — daemon non raggiungibile?"
   },
   "cloudProviderNotes": {
     "gemini": "Tier gratuito reale con limiti di frequenza. Su questo tier, prompt e risposte possono essere usati da Google per migliorare i propri modelli — per dati sensibili serve il tier a pagamento.",

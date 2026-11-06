@@ -75,6 +75,10 @@ export function listDirectory(dirPath: string, extensions?: string[]): FileManag
     : null;
 
   const entries: FileManagerEntry[] = [];
+  // v3.0.2-dev.4 — tetto alle voci esaminate: una cartella enorme (o un file system virtuale) non deve bloccare
+  // il demone con migliaia di stat() sincroni. Il file manager mostra comunque le prime LIST_MAX_ENTRIES.
+  const LIST_MAX_ENTRIES = 5000;
+  if (names.length > LIST_MAX_ENTRIES) names = names.slice(0, LIST_MAX_ENTRIES);
   for (const name of names) {
     if (name.startsWith('.')) continue;
     const full = path.join(resolved, name);

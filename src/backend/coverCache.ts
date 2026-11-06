@@ -24,11 +24,12 @@
  * e li tiene in memoria. Ogni errore e' non bloccante: senza file l'overlay mostra
  * le iniziali, come nella 2.7.2-dev.3.
  */
-import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, unlinkSync, readdirSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, unlinkSync, readdirSync, realpathSync, statSync, openSync, readSync, closeSync } from 'fs';
 import path from 'path';
 import type { Game } from '../types';
 import { DATA_DIR } from './paths';
 import { writeLog } from './logger';
+import { safePublicDownload } from './urlSafety';
 
 export const COVERS_DIR = path.join(DATA_DIR, 'covers');
 
@@ -67,20 +68,27 @@ function isImage(buf: Buffer): boolean {
 }
 
 async function download(url: string): Promise<Buffer | null> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  // v3.0.2-dev.5 — niente fetch verso la rete locale (audit punto 12): safePublicDownload rifiuta indirizzi
+  // privati/loopback dopo la risoluzione DNS, segue a mano e riconvalida ogni redirect.
+  const buf = await safePublicDownload(url, { maxBytes: MAX_BYTES, timeoutMs: TIMEOUT_MS });
+  return buf && isImage(buf) ? buf : null;
+}
+
+/** File normale (non cartella/dispositivo), entro MAX_BYTES, con intestazione d'immagine riconosciuta. */
+function isLocalImageFile(file: string): boolean {
+  let fd: number | undefined;
   try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow' });
-    if (!res.ok) return null;
-    const len = Number(res.headers.get('content-length') || 0);
-    if (len > MAX_BYTES) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > MAX_BYTES || !isImage(buf)) return null;
-    return buf;
+    const real = realpathSync(file);
+    const st = statSync(real);
+    if (!st.isFile() || st.size > MAX_BYTES) return false;
+    fd = openSync(real, 'r');
+    const head = Buffer.alloc(16);
+    const n = readSync(fd, head, 0, 16, 0);
+    return isImage(head.subarray(0, n));
   } catch {
-    return null;
+    return false;
   } finally {
-    clearTimeout(timer);
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignorato */ } }
   }
 }
 
@@ -104,6 +112,9 @@ async function cacheOne(key: string, kind: Kind, src: string | undefined, meta: 
     } else {
       const local = src.startsWith('file://') ? decodeURIComponent(src.slice(7)) : src;
       if (!path.isAbsolute(local) || !existsSync(local)) return existsSync(dest);
+      // v3.0.2-dev.5 — si copia solo se e' davvero un'immagine di dimensione ragionevole: prima qualunque file
+      // leggibile indicato come "copertina" finiva nella cartella delle copertine (e da li' poteva essere servito).
+      if (!isLocalImageFile(local)) return existsSync(dest);
       const tmp = `${dest}.tmp-${process.pid}`;
       copyFileSync(local, tmp);
       renameSync(tmp, dest);

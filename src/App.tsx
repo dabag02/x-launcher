@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ScalingContainer } from './components/ScalingContainer';
 import { motion, AnimatePresence } from 'motion/react';
@@ -58,6 +58,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { MOCK_STORES, MOCK_GAMES, MOCK_LOGS } from './mockData';
 import { Game, StoreType, RunnerType, LogEntry, ViewState, Theme, AppNotification } from './types';
+import { applyTheme, getTheme, isKnownTheme, nextSelectableTheme, themeDisplayName, DEFAULT_THEME_ID } from './theme/themes';
 import { DEFAULT_WINE_VERBS, OPTIONAL_WINE_VERBS, OS_VERSION_VERBS } from './wineVerbs';
 import { FocusProvider, Focusable, useFocus } from './components/FocusProvider';
 import { NavDebugOverlay } from './components/NavDebugOverlay';
@@ -100,6 +101,33 @@ const STEAM_BIG_PICTURE_ID = 'steam-bigpicture-launcher';
 // Linux gaming (ProtonDB e simili), non verificato con test reali in
 // questo ambiente — nessun gioco/runner reale disponibile qui per
 // validarli uno per uno.
+// v3.1.7-dev.9 — chiave di traduzione di ogni suggerimento (dashboard:keyboard.tips.<chiave>).
+const SUGGESTION_TIP_KEYS: Record<string, string> = {
+  "-windowed": "windowed",
+  "-noborder": "noborder",
+  "-dx9": "dx9",
+  "-nointro": "nointro",
+  "-novid": "novid",
+  "-high": "high",
+  "-nojoy": "nojoy",
+  "-v": "retroarchVerbose",
+  "--max-frames=600": "retroarchMaxFrames",
+  "WINEDEBUG=-all": "winedebug",
+  "WINEARCH=win64": "winearch",
+  "WINEESYNC=1": "wineesync",
+  "WINEFSYNC=1": "winefsync",
+  "WINE_LARGE_ADDRESS_AWARE=1": "wineLargeAddressAware",
+  "WINEDLLOVERRIDES=winemenubuilder.exe=d": "winemenubuilder",
+  "WINEDLLOVERRIDES=d3d11=n": "d3d11Native",
+  "PROTON_LOG=1": "protonLog",
+  "PROTON_NO_ESYNC=1": "protonNoEsync",
+  "PROTON_NO_FSYNC=1": "protonNoFsync",
+  "PROTON_USE_WINED3D=1": "protonWined3d",
+  "PROTON_FORCE_LARGE_ADDRESS_AWARE=1": "protonLargeAddressAware",
+  "DXVK_HUD=fps": "dxvkHud",
+  "DXVK_ASYNC=1": "dxvkAsync"
+};
+
 const LAUNCH_ARG_SUGGESTIONS: SuggestionItem[] = [
   { value: '-windowed',  insertMode: 'append-space', tip: 'Avvia in finestra — il fix più citato per blocchi/freeze da fullscreen esclusivo sotto Wine/Proton' },
   { value: '-noborder',  insertMode: 'append-space', tip: 'Finestra senza bordi — abbinato a -windowed per un "fullscreen" senza i problemi del fullscreen esclusivo' },
@@ -521,9 +549,20 @@ function MainApp() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [inputDevice, setInputDevice] = useState<'controller' | 'keyboard'>('controller');
   const [viewState, setViewState] = useState<ViewState>('library');
-  const [theme, setTheme] = useState<Theme>(() => {
-    try { const t = localStorage.getItem('x-launcher-theme'); return (t === 'light' || t === 'dark') ? t : 'dark'; } catch { return 'dark'; }
+  // v3.1.7-dev.1 — temi come file (themes/<id>.json, src/theme/themes.ts). `themeId` è il tema
+  // attivo; `theme` resta lo SCHEMA del tema (dark | light), usato dalle parti non ancora migrate
+  // ai colori con nome (`theme === 'dark' ? … : …`) e passato ai componenti come prima.
+  // La scelta è persistita in app.conf (`theme=`, letto anche dall'overlay degli spazi);
+  // localStorage resta come valore iniziale immediato, prima che /api/config risponda.
+  const [themeId, setThemeId] = useState<string>(() => {
+    try { const t = localStorage.getItem('x-launcher-theme'); return isKnownTheme(t) ? t : DEFAULT_THEME_ID; } catch { return DEFAULT_THEME_ID; }
   });
+  const theme: Theme = getTheme(themeId).scheme;
+  // Applicato prima del paint (niente lampo del tema sbagliato al cambio).
+  useLayoutEffect(() => { applyTheme(themeId); }, [themeId]);
+  // Stessa protezione della lingua (userChangedLanguageRef): una scelta manuale fatta prima che
+  // /api/config risponda non viene sovrascritta dal valore persistito.
+  const userChangedThemeRef = useRef(false);
   // v2.2.17-dev.2 — richiesta utente: indicatore visivo quando si sta
   // testando col server locale invece di xdash (/opt). Necessario perché
   // in modalità kiosk/app la barra indirizzi è nascosta — la porta da
@@ -863,7 +902,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v2.7.2-dev.5');
+  const [appVersion, setAppVersion] = useState('v3.2.1-Mars');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1181,6 +1220,18 @@ function MainApp() {
   //     2 X, 3 Y, 4 L1, 5 R1, 6 L2, 7 R2, 8 Select, 9 Start, 12-15 D-pad su,
   //     giu', sinistra, destra). Se premendo bottoni nello spazio del gioco
   //     NON compaiono righe, Chromium non riceve il pad (finestra nascosta).
+  // v3.2.0-Mars — il badge "Modalità spazi" del quick-menu è una nota di sviluppo: per default
+  // compare solo con la copia di sviluppo (server locale, ?localdev=1), non nella sessione Openbox
+  // stabile. ?spacesbadge=1 lo forza (kiosk-launch.sh lo aggiunge con X_LAUNCHER_SPACES_BADGE=1),
+  // ?spacesbadge=0 lo spegne anche in sviluppo.
+  const [showSpacesBadge] = useState<boolean>(() => {
+    try {
+      const v = new URLSearchParams(window.location.search).get('spacesbadge');
+      if (v === '1') return true;
+      if (v === '0') return false;
+      return new URLSearchParams(window.location.search).get('localdev') === '1';
+    } catch { return false; }
+  });
   const [isSpacesMode] = useState<boolean>(() => {
     try { return new URLSearchParams(window.location.search).get('spaces') === '1'; } catch { return false; }
   });
@@ -1498,6 +1549,22 @@ function MainApp() {
       }
       setDedicatedSession(d.dedicatedSession === true);
       if (d.avatarUrl !== undefined) setAvatarImage(d.avatarUrl);
+      // v3.1.7-dev.1 — tema da app.conf. Se app.conf non l'ha mai avuto (aggiornamento da una
+      // versione che lo teneva solo nel browser) vi si copia quello attuale, così l'overlay lo trova.
+      if (!userChangedThemeRef.current) {
+        if (d.themeIsUserSet === false) {
+          let local: string | null = null;
+          try { local = localStorage.getItem('x-launcher-theme'); } catch {}
+          fetch('/api/config', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ theme: isKnownTheme(local) ? local : DEFAULT_THEME_ID }),
+          }).catch(() => {});
+        } else if (isKnownTheme(d.theme)) {
+          setThemeId(d.theme);
+          try { localStorage.setItem('x-launcher-theme', d.theme); } catch {}
+        }
+      }
       // Step 19b (v1.1.38, guardia aggiunta in v1.1.49, autorilevamento in
       // v1.1.63) — applica la lingua persistita SOLO se l'utente non ha
       // già cambiato lingua manualmente nel frattempo.
@@ -2204,17 +2271,28 @@ function MainApp() {
   // Proton in base al runner del gioco selezionato; ogni altro campo →
   // nessuna alternativa, Shift si comporta come sempre (solo maiuscolo/
   // minuscolo).
+  // v3.1.7-dev.9 — spiegazioni ed etichette dei suggerimenti nella lingua della Dashboard
+  // (dashboard:keyboard.tips.<chiave>, dashboard:keyboard.crtFilter); il testo italiano nelle
+  // costanti resta come ripiego.
+  const localizeSuggestions = useCallback((list: SuggestionItem[]): SuggestionItem[] => list.map(item => {
+    const key = item.value.startsWith('--set-shader') ? 'retroarchCrt' : SUGGESTION_TIP_KEYS[item.value];
+    return {
+      ...item,
+      tip: key && item.tip ? t(`dashboard:keyboard.tips.${key}`, item.tip) : item.tip,
+      label: key === 'retroarchCrt' && item.label ? t('dashboard:keyboard.crtFilter', item.label) : item.label,
+    };
+  }), [t]);
   const keyboardAltSuggestions = useMemo((): SuggestionItem[] | undefined => {
     if (!activeField) return undefined;
     if (activeField.id === 'field-launchArgs') {
-      return selectedGame?.runner === 'RetroArch' ? RETROARCH_LAUNCH_ARG_SUGGESTIONS : LAUNCH_ARG_SUGGESTIONS;
+      return localizeSuggestions(selectedGame?.runner === 'RetroArch' ? RETROARCH_LAUNCH_ARG_SUGGESTIONS : LAUNCH_ARG_SUGGESTIONS);
     }
     if (activeField.id.startsWith('envvar-')) {
       const isProton = (selectedGame?.runner ?? '').toLowerCase().includes('proton');
-      return isProton ? ENV_VAR_SUGGESTIONS_PROTON : ENV_VAR_SUGGESTIONS_WINE;
+      return localizeSuggestions(isProton ? ENV_VAR_SUGGESTIONS_PROTON : ENV_VAR_SUGGESTIONS_WINE);
     }
     return undefined;
-  }, [activeField, selectedGame?.runner]);
+  }, [activeField, selectedGame?.runner, localizeSuggestions]);
 
   const overlayNavAnchors = useMemo(() => {
     if (!selectedGame) return { lastRunnerBridgeId: undefined, firstMiddleId: undefined, lastMiddleId: undefined, firstOverlayContentId: undefined };
@@ -2830,7 +2908,9 @@ Vuoi provare ad avviarlo comunque?`);
     // gameManager.ts): nessuna sequenza di caricamento a fasi
     // paragonabile a un gioco per quei due app desktop.
     const isSharedLauncherStandalone = id.endsWith('-launcher');
-    if (!isSharedLauncherStandalone) {
+    // v3.0.2-dev.1 — `--no-splash` negli argomenti di lancio del gioco: nessuna splash.
+    const wantsNoSplash = /(^|\s)--no-splash(\s|$)/.test(game.launchArgs ?? '');
+    if (!isSharedLauncherStandalone && !wantsNoSplash) {
       openSplashEventSource(id, game.title);
     }
     try {
@@ -2924,7 +3004,7 @@ Vuoi provare ad avviarlo comunque?`);
 
   const handleLogin = async (storeId: string) => {
     play('select');
-    setAuthMessage(prev => ({ ...prev, [storeId]: '⏳ Avvio autenticazione...' }));
+    setAuthMessage(prev => ({ ...prev, [storeId]: t('accounts.status.authStarting') }));
     setAuthUrl(prev => { const n = { ...prev }; delete n[storeId]; return n; });
     try {
       const res = await fetch('/api/stores/login', {
@@ -2954,19 +3034,19 @@ Vuoi provare ad avviarlo comunque?`);
         // giochi, non allo stato di connessione).
         const storesData = await fetch('/api/stores').then(r => r.json());
         setStores(storesData);
-        setAuthMessage(prev => ({ ...prev, [storeId]: '✅ Connesso.' }));
+        setAuthMessage(prev => ({ ...prev, [storeId]: t('accounts.status.connected') }));
         play('launch');
       } else {
-        setAuthMessage(prev => ({ ...prev, [storeId]: result.message ?? 'Errore sconosciuto.' }));
+        setAuthMessage(prev => ({ ...prev, [storeId]: result.message ?? t('accounts.status.unknownError') }));
       }
     } catch (err) {
-      setAuthMessage(prev => ({ ...prev, [storeId]: '❌ Errore di rete.' }));
+      setAuthMessage(prev => ({ ...prev, [storeId]: t('accounts.status.networkError') }));
     }
   };
 
   const handleLogout = async (storeId: string) => {
     play('back');
-    setAuthMessage(prev => ({ ...prev, [storeId]: '⏳ Disconnessione in corso...' }));
+    setAuthMessage(prev => ({ ...prev, [storeId]: t('accounts.status.disconnecting') }));
     try {
       const res = await fetch('/api/stores/logout', {
         method: 'POST',
@@ -2991,14 +3071,14 @@ Vuoi provare ad avviarlo comunque?`);
         setAuthMessage(prev => ({ ...prev, [storeId]: `❌ ${result.message}` }));
       }
     } catch {
-      setAuthMessage(prev => ({ ...prev, [storeId]: '❌ Errore di rete.' }));
+      setAuthMessage(prev => ({ ...prev, [storeId]: t('accounts.status.networkError') }));
     }
   };
 
   const handleInstallRunner = (runnerId: string) => {
     if (runnerInstalling) return;
     setRunnerInstalling(runnerId);
-    setRunnerInstallProgress(prev => ({ ...prev, [runnerId]: ['⏳ Avvio download...'] }));
+    setRunnerInstallProgress(prev => ({ ...prev, [runnerId]: [t('system.runnerProgress.downloadStarting')] }));
 
     const es = new EventSource(`/api/runners/install-stream?id=${encodeURIComponent(runnerId)}`);
     es.addEventListener('log', (e: any) => {
@@ -3032,7 +3112,7 @@ Vuoi provare ad avviarlo comunque?`);
       }, 5000);
     });
     es.addEventListener('error', (e: any) => {
-      const msg = e.data ? JSON.parse(e.data).message : 'Errore durante l\'installazione.';
+      const msg = e.data ? JSON.parse(e.data).message : t('system.runnerProgress.installError');
       es.close();
       setRunnerInstalling(null);
       setRunnerInstallProgress(prev => ({
@@ -3056,7 +3136,7 @@ Vuoi provare ad avviarlo comunque?`);
   const handleUninstallRunner = (runnerId: string) => {
     if (runnerUninstalling) return;
     setRunnerUninstalling(runnerId);
-    setRunnerUninstallProgress(prev => ({ ...prev, [runnerId]: ['⏳ Avvio disinstallazione...'] }));
+    setRunnerUninstallProgress(prev => ({ ...prev, [runnerId]: [t('system.runnerProgress.uninstallStarting')] }));
     // Durata visiva minima: rm -rf su una cartella locale è praticamente
     // istantaneo, quindi l'animazione di progresso non avrebbe mai il tempo
     // di essere notata prima di scattare già a "completato" — spiazzante per
@@ -3100,7 +3180,7 @@ Vuoi provare ad avviarlo comunque?`);
       }, remaining);
     });
     es.addEventListener('error', (e: any) => {
-      const msg = e.data ? JSON.parse(e.data).message : 'Errore durante la disinstallazione.';
+      const msg = e.data ? JSON.parse(e.data).message : t('system.runnerProgress.uninstallError');
       es.close();
       setRunnerUninstalling(null);
       setRunnerUninstallProgress(prev => ({
@@ -4166,7 +4246,7 @@ Vuoi provare ad avviarlo comunque?`);
         if (authenticated) {
           clearInterval(iv);
           setAuthPolling(null);
-          setAuthMessage(prev => ({ ...prev, [authPolling]: '✅ Autenticato con successo!' }));
+          setAuthMessage(prev => ({ ...prev, [authPolling]: t('accounts.status.authSuccess') }));
           // Forza sync libreria dopo auth (tutti gli store, non solo Epic).
           // Step 18 (v1.1.37) — questa chiamata da sola già scatena
           // `refreshLibrary()` lato server → evento SSE 'library-updated'
@@ -4186,7 +4266,7 @@ Vuoi provare ad avviarlo comunque?`);
       setAuthPolling(null);
       setAuthMessage(prev => ({
         ...prev,
-        [authPolling]: '⏱ Timeout — riprova o usa il terminale.',
+        [authPolling]: t('accounts.status.authTimeout'),
       }));
     }, 150000);
     return () => { clearInterval(iv); clearTimeout(timeout); };
@@ -4298,24 +4378,28 @@ Vuoi provare ad avviarlo comunque?`);
   };
 
   const toggleTheme = () => {
-    setTheme(prev => {
-      const next = prev === 'dark' ? 'light' : 'dark';
-      try { localStorage.setItem('x-launcher-theme', next); } catch {}
-      return next;
-    });
+    userChangedThemeRef.current = true;
+    const next = nextSelectableTheme(themeId);
+    setThemeId(next);
+    try { localStorage.setItem('x-launcher-theme', next); } catch {}
+    fetch('/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: next }),
+    }).catch(() => {});
     play('select');
   };
 
   // Step 12f — colori e label per i livelli di log nella debug console
   const LOG_LEVEL_META: Record<string, { color: string; border: string; label: string }> = {
-    debug:    { color: 'text-gray-500',    border: 'border-gray-600',   label: 'DBG'  },
-    info:     { color: 'text-green-400/70',border: 'border-green-500/30',label: 'INF' },
-    system:   { color: 'text-blue-400',    border: 'border-blue-500',   label: 'SYS'  },
-    warning:  { color: 'text-yellow-400',  border: 'border-yellow-400', label: 'WRN'  },
-    error:    { color: 'text-red-400',     border: 'border-red-500',    label: 'ERR'  },
-    auth:     { color: 'text-purple-400',  border: 'border-purple-400', label: 'AUTH' },
-    download: { color: 'text-cyan-400',    border: 'border-cyan-500',   label: 'DL'   },
-    launch:   { color: 'text-emerald-400', border: 'border-emerald-500',label: 'RUN'  },
+    debug:    { color: 'text-xl-neutral-500',    border: 'border-xl-neutral-600',   label: 'DBG'  },
+    info:     { color: 'text-xl-success-400/70',border: 'border-xl-success-500/30',label: 'INF' },
+    system:   { color: 'text-xl-primary-400',    border: 'border-xl-primary-500',   label: 'SYS'  },
+    warning:  { color: 'text-xl-warning-400',  border: 'border-xl-warning-400', label: 'WRN'  },
+    error:    { color: 'text-xl-danger-400',     border: 'border-xl-danger-500',    label: 'ERR'  },
+    auth:     { color: 'text-xl-special-400',  border: 'border-xl-special-400', label: 'AUTH' },
+    download: { color: 'text-xl-cyan-400',    border: 'border-xl-cyan-500',   label: 'DL'   },
+    launch:   { color: 'text-xl-emerald-400', border: 'border-xl-emerald-500',label: 'RUN'  },
   };
   const ALL_LOG_LEVELS = Object.keys(LOG_LEVEL_META);
 
@@ -4351,13 +4435,13 @@ Vuoi provare ad avviarlo comunque?`);
   return (
     <div className={cn(
       "w-full h-full font-sans flex flex-col overflow-hidden select-none transition-colors duration-500 relative",
-      theme === 'dark' ? "bg-[#0b0c0f] text-gray-100" : "bg-gray-100 text-gray-900",
+      "bg-xl-bg text-xl-text",
       cursorHidden && "cursor-hidden-global"
     )}>
       {/* Header */}
       <header className={cn(
         "h-16 flex items-center px-8 shrink-0 z-30 shadow-lg border-b transition-colors",
-        theme === 'dark' ? "bg-[#161920] border-white/10" : "bg-white border-gray-200"
+        "bg-xl-surface border-xl-border"
       )}>
         <Focusable group="header-logo" id="header-logo" onEnter={() => setViewState('quick-menu')}>
           {(isFocused) => (
@@ -4365,10 +4449,10 @@ Vuoi provare ad avviarlo comunque?`);
               "flex items-center gap-2 mr-12 transition-transform",
               isFocused && "scale-110"
             )}>
-              <div className="w-10 h-10 bg-blue-600 rounded-sm flex items-center justify-center font-black italic text-white shadow-lg shadow-blue-600/20">X</div>
+              <div className="w-10 h-10 bg-xl-primary-600 rounded-sm flex items-center justify-center font-black italic text-xl-on-accent shadow-lg shadow-xl-primary-600/20">X</div>
               <span className={cn(
                 "text-2xl font-black tracking-tighter italic",
-                theme === 'dark' ? "text-blue-400" : "text-blue-600"
+                "text-xl-accent-text"
               )}>LAUNCHER</span>
             </div>
           )}
@@ -4379,8 +4463,8 @@ Vuoi provare ad avviarlo comunque?`);
             {(isFocused) => (
               <button className={cn(
                 "pb-1 border-b-2 transition-all",
-                activeStore === 'All' ? "text-blue-500 border-blue-500" : "opacity-50 border-transparent",
-                isFocused && "scale-110 opacity-100 border-blue-400"
+                activeStore === 'All' ? "text-xl-primary-500 border-xl-primary-500" : "opacity-50 border-transparent",
+                isFocused && "scale-110 opacity-100 border-xl-primary-400"
               )}>
                 {t('dashboard:allGames')}
               </button>
@@ -4391,8 +4475,8 @@ Vuoi provare ad avviarlo comunque?`);
               {(isFocused) => (
                 <button className={cn(
                   "pb-1 border-b-2 transition-all",
-                  activeStore === store.id ? "text-blue-500 border-blue-500" : "opacity-50 border-transparent",
-                  isFocused && "scale-110 opacity-100 border-blue-400"
+                  activeStore === store.id ? "text-xl-primary-500 border-xl-primary-500" : "opacity-50 border-transparent",
+                  isFocused && "scale-110 opacity-100 border-xl-primary-400"
                 )}>
                   {translateStorePluginName(store.id, store.name)}
                 </button>
@@ -4403,7 +4487,7 @@ Vuoi provare ad avviarlo comunque?`);
 
         <div className="ml-auto flex items-center gap-6">
           <div className="flex flex-col items-end gap-0.5">
-            <span className="text-[10px] font-bold text-blue-500 uppercase tracking-tighter">
+            <span className="text-[10px] font-bold text-xl-primary-500 uppercase tracking-tighter">
               {isGamescope ? t('dashboard:gamescopeStandalone') : (hostname || '—')}
             </span>
             <div className="flex items-center gap-2">
@@ -4428,7 +4512,7 @@ Vuoi provare ad avviarlo comunque?`);
                   t('dashboard:kioskMode')
                 )}
               </span>
-              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+              <div className="w-2 h-2 rounded-full bg-xl-success-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
             </div>
           </div>
           <div className="relative">
@@ -4442,9 +4526,7 @@ Vuoi provare ad avviarlo comunque?`);
             <div
               className={cn(
                 "w-10 h-10 rounded-full transition-all flex items-center justify-center overflow-hidden ring-2",
-                theme === 'dark'
-                  ? "border border-white/20 ring-white/10"
-                  : "border border-black/20 ring-black/10"
+                "border border-xl-contrast/20 ring-xl-contrast/10"
               )}
             >
               {avatarImage
@@ -4474,21 +4556,21 @@ Vuoi provare ad avviarlo comunque?`);
             exit={{ opacity: 0, y: -10 }}
             className={cn(
               "absolute inset-0 z-[80] flex flex-col pt-[80px] pl-[80px] pr-[80px] pb-[64px]",
-              theme === 'dark' ? "bg-[#0b0c0f]/98" : "bg-gray-100/98"
+              "bg-xl-veil"
             )}
           >
             {/* Header libreria */}
             <div className="flex items-center justify-between mb-10 shrink-0">
               <div className="flex items-center gap-4">
                 {/* Avatar corrente */}
-                <div className="w-14 h-14 rounded-full border-2 border-blue-500/40 overflow-hidden flex items-center justify-center bg-white/5 shrink-0">
+                <div className="w-14 h-14 rounded-full border-2 border-xl-primary-500/40 overflow-hidden flex items-center justify-center bg-xl-ink/5 shrink-0">
                   {avatarImage
                     ? <img src={avatarImage} className="w-full h-full object-cover" alt="avatar" />
                     : <User size={26} className="opacity-40" />}
                 </div>
                 <div>
                   <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('avatarLibrary:title')}</h2>
-                  <p className={cn("text-[10px] font-mono mt-0.5 select-all", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                  <p className={cn("text-[10px] font-mono mt-0.5 select-all", "text-xl-fg-30")}>
                     {avatarDir} · {t('avatarLibrary:fileTypes')}
                   </p>
                 </div>
@@ -4507,8 +4589,8 @@ Vuoi provare ad avviarlo comunque?`);
                         className={cn(
                           "flex items-center gap-2 px-4 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
                           isFocused
-                            ? "bg-red-600 border-red-600 text-white scale-105"
-                            : theme === 'dark' ? "border-white/10 text-white/50 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 text-gray-500 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                            ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent scale-105"
+                            : "border-xl-control-border text-xl-fg-50-alt hover:bg-xl-danger-600 hover:border-xl-danger-600 hover:text-xl-on-accent"
                         )}
                       >
                         <Trash2 size={13} />
@@ -4531,8 +4613,8 @@ Vuoi provare ad avviarlo comunque?`);
                       className={cn(
                         "flex items-center gap-2 px-4 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
                         isFocused
-                          ? "bg-blue-600 border-blue-600 text-white scale-105"
-                          : theme === 'dark' ? "border-white/10 text-white/50 hover:bg-blue-600 hover:border-blue-600 hover:text-white" : "border-gray-300 text-gray-500 hover:bg-blue-600 hover:border-blue-600 hover:text-white"
+                          ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-105"
+                          : "border-xl-control-border text-xl-fg-50-alt hover:bg-xl-primary-600 hover:border-xl-primary-600 hover:text-xl-on-accent"
                       )}
                     >
                       <Settings size={13} />
@@ -4547,8 +4629,8 @@ Vuoi provare ad avviarlo comunque?`);
                       className={cn(
                         "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
                         isFocused
-                          ? "bg-blue-600 border-blue-600 text-white scale-110"
-                          : theme === 'dark' ? "border-white/10 hover:bg-blue-600 hover:border-blue-600 hover:text-white" : "border-gray-300 hover:bg-blue-600 hover:border-blue-600 hover:text-white"
+                          ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-110"
+                          : "border-xl-control-border hover:bg-xl-primary-600 hover:border-xl-primary-600 hover:text-xl-on-accent"
                       )}
                       title={t('avatarLibrary:reload')}
                     >
@@ -4563,8 +4645,8 @@ Vuoi provare ad avviarlo comunque?`);
                       className={cn(
                         "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
                         isFocused
-                          ? "bg-red-600 border-red-600 text-white scale-110"
-                          : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                          ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent scale-110"
+                          : "border-xl-control-border hover:bg-xl-danger-600 hover:border-xl-danger-600 hover:text-xl-on-accent"
                       )}
                     >
                       <X size={18} />
@@ -4615,10 +4697,10 @@ Vuoi provare ad avviarlo comunque?`);
                           className={cn(
                             "relative aspect-square rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 border-[4px]",
                             avatarImage === file.url
-                              ? "border-blue-500 scale-[1.06] shadow-[0_12px_32px_rgba(37,99,235,0.5)] z-10"
+                              ? "border-xl-primary-500 scale-[1.06] shadow-[0_12px_32px_rgba(37,99,235,0.5)] z-10"
                               : isFocused
-                                ? "border-white scale-[1.06] shadow-[0_12px_32px_rgba(255,255,255,0.2)] z-10"
-                                : "border-red-500/60 opacity-75 hover:opacity-100 hover:border-red-400"
+                                ? "border-xl-ink scale-[1.06] shadow-[0_12px_32px_rgba(255,255,255,0.2)] z-10"
+                                : "border-xl-danger-500/60 opacity-75 hover:opacity-100 hover:border-xl-danger-400"
                           )}
                         >
                           <img
@@ -4627,8 +4709,8 @@ Vuoi provare ad avviarlo comunque?`);
                             className="w-full h-full object-cover"
                           />
                           {avatarImage === file.url && (
-                            <div className="absolute inset-0 bg-blue-600/20 flex items-end p-2">
-                              <span className="text-[8px] font-black uppercase tracking-widest text-white bg-blue-600 px-1.5 py-0.5 rounded-full shadow-lg">{t('avatarLibrary:activeBadge')}</span>
+                            <div className="absolute inset-0 bg-xl-primary-600/20 flex items-end p-2">
+                              <span className="text-[8px] font-black uppercase tracking-widest text-xl-on-accent bg-xl-primary-600 px-1.5 py-0.5 rounded-full shadow-lg">{t('avatarLibrary:activeBadge')}</span>
                             </div>
                           )}
                         </div>
@@ -4674,14 +4756,16 @@ Vuoi provare ad avviarlo comunque?`);
           };
           const splashPhaseText = (): string => {
             switch (splashInfo.phase) {
+              // v3.1.7-dev.8 — testi dalle traduzioni (dashboard:splash.*): prima erano scritti in
+              // italiano nel codice e la splash restava in italiano con la Dashboard in inglese.
               case 'launching':
-                return splashInfo.store ? `Avvio da ${splashInfo.store}...` : 'Avvio in corso...';
+                return splashInfo.store ? t('dashboard:splash.launchingFrom', { store: splashInfo.store }) : t('dashboard:splash.launching');
               case 'verifying-env':
-                return `Verifica dell'ambiente${splashInfo.total ? ` (${splashInfo.index}/${splashInfo.total})` : ''}${splashInfo.detail ? ` — ${splashInfo.detail}` : ''}`;
-              case 'done': return 'Pronto.';
-              case 'failed': return 'Avvio non riuscito.';
-              case 'timeout': return 'Tempo scaduto — avvio interrotto.';
-              case 'cancelled': return 'Avvio annullato.';
+                return `${t('dashboard:splash.verifying')}${splashInfo.total ? ` (${splashInfo.index}/${splashInfo.total})` : ''}${splashInfo.detail ? ` — ${splashInfo.detail}` : ''}`;
+              case 'done': return t('dashboard:splash.done');
+              case 'failed': return t('dashboard:splash.failed');
+              case 'timeout': return t('dashboard:splash.timeout');
+              case 'cancelled': return t('dashboard:splash.cancelled');
               default: return '';
             }
           };
@@ -4692,7 +4776,7 @@ Vuoi provare ad avviarlo comunque?`);
               exit={{ opacity: 0 }}
               className={cn(
                 "absolute inset-0 z-[170] flex flex-col items-center justify-center gap-8 px-12",
-                theme === 'dark' ? "bg-[#0b0c0f]/98" : "bg-gray-100/98"
+                "bg-xl-veil"
               )}
             >
               {/* Chiudi — stesso identico stile di pm-close */}
@@ -4709,8 +4793,8 @@ Vuoi provare ad avviarlo comunque?`);
                       className={cn(
                         "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
                         isFocused
-                          ? "bg-red-600 border-red-600 text-white scale-110"
-                          : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                          ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent scale-110"
+                          : "border-xl-control-border hover:bg-xl-danger-600 hover:border-xl-danger-600 hover:text-xl-on-accent"
                       )}
                     >
                       <X size={18} />
@@ -4721,8 +4805,8 @@ Vuoi provare ad avviarlo comunque?`);
 
               {/* Logo — stesso identico stile del logo in header */}
               <div className="flex items-center gap-3">
-                <div className="w-14 h-14 bg-blue-600 rounded-sm flex items-center justify-center font-black italic text-white text-2xl shadow-lg shadow-blue-600/20">X</div>
-                <span className={cn("text-4xl font-black tracking-tighter italic", theme === 'dark' ? "text-blue-400" : "text-blue-600")}>
+                <div className="w-14 h-14 bg-xl-primary-600 rounded-sm flex items-center justify-center font-black italic text-xl-on-accent text-2xl shadow-lg shadow-xl-primary-600/20">X</div>
+                <span className={cn("text-4xl font-black tracking-tighter italic", "text-xl-accent-text")}>
                   LAUNCHER
                 </span>
               </div>
@@ -4730,15 +4814,15 @@ Vuoi provare ad avviarlo comunque?`);
               {/* Titolo gioco + fase corrente */}
               <div className="text-center max-w-xl">
                 <h2 className="text-xl font-black italic tracking-tight uppercase mb-2">{splashInfo.gameTitle}</h2>
-                <p className={cn("text-sm font-mono", theme === 'dark' ? "text-white/50" : "text-gray-600")}>
+                <p className={cn("text-sm font-mono", "text-xl-fg-50")}>
                   {splashPhaseText()}
                 </p>
               </div>
 
               {/* Barra di progresso */}
-              <div className={cn("w-full max-w-md h-1.5 rounded-full overflow-hidden", theme === 'dark' ? "bg-white/10" : "bg-gray-300")}>
+              <div className={cn("w-full max-w-md h-1.5 rounded-full overflow-hidden", "bg-xl-fill-10-strong")}>
                 <motion.div
-                  className="h-full bg-blue-600"
+                  className="h-full bg-xl-primary-600"
                   animate={{ width: `${splashProgressPercent()}%` }}
                   transition={{ ease: 'easeOut' }}
                 />
@@ -4771,18 +4855,18 @@ Vuoi provare ad avviarlo comunque?`);
               exit={{ opacity: 0, y: -10 }}
               className={cn(
                 "absolute inset-0 z-[80] flex flex-col pt-[80px] pl-[80px] pr-[80px] pb-[64px]",
-                theme === 'dark' ? "bg-[#0b0c0f]/98" : "bg-gray-100/98"
+                "bg-xl-veil"
               )}
             >
               {/* Header */}
               <div className="flex items-center justify-between mb-10 shrink-0">
                 <div className="flex items-center gap-4">
-                  <div className="w-14 h-14 rounded-full border-2 border-blue-500/40 overflow-hidden flex items-center justify-center bg-white/5 shrink-0">
+                  <div className="w-14 h-14 rounded-full border-2 border-xl-primary-500/40 overflow-hidden flex items-center justify-center bg-xl-ink/5 shrink-0">
                     <Cpu size={26} className="opacity-40" />
                   </div>
                   <div>
                     <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('processManager:title')}</h2>
-                    <p className={cn("text-[10px] font-mono mt-0.5", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                    <p className={cn("text-[10px] font-mono mt-0.5", "text-xl-fg-30")}>
                       {t('processManager:subtitle')}
                     </p>
                   </div>
@@ -4796,8 +4880,8 @@ Vuoi provare ad avviarlo comunque?`);
                         className={cn(
                           "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
                           isFocused
-                            ? "bg-blue-600 border-blue-600 text-white scale-110"
-                            : theme === 'dark' ? "border-white/10 hover:bg-blue-600 hover:border-blue-600 hover:text-white" : "border-gray-300 hover:bg-blue-600 hover:border-blue-600 hover:text-white"
+                            ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-110"
+                            : "border-xl-control-border hover:bg-xl-primary-600 hover:border-xl-primary-600 hover:text-xl-on-accent"
                         )}
                         title={t('avatarLibrary:reload') as string}
                       >
@@ -4812,8 +4896,8 @@ Vuoi provare ad avviarlo comunque?`);
                         className={cn(
                           "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
                           isFocused
-                            ? "bg-red-600 border-red-600 text-white scale-110"
-                            : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                            ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent scale-110"
+                            : "border-xl-control-border hover:bg-xl-danger-600 hover:border-xl-danger-600 hover:text-xl-on-accent"
                         )}
                       >
                         <X size={18} />
@@ -4841,19 +4925,19 @@ Vuoi provare ad avviarlo comunque?`);
                         key={proc.unit}
                         className={cn(
                           "flex items-center justify-between gap-4 p-4 rounded-2xl border",
-                          theme === 'dark' ? "border-white/10 bg-white/[0.03]" : "border-gray-200 bg-white"
+                          "border-xl-border bg-xl-pane-3"
                         )}
                       >
                         <div className="flex items-center gap-4 min-w-0">
                           <div className={cn(
                             "w-11 h-11 rounded-xl border flex items-center justify-center shrink-0",
-                            theme === 'dark' ? "border-white/10 bg-white/5" : "border-gray-200 bg-gray-50"
+                            "border-xl-border bg-xl-box"
                           )}>
                             {proc.kind === 'game' ? <Gamepad2 size={18} className="opacity-60" /> : <Package size={18} className="opacity-60" />}
                           </div>
                           <div className="min-w-0">
                             <p className="font-bold truncate">{proc.title}</p>
-                            <p className={cn("text-[10px] font-mono uppercase tracking-widest mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                            <p className={cn("text-[10px] font-mono uppercase tracking-widest mt-0.5", "text-xl-fg-40")}>
                               {proc.kind === 'game' ? t('processManager:kindGame') : t('processManager:kindSharedLauncher')} · {t('processManager:runningSince')} {formatElapsed(proc.startedAt)}
                             </p>
                           </div>
@@ -4878,8 +4962,8 @@ Vuoi provare ad avviarlo comunque?`);
                               className={cn(
                                 "flex items-center gap-2 px-4 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all shrink-0",
                                 isFocused || isPending
-                                  ? "bg-red-600 border-red-600 text-white scale-105"
-                                  : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                                  ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent scale-105"
+                                  : "border-xl-control-border text-xl-fg-50-alt"
                               )}
                             >
                               <Trash2 size={13} />
@@ -4927,14 +5011,14 @@ Vuoi provare ad avviarlo comunque?`);
             exit={{ opacity: 0, y: -10 }}
             className={cn(
               "absolute inset-0 z-[160] flex flex-col pt-[80px] pl-[80px] pr-[80px] pb-[64px]",
-              theme === 'dark' ? "bg-[#0b0c0f]/98" : "bg-gray-100/98"
+              "bg-xl-veil"
             )}
           >
             {/* Header */}
             <div className="flex items-center justify-between mb-6 shrink-0 gap-4">
               <div className="min-w-0">
                 <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('dashboard:fileBrowser.title')}</h2>
-                <p className={cn("text-[10px] font-mono mt-0.5 truncate select-all", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                <p className={cn("text-[10px] font-mono mt-0.5 truncate select-all", "text-xl-fg-30")}>
                   {fileBrowserPath ?? ''}
                 </p>
               </div>
@@ -4950,8 +5034,8 @@ Vuoi provare ad avviarlo comunque?`);
                         "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
                         !fileBrowserParentPath ? "opacity-20 border-transparent" :
                         isFocused
-                          ? "bg-blue-600 border-blue-600 text-white scale-105"
-                          : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                          ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-105"
+                          : "border-xl-control-border text-xl-fg-50-alt"
                       )}
                     >
                       <ArrowUp size={13} />
@@ -4966,8 +5050,8 @@ Vuoi provare ad avviarlo comunque?`);
                     <button className={cn(
                       "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
                       isFocused
-                        ? "bg-blue-600 border-blue-600 text-white scale-105"
-                        : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                        ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-105"
+                        : "border-xl-control-border text-xl-fg-50-alt"
                     )}>
                       <Home size={13} />
                       <span className="hidden md:inline">{t('dashboard:fileBrowser.home')}</span>
@@ -4984,8 +5068,8 @@ Vuoi provare ad avviarlo comunque?`);
                         "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
                         !fileBrowserQuickLinks.downloads ? "opacity-20 border-transparent" :
                         isFocused
-                          ? "bg-blue-600 border-blue-600 text-white scale-105"
-                          : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                          ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-105"
+                          : "border-xl-control-border text-xl-fg-50-alt"
                       )}
                     >
                       <FileDown size={13} />
@@ -5004,8 +5088,8 @@ Vuoi provare ad avviarlo comunque?`);
                         "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
                         !fileBrowserQuickLinks.removableMedia ? "opacity-20 border-transparent" :
                         isFocused
-                          ? "bg-blue-600 border-blue-600 text-white scale-105"
-                          : theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500"
+                          ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-105"
+                          : "border-xl-control-border text-xl-fg-50-alt"
                       )}
                     >
                       <HardDrive size={13} />
@@ -5026,10 +5110,10 @@ Vuoi provare ad avviarlo comunque?`);
                     <button className={cn(
                       "flex items-center gap-1.5 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
                       isFocused
-                        ? "bg-blue-600 border-blue-600 text-white scale-105"
+                        ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-105"
                         : fileBrowserFilterOn
-                          ? (theme === 'dark' ? "border-blue-500/40 text-blue-400" : "border-blue-400 text-blue-600")
-                          : (theme === 'dark' ? "border-white/10 text-white/50" : "border-gray-300 text-gray-500")
+                          ? ("border-xl-primary-border text-xl-accent-text")
+                          : ("border-xl-control-border text-xl-fg-50-alt")
                     )}>
                       <Filter size={13} />
                       <span className="hidden md:inline">{fileBrowserFilterOn ? t('dashboard:fileBrowser.filterOn') : t('dashboard:fileBrowser.filterOff')}</span>
@@ -5043,8 +5127,8 @@ Vuoi provare ad avviarlo comunque?`);
                       className={cn(
                         "w-10 h-10 rounded-full border flex items-center justify-center transition-all",
                         isFocused
-                          ? "bg-red-600 border-red-600 text-white scale-110"
-                          : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                          ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent scale-110"
+                          : "border-xl-control-border hover:bg-xl-danger-600 hover:border-xl-danger-600 hover:text-xl-on-accent"
                       )}
                     >
                       <X size={18} />
@@ -5118,8 +5202,8 @@ Vuoi provare ad avviarlo comunque?`);
                         <div className={cn(
                           "flex items-center justify-between gap-4 px-4 py-2.5 rounded-xl border transition-all",
                           isFocused
-                            ? "bg-blue-600 border-blue-600 text-white scale-[1.01]"
-                            : theme === 'dark' ? "border-white/10 bg-white/[0.02]" : "border-gray-200 bg-white"
+                            ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent scale-[1.01]"
+                            : "border-xl-border bg-xl-pane"
                         )}>
                           <div className="flex items-center gap-3 min-w-0">
                             {entry.isDirectory
@@ -5128,7 +5212,7 @@ Vuoi provare ad avviarlo comunque?`);
                             <span className="truncate text-sm font-medium">{entry.name}</span>
                           </div>
                           {!entry.isDirectory && (
-                            <div className={cn("flex items-center gap-3 shrink-0 text-[10px] font-mono tabular-nums", isFocused ? "text-white/80" : "opacity-50")}>
+                            <div className={cn("flex items-center gap-3 shrink-0 text-[10px] font-mono tabular-nums", isFocused ? "text-xl-ink/80" : "opacity-50")}>
                               <span>{formatFileSize(entry.sizeBytes)}</span>
                               <span>{formatFileDate(entry.mtimeMs)}</span>
                             </div>
@@ -5173,7 +5257,7 @@ Vuoi provare ad avviarlo comunque?`);
               </h2>
               <div className="flex items-center gap-4">
                 <span className="text-[10px] font-mono opacity-40 uppercase tracking-[0.3em] font-black">{t('dashboard:titlesSynced', { count: games.length })}</span>
-                <div className="h-4 w-[1px] bg-blue-500/20" />
+                <div className="h-4 w-[1px] bg-xl-primary-500/20" />
                 {/* FIX v0.99.4 — la lente non è più un Focusable: non deve
                     essere selezionabile/attivabile da D-pad/stick/A del
                     controller, solo cliccabile dal mouse. Da controller,
@@ -5186,7 +5270,7 @@ Vuoi provare ad avviarlo comunque?`);
                   onClick={openSearchWithPhysicalInput}
                   className={cn(
                     "p-2 rounded-full transition-all cursor-pointer",
-                    showSearch ? "bg-blue-600 text-white" : "hover:bg-white/5"
+                    showSearch ? "bg-xl-primary-600 text-xl-on-accent" : "hover:bg-xl-ink/5"
                   )}
                 >
                   <Search size={18} />
@@ -5211,11 +5295,11 @@ Vuoi provare ad avviarlo comunque?`);
                          value={searchQuery}
                          onChange={(e) => setSearchQuery(e.target.value)}
                          placeholder={activeStore === 'All' ? t('dashboard:searchAllLibraries') : t('dashboard:searchInStore', { store: activeStore })}
-className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 transition-all", theme === 'dark' ? "bg-white/5 border border-white/10" : "bg-white border border-gray-400 text-gray-900")}
+className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 transition-all", "bg-xl-field border border-xl-field-border text-xl-text")}
                        />
                        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
                           {searchQuery && (
-                            <button onClick={() => setSearchQuery('')} className="p-2 opacity-30 hover:opacity-100 hover:text-red-500 transition-all">
+                            <button onClick={() => setSearchQuery('')} className="p-2 opacity-30 hover:opacity-100 hover:text-xl-danger-500 transition-all">
                               <X size={14} />
                             </button>
                           )}
@@ -5246,16 +5330,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               l'icona", nessun focus da ereditare. */}
                           <div
                             onClick={() => setShowKeyboard(true)}
-                            className="p-2 rounded-lg transition-all cursor-pointer opacity-30 hover:opacity-100 bg-white/10"
+                            className="p-2 rounded-lg transition-all cursor-pointer opacity-30 hover:opacity-100 bg-xl-ink/10"
                           >
                             <Keyboard size={14} />
                           </div>
                        </div>
                     </div>
-                    <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
+                    <div className="flex bg-xl-ink/5 p-1 rounded-xl border border-xl-ink/10">
                        <button 
                          onClick={() => { setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); play('select'); }}
-                         className="px-4 py-2 hover:bg-white/5 rounded-lg flex items-center gap-2 text-[10px] font-black uppercase italic tracking-widest"
+                         className="px-4 py-2 hover:bg-xl-ink/5 rounded-lg flex items-center gap-2 text-[10px] font-black uppercase italic tracking-widest"
                        >
                          {sortOrder === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
                          {sortOrder}
@@ -5263,7 +5347,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                        <select 
                          value={sortBy}
                          onChange={(e) => setSortBy(e.target.value as any)}
-  className={cn("text-[10px] font-black uppercase italic tracking-widest px-4 py-2 outline-none cursor-pointer rounded-lg", theme === 'dark' ? "bg-[#1a1d27] text-white border border-white/10" : "bg-gray-100 text-gray-900 border border-gray-300")}
+  className={cn("text-[10px] font-black uppercase italic tracking-widest px-4 py-2 outline-none cursor-pointer rounded-lg", "bg-xl-control text-xl-control-text border border-xl-control-border")}
                        >
                          <option value="title">{t('dashboard:sortByTitle')}</option>
                          <option value="playTime">{t('dashboard:sortByPlayTime')}</option>
@@ -5280,14 +5364,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       className={cn(
                         "flex items-center gap-1.5 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all border",
                         onlyInstalled
-                          ? "bg-blue-600 border-blue-600 text-white"
-                          : "bg-white/5 border-white/10 opacity-50 hover:opacity-100"
+                          ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent"
+                          : "bg-xl-ink/5 border-xl-ink/10 opacity-50 hover:opacity-100"
                       )}
                     >
                       <Download size={9} />
                       {t('dashboard:installedFilter')}
                     </button>
-                    <div className="w-px h-6 bg-white/10 self-center mx-1" />
+                    <div className="w-px h-6 bg-xl-ink/10 self-center mx-1" />
                     {/* Genres — derivati dai giochi reali */}
                     {(() => {
                       const genres = [...new Set(games.flatMap(g => g.genres ?? []))].slice(0, 8);
@@ -5302,7 +5386,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 onClick={() => setSelectedGenre(selectedGenre === genre ? '' : genre)}
                                 className={cn(
                                   "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
-                                  selectedGenre === genre ? "bg-blue-600 text-white" : "bg-white/5 opacity-50 hover:opacity-100"
+                                  selectedGenre === genre ? "bg-xl-primary-600 text-xl-on-accent" : "bg-xl-ink/5 opacity-50 hover:opacity-100"
                                 )}
                               >
                                 {genre}
@@ -5326,7 +5410,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 onClick={() => setSelectedCategory(selectedCategory === cat ? '' : cat)}
                                 className={cn(
                                   "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
-                                  selectedCategory === cat ? "bg-blue-600 text-white" : "bg-white/5 opacity-50 hover:opacity-100"
+                                  selectedCategory === cat ? "bg-xl-primary-600 text-xl-on-accent" : "bg-xl-ink/5 opacity-50 hover:opacity-100"
                                 )}
                               >
                                 {cat}
@@ -5338,7 +5422,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     })()}
                   </div>
 
-                  <div className="h-[1px] bg-white/5 w-full my-6" />
+                  <div className="h-[1px] bg-xl-ink/5 w-full my-6" />
                 </motion.div>
               )}
             </AnimatePresence>
@@ -5356,7 +5440,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 <p className="text-sm font-medium mt-2">{t('dashboard:tryAdjustingFilters')}</p>
                 <button 
                   onClick={() => { setSearchQuery(''); setSelectedGenre(''); setSelectedCategory(''); setOnlyInstalled(activeStore === 'All'); }}
-                  className="mt-8 px-8 py-3 bg-white/10 rounded-xl text-xs font-black uppercase italic tracking-widest hover:bg-white/20 transition-all pointer-events-auto"
+                  className="mt-8 px-8 py-3 bg-xl-ink/10 rounded-xl text-xs font-black uppercase italic tracking-widest hover:bg-xl-ink/20 transition-all pointer-events-auto"
                 >
                   {t('dashboard:clearAllFilters')}
                 </button>
@@ -5410,9 +5494,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           "group relative aspect-[3/4] rounded-2xl overflow-hidden cursor-pointer transition-all duration-300",
                           "border-[6px]",
                           (isFocused || selectedGameId === game.id) && game.isInstalled
-                            ? "border-blue-500 scale-[1.05] shadow-[0_20px_50px_rgba(37,99,235,0.4)] z-20"
+                            ? "border-xl-primary-500 scale-[1.05] shadow-[0_20px_50px_rgba(37,99,235,0.4)] z-20"
                             : (isFocused || selectedGameId === game.id) && !game.isInstalled
-                              ? "border-red-500 scale-[1.05] shadow-[0_20px_50px_rgba(239,68,68,0.4)] z-20"
+                              ? "border-xl-danger-500 scale-[1.05] shadow-[0_20px_50px_rgba(239,68,68,0.4)] z-20"
                               : "border-transparent opacity-70"
                         )}
                       >
@@ -5422,7 +5506,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             className="absolute top-2 right-2 z-10 bg-black/60 rounded-full p-1 backdrop-blur-sm"
                             title={game.verificationMethod ? t('dashboard:sidebar.verifiedWithMethod', { method: game.verificationMethod }) : t('dashboard:sidebar.verified')}
                           >
-                            <CheckCircle2 size={16} className="text-green-400" />
+                            <CheckCircle2 size={16} className="text-xl-success-400" />
                           </div>
                         )}
                         <div className={cn(
@@ -5434,11 +5518,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             const ps = pluginStateMap.get(game.store as string);
                             const blocked = ps && !ps.enabled && !ps.drmFree && game.isInstalled;
                             return blocked ? (
-                              <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-yellow-400 italic">
+                              <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-xl-warning-400 italic">
                                 {t('dashboard:sidebar.pluginDisabled')}
                               </p>
                             ) : (
-                              <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-blue-400 italic">
+                              <p className="text-[11px] font-black uppercase tracking-widest mb-1 text-xl-primary-400 italic">
                                 {translateGameStatus(game.status, game.status)}
                               </p>
                             );
@@ -5467,7 +5551,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
           style={{ transform: 'translateZ(0)' }}
           className={cn(
           "w-[400px] h-full backdrop-blur-3xl border-l p-10 flex flex-col z-20 shadow-[-20px_0_60px_rgba(0,0,0,0.5)] transition-colors duration-500",
-          theme === 'dark' ? "bg-[#12141a]/90 border-white/5" : "bg-white/90 border-gray-200"
+          "bg-xl-sidebar-glass border-xl-border-subtle"
         )}>
           <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
             {selectedGame ? (
@@ -5481,7 +5565,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   className="flex flex-col gap-6 min-h-0"
                 >
                   {/* Cover / Trailer */}
-                  <div className="relative w-full aspect-video rounded-2xl border border-white/10 overflow-hidden shadow-2xl group shrink-0">
+                  <div className="relative w-full aspect-video rounded-2xl border border-xl-ink/10 overflow-hidden shadow-2xl group shrink-0">
                     {showTrailer && selectedGame.trailerUrl ? (
                     <div className="relative w-full h-full">
                       <iframe src={`${selectedGame.trailerUrl}?autoplay=1`} className="w-full h-full border-0" allow="autoplay; encrypted-media" allowFullScreen />
@@ -5503,7 +5587,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             {t('dashboard:sidebar.steamClient')}
                           </span>
                         ) : (
-                          <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest", selectedGame.isInstalled ? "bg-blue-600" : "bg-red-600")}>
+                          <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest", selectedGame.isInstalled ? "bg-xl-primary-600" : "bg-xl-danger-600")}>
                             {selectedGame.isInstalled ? t('dashboard:sidebar.installed') : t('dashboard:sidebar.notInstalled')}
                           </span>
                         )}
@@ -5524,25 +5608,25 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                 {/* Info rapide */}
                 <div className="flex flex-wrap gap-3 items-center shrink-0">
-                  {selectedGame.rating && <span className="text-[10px] font-black uppercase text-green-500 tracking-widest italic">{t('dashboard:sidebar.rating', { pct: selectedGame.rating })}</span>}
-                  {selectedGame.hltbHours && <span className="text-[10px] font-black uppercase text-blue-400 tracking-widest italic border-l border-white/10 pl-3">{t('dashboard:sidebar.hltb', { hours: selectedGame.hltbHours.main })}</span>}
-                  <span className="text-[10px] font-black uppercase text-white/40 tracking-widest italic border-l border-white/10 pl-3">{translateStorePluginName(selectedGame.store, selectedGame.store)}</span>
-                  <span className="text-[10px] font-black uppercase text-white/40 tracking-widest italic border-l border-white/10 pl-3">{selectedGame.runner}</span>
+                  {selectedGame.rating && <span className="text-[10px] font-black uppercase text-xl-success-500 tracking-widest italic">{t('dashboard:sidebar.rating', { pct: selectedGame.rating })}</span>}
+                  {selectedGame.hltbHours && <span className="text-[10px] font-black uppercase text-xl-primary-400 tracking-widest italic border-l border-xl-ink/10 pl-3">{t('dashboard:sidebar.hltb', { hours: selectedGame.hltbHours.main })}</span>}
+                  <span className="text-[10px] font-black uppercase text-xl-ink/40 tracking-widest italic border-l border-xl-ink/10 pl-3">{translateStorePluginName(selectedGame.store, selectedGame.store)}</span>
+                  <span className="text-[10px] font-black uppercase text-xl-ink/40 tracking-widest italic border-l border-xl-ink/10 pl-3">{selectedGame.runner}</span>
                 </div>
 
                 {/* Generi e tag */}
                 <div className="flex flex-wrap gap-2 shrink-0">
                   {selectedGame.genres?.map(g => (
-                    <span key={g} className="px-3 py-1 bg-purple-500/10 border border-purple-500/20 rounded-full text-[10px] font-black uppercase tracking-widest text-purple-400">{g}</span>
+                    <span key={g} className="px-3 py-1 bg-xl-special-500/10 border border-xl-special-500/20 rounded-full text-[10px] font-black uppercase tracking-widest text-xl-special-400">{g}</span>
                   ))}
                   {selectedGame.tags.slice(0, 3).map(tag => (
-                    <span key={tag} className="px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-full text-[10px] font-black uppercase tracking-widest text-blue-400">{tag}</span>
+                    <span key={tag} className="px-3 py-1 bg-xl-primary-500/10 border border-xl-primary-500/20 rounded-full text-[10px] font-black uppercase tracking-widest text-xl-primary-400">{tag}</span>
                   ))}
                 </div>
 
                 {/* Ore di gioco — reali dal DB */}
-                <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/5 shrink-0">
-                  <Clock size={14} className="text-blue-400 shrink-0" />
+                <div className="flex items-center gap-3 p-4 rounded-xl bg-xl-ink/5 border border-xl-ink/5 shrink-0">
+                  <Clock size={14} className="text-xl-primary-400 shrink-0" />
                   <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{t('dashboard:sidebar.playtime')}</span>
                   <span className="ml-auto text-sm font-black italic">
                     {selectedGame.playTimeHours > 0
@@ -5560,8 +5644,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     mostrare sempre un "—" che implicherebbe un dato mancante
                     anziché "non applicabile a questo store". */}
                 {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games') && (
-                  <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/5 shrink-0">
-                    <HardDrive size={14} className="text-blue-400 shrink-0" />
+                  <div className="flex items-center gap-3 p-4 rounded-xl bg-xl-ink/5 border border-xl-ink/5 shrink-0">
+                    <HardDrive size={14} className="text-xl-primary-400 shrink-0" />
                     <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{t('dashboard:sidebar.predictedSize')}</span>
                     <span className="ml-auto text-sm font-black italic">
                       {predictedSizeLoading
@@ -5597,7 +5681,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div
                     ref={descriptionScrollRefCallback}
                     className={cn(
-                      "overflow-y-auto overflow-x-hidden custom-scrollbar p-4 bg-blue-500/5 border border-blue-500/10 rounded-xl",
+                      "overflow-y-auto overflow-x-hidden custom-scrollbar p-4 bg-xl-primary-500/5 border border-xl-primary-500/10 rounded-xl",
                       // v1.0.0 — fix definitivo, non più una soglia fissa
                       // per "console aperta/chiusa": flex-1 min-h-0 lascia
                       // che sia il browser a calcolare quanto spazio resta
@@ -5616,7 +5700,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     )}
                   >
                     <p className="text-xs opacity-70 leading-relaxed font-medium italic">
-                      {(selectedGame.id === 'ea-app-launcher' || selectedGame.id === 'ubisoft-connect-launcher')
+                      {(selectedGame.id === 'ea-app-launcher' || selectedGame.id === 'ubisoft-connect-launcher' || selectedGame.id === STEAM_BIG_PICTURE_ID)
                         ? translateLauncherGameDescription(selectedGame.id, selectedGame.description)
                         : selectedGame.description}
                     </p>
@@ -5632,7 +5716,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               // semplicemente che l'utente non ha ancora selezionato nulla,
               // quindi va mostrato il benvenuto, non "sta caricando".
               <div className="flex flex-col items-center justify-center h-full opacity-30 text-center px-6">
-                <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mb-4" />
+                <div className="w-8 h-8 border-2 border-xl-primary-400 border-t-transparent rounded-full animate-spin mb-4" />
                 <p className="text-sm font-black uppercase tracking-widest">{t('dashboard:sidebar.loadingLibrary')}</p>
               </div>
             ) : (
@@ -5644,8 +5728,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               // che la selezione torna genuinamente vuota (es. libreria
               // filtrata svuotata da una ricerca).
               <div className="flex flex-col items-center justify-center h-full text-center px-6">
-                <div className="w-16 h-16 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center mb-5">
-                  <Sparkles size={28} className="text-blue-400" />
+                <div className="w-16 h-16 rounded-2xl bg-xl-primary-500/10 border border-xl-primary-500/20 flex items-center justify-center mb-5">
+                  <Sparkles size={28} className="text-xl-primary-400" />
                 </div>
                 <p className="text-lg font-black italic uppercase tracking-tight mb-1">
                   {hostname ? t('dashboard:sidebar.welcomeBackNamed', { name: hostname }) : t('dashboard:sidebar.welcomeBack')}
@@ -5661,7 +5745,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     </span>
                     {games.some((g: any) => g.verified) && (
                       <span className="flex items-center gap-1.5">
-                        <CheckCircle2 size={12} className="text-green-400" />
+                        <CheckCircle2 size={12} className="text-xl-success-400" />
                         {t('dashboard:sidebar.verifiedCount', { count: games.filter((g: any) => g.verified).length })}
                       </span>
                     )}
@@ -5678,13 +5762,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: 260, opacity: 1 }}
                 exit={{ height: 0, opacity: 0 }}
-                className="mt-6 pt-6 border-t border-white/5 overflow-hidden shrink-0 flex flex-col"
+                className="mt-6 pt-6 border-t border-xl-ink/5 overflow-hidden shrink-0 flex flex-col"
               >
                 {/* Header toolbar */}
                 <div className="flex items-center gap-2 mb-2 px-1 flex-wrap">
                   {/* Titolo */}
-                  <Terminal size={12} className="text-blue-500 shrink-0" />
-                  <span className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.3em] font-mono italic shrink-0">
+                  <Terminal size={12} className="text-xl-primary-500 shrink-0" />
+                  <span className="text-[10px] font-bold text-xl-neutral-500 uppercase tracking-[0.3em] font-mono italic shrink-0">
                     Daemon Log
                   </span>
 
@@ -5701,8 +5785,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           className={cn(
                             "px-1.5 py-0.5 rounded text-[8px] font-black font-mono uppercase border transition-all",
                             active
-                              ? `${meta.color} ${meta.border} bg-white/5`
-                              : "text-gray-600 border-gray-700 hover:border-gray-500"
+                              ? `${meta.color} ${meta.border} bg-xl-ink/5`
+                              : "text-xl-neutral-600 border-xl-neutral-700 hover:border-xl-neutral-500"
                           )}
                         >
                           {meta.label}
@@ -5713,7 +5797,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       <button
                         onClick={() => setLogFilter(new Set())}
                         title="Rimuovi filtri"
-                        className="px-1.5 py-0.5 rounded text-[8px] font-black font-mono uppercase border text-gray-600 border-gray-700 hover:border-red-500 hover:text-red-400 transition-all"
+                        className="px-1.5 py-0.5 rounded text-[8px] font-black font-mono uppercase border text-xl-neutral-600 border-xl-neutral-700 hover:border-xl-danger-500 hover:text-xl-danger-400 transition-all"
                       >
                         ✕ ALL
                       </button>
@@ -5727,12 +5811,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div className="flex items-center gap-1 shrink-0">
                     <button
                       onClick={() => setPauseScroll(p => !p)}
-                      title={pauseScroll ? "Riprendi auto-scroll" : "Pausa auto-scroll"}
+                      title={pauseScroll ? t('dashboard:logPanel.resumeScroll') : t('dashboard:logPanel.pauseScroll')}
                       className={cn(
                         "flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border transition-all",
                         pauseScroll
-                          ? "text-yellow-400 border-yellow-500/50 bg-yellow-500/10"
-                          : "text-gray-600 border-gray-700 hover:border-gray-500 hover:text-gray-400"
+                          ? "text-xl-warning-400 border-xl-warning-500/50 bg-xl-warning-500/10"
+                          : "text-xl-neutral-600 border-xl-neutral-700 hover:border-xl-neutral-500 hover:text-xl-neutral-400"
                       )}
                     >
                       <Pause size={9} />
@@ -5740,15 +5824,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     </button>
                     <button
                       onClick={handleCopyLogs}
-                      title="Copia log negli appunti"
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border text-gray-600 border-gray-700 hover:border-gray-500 hover:text-gray-400 transition-all"
+                      title={t('dashboard:logPanel.copyLogs')}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border text-xl-neutral-600 border-xl-neutral-700 hover:border-xl-neutral-500 hover:text-xl-neutral-400 transition-all"
                     >
                       <Copy size={9} />
                     </button>
                     <button
                       onClick={handleDownloadLogs}
-                      title="Scarica log come file"
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border text-gray-600 border-gray-700 hover:border-blue-400 hover:text-blue-400 transition-all"
+                      title={t('dashboard:logPanel.downloadLogs')}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-mono border text-xl-neutral-600 border-xl-neutral-700 hover:border-xl-primary-400 hover:text-xl-primary-400 transition-all"
                     >
                       <FileDown size={9} />
                     </button>
@@ -5757,7 +5841,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   {/* Live indicator */}
                   <div className={cn(
                     "w-2 h-2 rounded-full shrink-0",
-                    pauseScroll ? "bg-yellow-500" : "bg-blue-500 animate-pulse"
+                    pauseScroll ? "bg-xl-warning-500" : "bg-xl-primary-500 animate-pulse"
                   )} />
                 </div>
 
@@ -5766,11 +5850,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   ref={logScrollRef}
                   className={cn(
                     "rounded-xl p-3 font-mono text-[9px] flex-1 border overflow-y-auto shadow-inner scroll-smooth",
-                    theme === 'dark' ? "bg-black/80 border-white/5" : "bg-white border-black/5"
+                    "bg-xl-well border-xl-well-border"
                   )}
                 >
                   {filteredLogs.length === 0 ? (
-                    <span className="text-gray-700 italic">Nessun log{logFilter.size > 0 ? ' per il filtro selezionato' : ''}.</span>
+                    <span className="text-xl-neutral-700 italic">{logFilter.size > 0 ? t('dashboard:logPanel.emptyFiltered') : t('dashboard:logPanel.empty')}</span>
                   ) : (
                     <div className="space-y-1">
                       {filteredLogs.map((log, i) => {
@@ -5792,10 +5876,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                 {/* Footer: conteggio */}
                 <div className="flex items-center justify-between px-1 mt-1">
-                  <span className="text-[8px] text-gray-700 font-mono">
-                    {filteredLogs.length} voci{logFilter.size > 0 ? ` · filtro attivo (${logFilter.size})` : ''}
+                  <span className="text-[8px] text-xl-neutral-700 font-mono">
+                    {t('dashboard:logPanel.entries', { count: filteredLogs.length })}{logFilter.size > 0 ? t('dashboard:logPanel.filterActive', { count: logFilter.size }) : ''}
                   </span>
-                  <span className="text-[8px] text-gray-700 font-mono">
+                  <span className="text-[8px] text-xl-neutral-700 font-mono">
                     {logs.length} totali
                   </span>
                 </div>
@@ -5812,21 +5896,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               exit={{ x: 400 }}
               className={cn(
                 "absolute top-0 right-0 bottom-0 w-96 z-50 p-10 flex flex-col shadow-2xl border-l",
-                theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
+                "bg-xl-modal border-xl-border"
               )}
             >
               <div className="flex items-center justify-between gap-4 mb-10">
                  {/* Step 19b (v1.1.45) — stesso fix del Quick Menu: vedi
                      commento esteso lì. */}
                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                   <Download size={20} className="text-blue-500 shrink-0" />
+                   <Download size={20} className="text-xl-primary-500 shrink-0" />
                    <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('downloads:title')}</h2>
                  </div>
                  <Focusable group="downloads" id="downloads-close" fallbackPriority={-1} onEnter={() => { setShowDownloads(false); setActiveGroup(null); setFocusedId('footer-downloads'); }}>
                    {(isFocused) => (
                      <div className={cn(
                        "w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0",
-                       isFocused && "scale-110 bg-red-600 border-red-600 text-white"
+                       isFocused && "scale-110 bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent"
                      )}>
                        <X size={16} />
                      </div>
@@ -5838,8 +5922,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                 {/* Dialog di conferma install/uninstall */}
                 {pendingAction && (
-                  <div className="p-5 rounded-2xl border-2 border-blue-500/40 bg-blue-500/5">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-blue-400 mb-2">
+                  <div className="p-5 rounded-2xl border-2 border-xl-primary-500/40 bg-xl-primary-500/5">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-xl-primary-400 mb-2">
                       {pendingAction.type === 'install' ? t('downloads:confirmInstall') : t('downloads:confirmUninstall')}
                     </p>
                     <p className="text-sm font-black italic uppercase tracking-tighter mb-5">
@@ -5966,8 +6050,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <button className={cn(
                             "flex-1 py-3 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all",
                             pendingAction.type === 'install'
-                              ? isFocused ? "bg-blue-500 text-white scale-105" : "bg-blue-600 hover:bg-blue-500 text-white"
-                              : isFocused ? "bg-red-500 text-white scale-105" : "bg-red-600 hover:bg-red-500 text-white"
+                              ? isFocused ? "bg-xl-primary-500 text-xl-on-accent scale-105" : "bg-xl-primary-600 hover:bg-xl-primary-500 text-xl-on-accent"
+                              : isFocused ? "bg-xl-danger-500 text-xl-on-accent scale-105" : "bg-xl-danger-600 hover:bg-xl-danger-500 text-xl-on-accent"
                           )}>
                             {pendingAction.type === 'install' ? t('downloads:installActionConfirm') : t('downloads:uninstallActionConfirm')}
                           </button>
@@ -5977,7 +6061,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         {(isFocused) => (
                           <button className={cn(
                             "flex-1 py-3 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all",
-                            isFocused ? "bg-white/25 scale-105" : "bg-white/10 hover:bg-white/20"
+                            isFocused ? "bg-xl-ink/25 scale-105" : "bg-xl-ink/10 hover:bg-xl-ink/20"
                           )}>{t('downloads:cancel')}</button>
                         )}
                       </Focusable>
@@ -5992,15 +6076,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   </div>
                 ) : (
                   downloads.filter((t: any) => !hiddenCompletedIds.has(t.gameId)).map(task => (
-                    <div key={task.gameId} className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                    <div key={task.gameId} className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                       <div className="flex justify-between items-start mb-4">
                         <div>
-                           <span className="text-[10px] font-black italic text-blue-500 uppercase tracking-widest block mb-1">
+                           <span className="text-[10px] font-black italic text-xl-primary-500 uppercase tracking-widest block mb-1">
                              {task.phaseLabel || (task.status === 'downloading' ? t('downloads:downloadInProgress') : task.status.toUpperCase())}
                            </span>
                            <h4 className="text-sm font-black italic uppercase tracking-tighter">{task.gameTitle}</h4>
                         </div>
-                        <span className="text-xs font-black italic text-blue-400">{task.speed}</span>
+                        <span className="text-xs font-black italic text-xl-primary-400">{task.speed}</span>
                       </div>
 
                       {/* Step 19d — link alla pagina ufficiale di download,
@@ -6024,15 +6108,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           {(isFocused) => (
                             <div className={cn(
                               "mb-3 px-3 py-2 rounded-lg text-[10px] font-bold text-center underline cursor-pointer transition-all",
-                              isFocused ? "bg-blue-500/30 text-blue-200" : "text-blue-400"
+                              isFocused ? "bg-xl-primary-500/30 text-xl-primary-200" : "text-xl-primary-400"
                             )}>{task.downloadUrl}</div>
                           )}
                         </Focusable>
                       )}
                       
-                      <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden mb-3">
+                      <div className="w-full h-1.5 bg-xl-shade/40 rounded-full overflow-hidden mb-3">
                         <motion.div 
-                          className="h-full bg-blue-500"
+                          className="h-full bg-xl-primary-500"
                           initial={{ width: 0 }}
                           animate={{ width: `${task.progress}%` }}
                         />
@@ -6066,7 +6150,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <button className={cn(
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
-                                    isFocused ? "bg-red-600 text-white" : "bg-red-600/60 text-white"
+                                    isFocused ? "bg-xl-danger-600 text-xl-on-accent" : "bg-xl-danger-600/60 text-xl-on-accent"
                                   )}>
                                     {t('downloads:confirm')}
                                   </button>
@@ -6080,7 +6164,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <button className={cn(
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
-                                    isFocused ? "bg-white/25 text-white" : "bg-white/10 opacity-60"
+                                    isFocused ? "bg-xl-ink/25 text-xl-ink" : "bg-xl-ink/10 opacity-60"
                                   )}>
                                     {t('downloads:back')}
                                   </button>
@@ -6122,7 +6206,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <button className={cn(
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
-                                    isFocused ? "bg-blue-600 text-white" : "bg-white/10 opacity-60"
+                                    isFocused ? "bg-xl-primary-600 text-xl-on-accent" : "bg-xl-ink/10 opacity-60"
                                   )}>
                                     {task.status === 'awaiting_installer'
                                       ? t('downloads:continue')
@@ -6158,7 +6242,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   {(isFocused) => (
                                     <button className={cn(
                                       "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
-                                      isFocused ? "bg-blue-600 text-white" : "bg-white/10 opacity-60"
+                                      isFocused ? "bg-xl-primary-600 text-xl-on-accent" : "bg-xl-ink/10 opacity-60"
                                     )}>{t('downloads:browse')}</button>
                                   )}
                                 </Focusable>
@@ -6178,7 +6262,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <button className={cn(
                                     "px-3 py-1 rounded-lg text-[9px] font-black uppercase italic transition-all",
-                                    isFocused ? "bg-red-600 text-white" : "bg-white/10 opacity-60"
+                                    isFocused ? "bg-xl-danger-600 text-xl-on-accent" : "bg-xl-ink/10 opacity-60"
                                   )}>
                                     {t('downloads:cancel')}
                                   </button>
@@ -6193,8 +6277,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 )}
               </div>
 
-              <div className="mt-10 p-6 rounded-2xl bg-blue-500/5 border border-blue-500/10 flex items-center gap-4">
-                <Activity size={20} className="text-blue-500 shrink-0" />
+              <div className="mt-10 p-6 rounded-2xl bg-xl-primary-500/5 border border-xl-primary-500/10 flex items-center gap-4">
+                <Activity size={20} className="text-xl-primary-500 shrink-0" />
                 <div className="flex flex-col">
                   <span className="text-[9px] font-black opacity-30 uppercase tracking-widest leading-none mb-1">{t('downloads:peerHashCache')}</span>
                   <span className="text-xs font-black italic">{t('downloads:checksumVerification')}</span>
@@ -6210,7 +6294,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
             id="gamepad-hint"
             className={cn(
               "absolute bottom-20 left-1/2 -translate-x-1/2 z-40 px-6 py-3 rounded-2xl",
-              "bg-black/80 text-white text-[10px] font-black uppercase tracking-widest",
+              "bg-xl-shade/80 text-xl-ink text-[10px] font-black uppercase tracking-widest",
               "transition-opacity duration-1000 pointer-events-none"
             )}
             style={{ opacity: 0, animation: 'fadeInOut 4s ease forwards' }}
@@ -6228,7 +6312,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               exit={{ x: 400 }}
               className={cn(
                 "absolute top-0 right-0 bottom-0 w-96 z-50 p-10 flex flex-col shadow-2xl border-l",
-                theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
+                "bg-xl-modal border-xl-border"
               )}
             >
               <div className="flex items-center justify-between gap-4 mb-2">
@@ -6244,17 +6328,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     sulla riga principale — molto più margine, e Pulisci
                     storico non compete mai più con nessuno. */}
                 <div className="flex items-center gap-3 min-w-0">
-                  {unreadCount > 0 ? <BellDot size={20} className="text-blue-400 shrink-0" /> : <Bell size={20} className="text-blue-400 shrink-0" />}
+                  {unreadCount > 0 ? <BellDot size={20} className="text-xl-primary-400 shrink-0" /> : <Bell size={20} className="text-xl-primary-400 shrink-0" />}
                   <h2 className="text-2xl font-black italic tracking-tighter uppercase truncate">{t('notifications:title')}</h2>
                   {unreadCount > 0 && (
-                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-blue-600 text-white shrink-0">{unreadCount}</span>
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-xl-primary-600 text-xl-on-accent shrink-0">{unreadCount}</span>
                   )}
                 </div>
                 <Focusable group="notifications" id="notifications-close" fallbackPriority={-1} onEnter={() => { setShowNotifications(false); setActiveGroup(null); setFocusedId('footer-notifications'); }}>
                   {(isFocused) => (
                     <div className={cn(
                       "w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0",
-                      isFocused && "scale-110 bg-red-600 border-red-600 text-white"
+                      isFocused && "scale-110 bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent"
                     )}><X size={16} /></div>
                   )}
                 </Focusable>
@@ -6266,7 +6350,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       <button
                         className={cn(
                           "text-[10px] font-black uppercase tracking-widest transition-opacity whitespace-nowrap",
-                          isFocused ? "opacity-100 text-red-400" : "opacity-30 hover:opacity-80"
+                          isFocused ? "opacity-100 text-xl-danger-400" : "opacity-30 hover:opacity-80"
                         )}
                       >{t('notifications:clearHistory')}</button>
                     )}
@@ -6283,18 +6367,18 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   notifications.map(notif => {
                     const isDone = notif.status === 'resolved' || notif.status === 'failed' || notif.status === 'dismissed';
                     const cfgMap: Record<string, { icon: React.ReactNode; accent: string; badge: string }> = {
-                      'info':          { icon: <Info size={14} />,          accent: 'border-blue-500/30 bg-blue-500/5',     badge: 'bg-blue-600' },
-                      'success':       { icon: <CheckCircle2 size={14} />,  accent: 'border-green-500/30 bg-green-500/5',   badge: 'bg-green-600' },
-                      'warning':       { icon: <AlertTriangle size={14} />, accent: 'border-yellow-500/30 bg-yellow-500/5', badge: 'bg-yellow-500' },
-                      'error':         { icon: <XCircle size={14} />,       accent: 'border-red-500/30 bg-red-500/5',       badge: 'bg-red-600' },
-                      'ai-suggestion': { icon: <Sparkles size={14} />,      accent: 'border-purple-500/30 bg-purple-500/5', badge: 'bg-purple-600' },
-                      'kb-suggestion': { icon: <BookOpen size={14} />,      accent: 'border-gray-500/30 bg-gray-500/5',     badge: 'bg-gray-600' },
+                      'info':          { icon: <Info size={14} />,          accent: 'border-xl-primary-500/30 bg-xl-primary-500/5',     badge: 'bg-xl-primary-600' },
+                      'success':       { icon: <CheckCircle2 size={14} />,  accent: 'border-xl-success-500/30 bg-xl-success-500/5',   badge: 'bg-xl-success-600' },
+                      'warning':       { icon: <AlertTriangle size={14} />, accent: 'border-xl-warning-500/30 bg-xl-warning-500/5', badge: 'bg-xl-warning-500' },
+                      'error':         { icon: <XCircle size={14} />,       accent: 'border-xl-danger-500/30 bg-xl-danger-500/5',       badge: 'bg-xl-danger-600' },
+                      'ai-suggestion': { icon: <Sparkles size={14} />,      accent: 'border-xl-special-500/30 bg-xl-special-500/5', badge: 'bg-xl-special-600' },
+                      'kb-suggestion': { icon: <BookOpen size={14} />,      accent: 'border-xl-neutral-500/30 bg-xl-neutral-500/5',     badge: 'bg-xl-neutral-600' },
                     };
                     const cfg = cfgMap[notif.type] ?? cfgMap['info'];
                     return (
                       <div key={notif.id} className={cn("rounded-2xl border p-4 transition-all", cfg.accent, isDone && "opacity-40")}>
                         <div className="flex items-start gap-3 mb-2">
-                          <div className={cn("mt-0.5 p-1.5 rounded-lg shrink-0 text-white", cfg.badge)}>{cfg.icon}</div>
+                          <div className={cn("mt-0.5 p-1.5 rounded-lg shrink-0 text-xl-on-accent", cfg.badge)}>{cfg.icon}</div>
                           <div className="flex-1 min-w-0">
                             <ScrollOnceTitle text={notif.title} className="text-sm font-black uppercase tracking-tight leading-tight" />
                             <p className={cn("text-[10px] font-mono mt-0.5", theme === 'dark' ? "opacity-30" : "text-gray-400")}>
@@ -6310,7 +6394,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               {(isFocused) => (
                                 <button className={cn(
                                   "shrink-0 rounded-full transition-all",
-                                  isFocused ? "opacity-100 bg-white/15 p-0.5" : "opacity-20"
+                                  isFocused ? "opacity-100 bg-xl-ink/15 p-0.5" : "opacity-20"
                                 )}><X size={12} /></button>
                               )}
                             </Focusable>
@@ -6339,7 +6423,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               )}
                             </Focusable>
                             {expandedNotifId === notif.id && (
-                              <pre className={cn("mt-2 p-3 rounded-xl text-[10px] font-mono leading-relaxed overflow-x-auto max-h-32", theme === 'dark' ? "bg-black/40 text-white/50" : "bg-gray-100 text-gray-600")}>{notif.rawLog}</pre>
+                              <pre className={cn("mt-2 p-3 rounded-xl text-[10px] font-mono leading-relaxed overflow-x-auto max-h-32", "bg-xl-inset-soft text-xl-fg-50")}>{notif.rawLog}</pre>
                             )}
                           </div>
                         )}
@@ -6358,7 +6442,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <div className={cn(
                                     "w-full mb-2 px-3 py-2 rounded-xl text-[10px] font-bold text-center underline transition-all cursor-pointer",
-                                    isFocused ? "bg-blue-500/30 text-blue-200" : "text-blue-300"
+                                    isFocused ? "bg-xl-primary-500/30 text-xl-primary-200" : "text-xl-primary-300"
                                   )}>{notif.linkLabel ?? notif.linkUrl}</div>
                                 )}
                               </Focusable>
@@ -6368,16 +6452,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <Focusable group="notifications" id={`notif-ok-${notif.id}`} onEnter={() => resolveNotification(notif.id, true)}>
                                   {(isFocused) => (
                                     <button className={cn(
-                                      "flex-1 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white text-center transition-all",
-                                      isFocused ? "bg-green-500 scale-[1.03]" : "bg-green-600"
+                                      "flex-1 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-xl-on-accent text-center transition-all",
+                                      isFocused ? "bg-xl-success-500 scale-[1.03]" : "bg-xl-success-600"
                                     )}>{t('notifications:itWorked')}</button>
                                   )}
                                 </Focusable>
                                 <Focusable group="notifications" id={`notif-ko-${notif.id}`} onEnter={() => resolveNotification(notif.id, false)}>
                                   {(isFocused) => (
                                     <button className={cn(
-                                      "flex-1 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white text-center transition-all",
-                                      isFocused ? "bg-red-600 scale-[1.03]" : "bg-red-700/60"
+                                      "flex-1 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-xl-on-accent text-center transition-all",
+                                      isFocused ? "bg-xl-danger-600 scale-[1.03]" : "bg-xl-danger-700/60"
                                     )}>{t('notifications:itDidNotWork')}</button>
                                   )}
                                 </Focusable>
@@ -6453,8 +6537,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   >
                                     {(isFocused) => (
                                       <button className={cn(
-                                        "flex-1 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-white text-center transition-all",
-                                        isFocused ? "bg-blue-500 scale-[1.03]" : "bg-blue-600"
+                                        "flex-1 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-xl-on-accent text-center transition-all",
+                                        isFocused ? "bg-xl-primary-500 scale-[1.03]" : "bg-xl-primary-600"
                                       )}>{primaryAction.label}</button>
                                     )}
                                   </Focusable>
@@ -6463,7 +6547,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   {(isFocused) => (
                                     <button className={cn(
                                       "flex-1 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-center transition-all",
-                                      isFocused ? "bg-white/25" : "bg-white/10"
+                                      isFocused ? "bg-xl-ink/25" : "bg-xl-ink/10"
                                     )}>{notif.secondaryAction?.label ?? t('notifications:close')}</button>
                                   )}
                                 </Focusable>
@@ -6472,7 +6556,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     {(isFocused) => (
                                       <button className={cn(
                                         "flex-1 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest text-center transition-all",
-                                        isFocused ? "bg-white/25" : "bg-white/10"
+                                        isFocused ? "bg-xl-ink/25" : "bg-xl-ink/10"
                                       )}>{notif.tertiaryAction!.label}</button>
                                     )}
                                   </Focusable>
@@ -6499,7 +6583,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               exit={{ x: -400 }}
               className={cn(
                 "absolute top-0 left-0 bottom-0 w-96 z-50 p-12 flex flex-col shadow-2xl border-r",
-                theme === 'dark' ? "bg-[#0b0c0f] border-white/10" : "bg-white border-gray-200"
+                "bg-xl-panel border-xl-border"
               )}
             >
               <div className="flex items-center justify-between gap-4 mb-16">
@@ -6527,8 +6611,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                      identici nella struttura meritano la stessa scala,
                      non tre scale diverse "giustificate" a parole. */}
                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                   <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
-                     <Settings size={16} className="text-white" />
+                   <div className="w-8 h-8 bg-xl-primary-600 rounded-lg flex items-center justify-center shrink-0">
+                     <Settings size={16} className="text-xl-on-accent" />
                    </div>
                    <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('quickMenu:title')}</h2>
                  </div>
@@ -6536,7 +6620,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                    {(isFocused) => (
                      <div className={cn(
                        "w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0",
-                       isFocused && "scale-110 bg-red-600 border-red-600 text-white"
+                       isFocused && "scale-110 bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent"
                      )}>
                        <X size={16} />
                      </div>
@@ -6559,9 +6643,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     altro Focusable referenzia "opt-gamescope" come vicino
                     esplicito altrove. */}
                 {isGamescope && (
-                  <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label={t('quickMenu:gamescopeMode')} value={pendingGamescopeResolution ?? (gamescopeResolution ?? t('quickMenu:on'))} iconClassName="text-green-500" onClick={handleGamescopeCycle} />
+                  <OptionItem group="quick-menu" id="opt-gamescope" icon={LayoutGrid} label={t('quickMenu:gamescopeMode')} value={pendingGamescopeResolution ?? (gamescopeResolution ?? t('quickMenu:on'))} iconClassName="text-xl-success-500" onClick={handleGamescopeCycle} />
                 )}
-                <OptionItem group="quick-menu" id="opt-theme" icon={theme === 'dark' ? Sun : Moon} label={t('quickMenu:toggleTheme')} value={theme} onClick={toggleTheme} />
+                {/* v3.1.7-dev.8 — nome del tema nella lingua della Dashboard (campo "name" di themes/<id>.json),
+                    prima si vedeva l'id ("dark"/"light") in qualunque lingua. */}
+                <OptionItem group="quick-menu" id="opt-theme" icon={theme === 'dark' ? Sun : Moon} label={t('quickMenu:toggleTheme')} value={themeDisplayName(themeId, i18n.language)} onClick={toggleTheme} />
                 {dedicatedSession ? (
                   <OptionItem group="quick-menu" id="opt-fs" icon={Maximize2} label={t('quickMenu:consoleMode')} value={t('quickMenu:backToDesktop')} onClick={switchToDesktop} />
                 ) : (
@@ -6589,24 +6675,28 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               <div className="mt-auto opacity-30 italic text-[10px] font-bold tracking-[0.4em] uppercase">
                  X-Launcher Core {appVersion}
               </div>
+              {/* v3.2.0-Mars — riga dei crediti sotto il numero di versione, nella lingua della Dashboard. */}
+              <div className="opacity-30 italic text-[9px] font-medium tracking-wide mt-1">
+                 {t('quickMenu:credits')}
+              </div>
               {/* v2.2.17-dev.3 — spostato qui sotto il numero di versione su
                   richiesta dell'utente (prima badge fisso in basso a destra,
                   slegato dal resto del menu). Stesso scopo: sapere da dove
                   si sta leggendo senza dover guardare il terminale. */}
               {isLocalDevServer && (
-                <div className="text-center text-[9px] font-black uppercase tracking-widest text-red-500">
-                  Server locale · :{window.location.port || '80'}
+                <div className="text-center text-[9px] font-black uppercase tracking-widest text-xl-danger-500">
+                  {t('quickMenu:localServerBadge', { port: window.location.port || '80' })}
                 </div>
               )}
               {/* v2.6.7-dev.2 — badge "Modalità spazi" (kiosk-launch.sh --spaces-mode):
                   stessa posizione e stile del badge "Server locale", per sapere
                   a colpo d'occhio se la modalità è attiva (e in che spazio si è)
                   senza leggere i log. */}
-              {isSpacesMode && (
-                <div className="text-center text-[9px] font-black uppercase tracking-widest text-sky-400">
-                  Modalità spazi · {spacesView?.active
-                    ? `spazio ${spacesView.current} · giochi ${spacesView.gameSpaces}`
-                    : 'gestore non raggiungibile'}
+              {isSpacesMode && showSpacesBadge && (
+                <div className="text-center text-[9px] font-black uppercase tracking-widest text-xl-info-400">
+                  {spacesView?.active
+                    ? t('quickMenu:spacesBadge', { space: spacesView.current, games: spacesView.gameSpaces })
+                    : t('quickMenu:spacesBadgeUnreachable')}
                 </div>
               )}
               {/* v2.5.0-Mercury — countdown prima del riavvio di gamescope
@@ -6614,7 +6704,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   stesso posto/stile del badge "Server locale": è dove
                   l'utente già guarda per capire lo stato della sessione. */}
               {gamescopeCountdown !== null && (
-                <div className="text-center text-[9px] font-black uppercase tracking-widest text-red-500">
+                <div className="text-center text-[9px] font-black uppercase tracking-widest text-xl-danger-500">
                   {t('quickMenu:gamescopeApplyCountdown', { seconds: gamescopeCountdown })}
                 </div>
               )}
@@ -6630,7 +6720,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
-            className={cn("absolute inset-0 z-[100] backdrop-blur-3xl flex items-center justify-center p-20", theme === 'dark' ? "bg-black/95" : "bg-white/80")}
+            className={cn("absolute inset-0 z-[100] backdrop-blur-3xl flex items-center justify-center p-20", "bg-xl-scrim")}
           >
             <div className={cn(
               // v1.1.7 — stesso bug strutturale già risolto in v1.1.5
@@ -6644,11 +6734,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               // risolve contro il contenitore reale, corretto a qualunque
               // risoluzione.
               "w-full max-w-5xl rounded-3xl overflow-hidden flex flex-col shadow-2xl h-[80%]",
-              theme === 'dark' ? "bg-[#12141a] border border-white/10" : "bg-white border border-gray-200"
+              "border bg-xl-modal border-xl-border"
             )}>
-              <div className={cn("p-10 border-b flex justify-between items-center", theme === 'dark' ? "border-white/5" : "border-gray-200")}>
+              <div className={cn("p-10 border-b flex justify-between items-center", "border-xl-border-subtle")}>
                 <div className="flex items-center gap-6">
-                  <div className={cn("flex p-1 rounded-2xl", theme === 'dark' ? "bg-white/5" : "bg-gray-100")}>
+                  <div className={cn("flex p-1 rounded-2xl", "bg-xl-fill-5")}>
                     <Focusable group="settings-tabs" id="settings-tab-accounts" onEnter={() => {
                       setActiveSettingsTab('accounts');
                       const target = getFirstFocusableForSettingsTabRef.current('accounts');
@@ -6657,7 +6747,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {(isFocused) => (
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
-                          activeSettingsTab === 'accounts' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                          activeSettingsTab === 'accounts' ? "bg-xl-primary-600 text-xl-on-accent shadow-lg" : isFocused ? "opacity-100 bg-xl-ink/10" : "opacity-40 hover:opacity-100"
                         )}>{t('tabs.accounts')}</button>
                       )}
                     </Focusable>
@@ -6669,7 +6759,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {(isFocused) => (
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
-                          activeSettingsTab === 'engine' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                          activeSettingsTab === 'engine' ? "bg-xl-primary-600 text-xl-on-accent shadow-lg" : isFocused ? "opacity-100 bg-xl-ink/10" : "opacity-40 hover:opacity-100"
                         )}>{t('tabs.system')}</button>
                       )}
                     </Focusable>
@@ -6681,7 +6771,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {(isFocused) => (
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
-                          activeSettingsTab === 'plugins' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                          activeSettingsTab === 'plugins' ? "bg-xl-primary-600 text-xl-on-accent shadow-lg" : isFocused ? "opacity-100 bg-xl-ink/10" : "opacity-40 hover:opacity-100"
                         )}>{t('tabs.plugins')}</button>
                       )}
                     </Focusable>
@@ -6693,7 +6783,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {(isFocused) => (
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
-                          activeSettingsTab === 'input' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                          activeSettingsTab === 'input' ? "bg-xl-primary-600 text-xl-on-accent shadow-lg" : isFocused ? "opacity-100 bg-xl-ink/10" : "opacity-40 hover:opacity-100"
                         )}>{t('tabs.input')}</button>
                       )}
                     </Focusable>
@@ -6711,7 +6801,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         {(isFocused) => (
                           <button className={cn(
                             "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
-                            activeSettingsTab === 'ai-models' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                            activeSettingsTab === 'ai-models' ? "bg-xl-primary-600 text-xl-on-accent shadow-lg" : isFocused ? "opacity-100 bg-xl-ink/10" : "opacity-40 hover:opacity-100"
                           )}>{t('tabs.aiAdvisor')}</button>
                         )}
                       </Focusable>
@@ -6730,7 +6820,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {(isFocused) => (
                         <button className={cn(
                           "px-8 py-3 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
-                          activeSettingsTab === 'hardware' ? "bg-blue-600 text-white shadow-lg" : isFocused ? "opacity-100 bg-white/10" : "opacity-40 hover:opacity-100"
+                          activeSettingsTab === 'hardware' ? "bg-xl-primary-600 text-xl-on-accent shadow-lg" : isFocused ? "opacity-100 bg-xl-ink/10" : "opacity-40 hover:opacity-100"
                         )}>{t('tabs.hardware')}</button>
                       )}
                     </Focusable>
@@ -6778,7 +6868,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   {(isFocused) => (
                     <button className={cn(
                       "w-12 h-12 rounded-full flex items-center justify-center transition-all",
-                      isFocused ? "bg-red-600 text-white scale-110" : theme === 'dark' ? "bg-white/5" : "bg-gray-100"
+                      isFocused ? "bg-xl-danger-600 text-xl-on-accent scale-110" : "bg-xl-fill-5"
                     )}>
                       <X size={24} />
                     </button>
@@ -6874,14 +6964,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <div key={store.id} className={cn(
                           "p-8 rounded-3xl border flex flex-col transition-all",
                           isRowFocused
-                            ? "ring-2 ring-blue-400 border-blue-400 scale-[1.005]"
+                            ? "ring-2 ring-xl-primary-400 border-xl-primary-400 scale-[1.005]"
                             : store.isConnected
-                              ? "bg-green-500/5 border-green-500/20"
+                              ? "bg-xl-success-500/5 border-xl-success-500/20"
                               : isWaiting
-                                ? "bg-blue-500/5 border-blue-500/30"
-                                : theme === 'dark'
-                                  ? "bg-white/5 border-white/5 hover:bg-white/[0.07]"
-                                  : "bg-gray-50 border-gray-200 hover:bg-gray-100"
+                                ? "bg-xl-primary-500/5 border-xl-primary-500/30"
+                                : "bg-xl-box border-xl-border-subtle hover:bg-xl-hover-fill"
                         )}>
                           {/* Header */}
                           <div className="flex justify-between items-start mb-6">
@@ -6901,9 +6989,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 // restringimento, indipendentemente da quanto sia lunga la
                                 // label del fratello.
                                 "w-12 h-12 shrink-0 rounded-2xl flex items-center justify-center shadow-2xl",
-                                store.isConnected ? "bg-green-600 shadow-green-500/20"
-                                  : isWaiting    ? "bg-blue-600 shadow-blue-500/20"
-                                  : theme === 'dark' ? "bg-white/10" : "bg-gray-200"
+                                store.isConnected ? "bg-xl-success-600 shadow-xl-success-500/20"
+                                  : isWaiting    ? "bg-xl-primary-600 shadow-xl-primary-500/20"
+                                  : "bg-xl-fill-10"
                               )}>
                                 <Gamepad2 size={20} className="shrink-0" />
                               </div>
@@ -6911,9 +6999,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <h4 className="text-lg font-black italic uppercase tracking-tighter">{translateStorePluginName(store.id, store.name)}</h4>
                                 <span className={cn(
                                   "text-[10px] font-black uppercase tracking-widest italic",
-                                  store.isConnected ? "text-green-400"
-                                    : isWaiting    ? "text-blue-400"
-                                    : "text-red-400"
+                                  store.isConnected ? "text-xl-success-400"
+                                    : isWaiting    ? "text-xl-primary-400"
+                                    : "text-xl-danger-400"
                                 )}>
                                   {store.isConnected ? t('accounts.sessionActive', { synced: syncedCount, installed: installedCount })
                                     : isWaiting    ? t('accounts.waitingBrowser')
@@ -6922,7 +7010,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               </div>
                             </div>
                             {store.isConnected && (
-                              <div className="px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full text-[9px] font-black text-green-400 uppercase tracking-widest italic">
+                              <div className="px-3 py-1 bg-xl-success-500/10 border border-xl-success-500/20 rounded-full text-[9px] font-black text-xl-success-400 uppercase tracking-widest italic">
                                 {t('accounts.synced')}
                               </div>
                             )}
@@ -6930,9 +7018,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                           {/* Spinner polling */}
                           {isWaiting && (
-                            <div className="flex items-center gap-3 mb-4 px-3 py-3 bg-blue-500/10 rounded-xl border border-blue-500/20">
-                              <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                              <span className="text-[10px] text-blue-300 font-mono">{t('accounts.waitingTerminal')}</span>
+                            <div className="flex items-center gap-3 mb-4 px-3 py-3 bg-xl-primary-500/10 rounded-xl border border-xl-primary-500/20">
+                              <div className="w-4 h-4 border-2 border-xl-primary-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                              <span className="text-[10px] text-xl-primary-300 font-mono">{t('accounts.waitingTerminal')}</span>
                             </div>
                           )}
 
@@ -6940,9 +7028,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           {msg && (
                             <p className={cn(
                               "text-[10px] mb-4 font-mono leading-relaxed px-1",
-                              msg.startsWith('✅') ? "text-green-400"
-                                : msg.startsWith('❌') || msg.startsWith('⏱') ? "text-red-400"
-                                : "text-white/60"
+                              msg.startsWith('✅') ? "text-xl-success-400"
+                                : msg.startsWith('❌') || msg.startsWith('⏱') ? "text-xl-danger-400"
+                                : "text-xl-ink/60"
                             )}>
                               {msg}
                             </p>
@@ -6951,12 +7039,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           {/* Action button */}
                           <div className="mt-auto">
                             {noLogin ? (
-                              <div className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center opacity-40 cursor-default", theme === 'dark' ? "bg-white/5" : "bg-gray-100")}>
+                              <div className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center opacity-40 cursor-default", "bg-xl-fill-5")}>
                                 {t('accounts.noLoginRequired')}
                               </div>
                             ) : store.isConnected ? (
                               noLogout ? (
-                                <div className="w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center bg-green-500/10 text-green-400 border border-green-500/20">
+                                <div className="w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] text-center bg-xl-success-500/10 text-xl-success-400 border border-xl-success-500/20">
                                   {t('accounts.linkedAccount')}
                                 </div>
                               ) : (
@@ -6980,10 +7068,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     <button className={cn(
                                       "w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all border",
                                       pendingUnlink === store.id
-                                        ? "bg-red-600 text-white border-red-600 animate-pulse"
+                                        ? "bg-xl-danger-600 text-xl-on-accent border-xl-danger-600 animate-pulse"
                                         : isFocused
-                                          ? "bg-green-500/20 text-green-300 border-green-400"
-                                          : "bg-green-500/10 text-green-400 border-green-500/20"
+                                          ? "bg-xl-success-500/20 text-xl-success-300 border-xl-success-400"
+                                          : "bg-xl-success-500/10 text-xl-success-400 border-xl-success-500/20"
                                     )}>
                                       {pendingUnlink === store.id ? t('accounts.confirmDisconnect') : t('accounts.linkedAccount')}
                                     </button>
@@ -6994,7 +7082,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               <Focusable group="settings" id={`store-cancel-${store.id}`} neighbors={{ down: storeDownNeighbor }} onEnter={() => { setAuthPolling(null); setAuthMessage(prev => ({ ...prev, [store.id]: '' })); }}>
                                 {(isFocused) => (
                                   <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
-                                    isFocused ? "bg-red-600 text-white" : theme === 'dark' ? "bg-white/5" : "bg-gray-100 text-gray-800"
+                                    isFocused ? "bg-xl-danger-600 text-xl-on-accent" : "bg-xl-fill-5 text-xl-button-text"
                                   )}>{t('accounts.cancel')}</button>
                                 )}
                               </Focusable>
@@ -7002,7 +7090,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               <Focusable group="settings" id={`store-connect-${store.id}`} neighbors={{ down: storeDownNeighbor }} onEnter={() => handleLogin(store.id)}>
                                 {(isFocused) => (
                                   <button className={cn("w-full py-3 rounded-xl text-xs font-black uppercase italic tracking-[0.2em] transition-all",
-                                    isFocused ? "bg-blue-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                    isFocused ? "bg-xl-primary-600 text-xl-on-accent" : "bg-xl-button text-xl-button-text"
                                   )}>{t('accounts.connectStore')}</button>
                                 )}
                               </Focusable>
@@ -7026,11 +7114,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         return (
                           <div key={id} className={cn(
                             "rounded-xl p-4 transition-all",
-                            p.enabled ? "ring-1 ring-purple-400/50" : "",
-                            theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                            p.enabled ? "ring-1 ring-xl-special-400/50" : "",
+                            "border bg-xl-box border-xl-border-subtle"
                           )}>
                             <div className="flex items-center gap-3 mb-1">
-                              <Cloud size={14} className="text-purple-400 shrink-0" />
+                              <Cloud size={14} className="text-xl-special-400 shrink-0" />
                               <span className="text-xs font-black uppercase tracking-tighter flex-1">{p.name}</span>
                               <Focusable
                                 group="settings"
@@ -7057,18 +7145,18 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     // in entrambi gli stati.
                                     p.enabled
                                       ? isFocused
-                                        ? "bg-purple-600 border-purple-300 text-white ring-2 ring-purple-300 ring-offset-1 ring-offset-transparent"
-                                        : "bg-purple-600 border-purple-600 text-white"
+                                        ? "bg-xl-special-600 border-xl-special-300 text-xl-on-accent ring-2 ring-xl-special-300 ring-offset-1 ring-offset-transparent"
+                                        : "bg-xl-special-600 border-xl-special-600 text-xl-on-accent"
                                       : isFocused
-                                        ? "bg-purple-500/20 border-purple-400 text-purple-300"
-                                        : "bg-white/5 border-white/10 opacity-60"
+                                        ? "bg-xl-special-500/20 border-xl-special-400 text-xl-special-300"
+                                        : "bg-xl-ink/5 border-xl-ink/10 opacity-60"
                                   )}>
                                     {p.enabled ? t('aiAdvisor.active') : t('aiAdvisor.inactive')}
                                   </button>
                                 )}
                               </Focusable>
                             </div>
-                            <p className={cn("text-[9px] font-mono leading-relaxed mb-3", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{translateCloudBackupDescription(id, p.description)}</p>
+                            <p className={cn("text-[9px] font-mono leading-relaxed mb-3", "text-xl-fg-30")}>{translateCloudBackupDescription(id, p.description)}</p>
 
                             {p.enabled && (
                               <div className="space-y-2 mb-3">
@@ -7097,8 +7185,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         placeholder={t('accounts.notConfigured')}
                                         className={cn(
                                           "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
-                                          theme === 'dark' ? "bg-black/40" : "bg-white",
-                                          isFocused ? "border-2 border-purple-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                          "bg-xl-inset",
+                                          isFocused ? "border-2 border-xl-special-500" : "border border-xl-control-border"
                                         )}
                                       />
                                     )}
@@ -7142,8 +7230,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         placeholder={t('accounts.notConfigured')}
                                         className={cn(
                                           "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
-                                          theme === 'dark' ? "bg-black/40" : "bg-white",
-                                          isFocused ? "border-2 border-purple-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                          "bg-xl-inset",
+                                          isFocused ? "border-2 border-xl-special-500" : "border border-xl-control-border"
                                         )}
                                       />
                                     )}
@@ -7157,7 +7245,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {(isFocused) => (
                                   <button className={cn(
                                     "w-full py-2.5 rounded-xl text-[10px] font-black uppercase italic tracking-[0.2em] transition-all",
-                                    isFocused ? "bg-purple-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                    isFocused ? "bg-xl-special-600 text-xl-on-accent" : "bg-xl-button text-xl-button-text"
                                   )}>
                                     {p.connecting ? t('accounts.waitingBrowser') : t('accounts.connectStore')}
                                   </button>
@@ -7167,7 +7255,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
 
                             {p.authenticated && (
                               <div className="space-y-2">
-                                <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                                <p className={cn("text-[9px] font-mono", "text-xl-fg-30")}>
                                   {p.lastBackupAt
                                     ? t('accounts.lastBackup', { date: new Date(p.lastBackupAt).toLocaleString(i18n.language) })
                                     : t('accounts.noBackupYet')}
@@ -7184,7 +7272,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     {(isFocused) => (
                                       <button className={cn(
                                         "flex-1 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase italic tracking-[0.2em] text-center transition-all",
-                                        isFocused ? "bg-purple-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                        isFocused ? "bg-xl-special-600 text-xl-on-accent" : "bg-xl-button text-xl-button-text"
                                       )}>
                                         {p.actionRunning === 'backup' ? t('accounts.backupRunning') : t('accounts.backupNow')}
                                       </button>
@@ -7201,7 +7289,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     {(isFocused) => (
                                       <button className={cn(
                                         "flex-1 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase italic tracking-[0.2em] text-center transition-all",
-                                        isFocused ? "bg-orange-600 text-white" : theme === 'dark' ? "bg-white/10" : "bg-gray-100 text-gray-800"
+                                        isFocused ? "bg-xl-caution-600 text-xl-on-accent" : "bg-xl-button text-xl-button-text"
                                       )}>
                                         {p.actionRunning === 'restore' ? t('accounts.restoreRunning') : t('accounts.restoreNow')}
                                       </button>
@@ -7212,7 +7300,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   {(isFocused) => (
                                     <button className={cn(
                                       "w-full py-2 rounded-xl text-[9px] font-black uppercase italic tracking-[0.2em] transition-all",
-                                      isFocused ? "bg-red-600/20 text-red-400" : "opacity-40"
+                                      isFocused ? "bg-xl-danger-600/20 text-xl-danger-400" : "opacity-40"
                                     )}>
                                       {t('accounts.disconnect')}
                                     </button>
@@ -7222,7 +7310,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             )}
 
                             {p.actionStatus && (
-                              <p className={cn("text-[9px] font-mono mt-2", p.actionStatus.success ? "text-green-400" : "text-red-400")}>
+                              <p className={cn("text-[9px] font-mono mt-2", p.actionStatus.success ? "text-xl-success-400" : "text-xl-danger-400")}>
                                 {p.actionStatus.success ? '✓ ' : '✗ '}{p.actionStatus.message}
                               </p>
                             )}
@@ -7289,13 +7377,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         {(isFocused) => (
                           <div className={cn(
                             "flex p-1 rounded-2xl w-fit transition-all",
-                            isFocused ? "ring-2 ring-blue-400" : "",
-                            theme === 'dark' ? "bg-white/5" : "bg-gray-100"
+                            isFocused ? "ring-2 ring-xl-primary-400" : "",
+                            "bg-xl-fill-5"
                           )}>
                             {(['it', 'en'] as const).map(lng => (
                               <div key={lng} className={cn(
                                 "px-6 py-2 rounded-xl text-xs font-black uppercase italic tracking-widest transition-all",
-                                i18n.language === lng ? "bg-blue-600 text-white shadow-lg" : "opacity-40"
+                                i18n.language === lng ? "bg-xl-primary-600 text-xl-on-accent shadow-lg" : "opacity-40"
                               )}>{t(`language.${lng}`)}</div>
                             ))}
                           </div>
@@ -7333,13 +7421,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           return (
                             <div key={r.id} className={cn(
                               "rounded-xl overflow-hidden transition-all",
-                              isRowFocused ? "ring-2 ring-blue-400" : "",
-                              theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                              isRowFocused ? "ring-2 ring-xl-primary-400" : "",
+                              "border bg-xl-box border-xl-border-subtle"
                             )}>
                               <div className="flex items-center gap-3 px-4 py-3">
-                                <Cpu size={14} className="text-blue-400 shrink-0" />
+                                <Cpu size={14} className="text-xl-primary-400 shrink-0" />
                                 <span className="text-xs font-black uppercase tracking-tighter flex-1">{r.id}</span>
-                                <span className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{r.version}</span>
+                                <span className={cn("text-[9px] font-mono", "text-xl-fg-30")}>{r.version}</span>
                                 <Focusable
                                   group="settings"
                                   id={`runner-uninstall-${r.id}`}
@@ -7364,17 +7452,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       className={cn(
                                         "relative overflow-hidden px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border min-w-[84px] text-center transition-all",
                                         isUninstalling
-                                          ? "border-red-500/30 text-white/80"
+                                          ? "border-xl-danger-500/30 text-xl-ink/80"
                                           : isPendingConfirm
-                                            ? "bg-red-600 border-red-600 text-white animate-pulse"
+                                            ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent animate-pulse"
                                             : isFocused
-                                              ? "bg-green-500/20 border-green-400 text-green-300"
-                                              : "bg-green-500/10 border-green-500/20 text-green-400"
+                                              ? "bg-xl-success-500/20 border-xl-success-400 text-xl-success-300"
+                                              : "bg-xl-success-500/10 border-xl-success-500/20 text-xl-success-400"
                                       )}
                                     >
                                       {/* Barra indeterminata, riempie da dx verso sx durante la disinstallazione */}
                                       {isUninstalling && (
-                                        <span className="absolute inset-y-0 bg-red-500/40 animate-[runnerProgressRtl_1.2s_ease-in-out_infinite]" />
+                                        <span className="absolute inset-y-0 bg-xl-danger-500/40 animate-[runnerProgressRtl_1.2s_ease-in-out_infinite]" />
                                       )}
                                       <span className="relative z-10">
                                         {isUninstalling ? t('system.removing') : isPendingConfirm ? t('system.confirmA') : t('system.installedBadge')}
@@ -7386,7 +7474,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               {uninstallLog && uninstallLog.length > 0 && (
                                 <div className="px-4 pb-3 space-y-0.5">
                                   {uninstallLog.map((line, i) => (
-                                    <p key={i} className={cn("text-[9px] font-mono leading-relaxed", theme === 'dark' ? "text-white/40" : "text-gray-500")}>{line}</p>
+                                    <p key={i} className={cn("text-[9px] font-mono leading-relaxed", "text-xl-fg-40")}>{line}</p>
                                   ))}
                                 </div>
                               )}
@@ -7426,7 +7514,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 // semplice a riposo, pillola rossa SOLO
                                 // quando isFocused (selezione volontaria).
                                 "text-[9px] font-black uppercase tracking-widest transition-all px-2 py-1 rounded-lg",
-                                isFocused ? "bg-red-600/20 text-red-400" : "text-blue-400/70"
+                                isFocused ? "bg-xl-danger-600/20 text-xl-danger-400" : "text-xl-primary-400/70"
                               )}
                             >
                               {t('system.refresh')}
@@ -7440,59 +7528,59 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         const hasProtonup = !!systemTools['protonup'];
                         const hasLutris   = !!systemTools['lutris'];
                         if (hasProtonup && hasLutris) return (
-                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-green-500/5 border border-green-500/20">
-                            <div className="w-2 h-2 rounded-full bg-green-500 shrink-0" />
+                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-xl-success-500/5 border border-xl-success-500/20">
+                            <div className="w-2 h-2 rounded-full bg-xl-success-500 shrink-0" />
                             <div>
-                              <p className="text-[10px] font-black text-green-400">{t('system.protonupLutris.title')}</p>
-                              <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                {t('system.protonupLutris.prefix')}<span className={cn(theme === 'dark' ? "text-white/60" : "text-gray-600")}>protonup</span>{t('system.protonupLutris.suffix')}
+                              <p className="text-[10px] font-black text-xl-success-400">{t('system.protonupLutris.title')}</p>
+                              <p className={cn("text-[9px] font-mono mt-0.5", "text-xl-fg-40")}>
+                                {t('system.protonupLutris.prefix')}<span className={cn("text-xl-fg-60")}>protonup</span>{t('system.protonupLutris.suffix')}
                               </p>
                             </div>
                           </div>
                         );
                         if (hasProtonup) return (
-                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
-                            <div className="w-2 h-2 rounded-full bg-blue-400 shrink-0" />
+                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-xl-primary-500/5 border border-xl-primary-500/20">
+                            <div className="w-2 h-2 rounded-full bg-xl-primary-400 shrink-0" />
                             <div>
-                              <p className={cn("text-[10px] font-black", theme === 'dark' ? "text-blue-300" : "text-blue-600")}>{t('system.protonupOnly.title')}</p>
-                              <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                {t('system.protonupOnly.prefix')}<span className="text-white/60">protonup</span>{t('system.protonupOnly.middle')}
-                                <code className="text-yellow-400/80">yay -S lutris</code>{t('system.protonupOnly.suffix')}
+                              <p className={cn("text-[10px] font-black", "text-xl-accent-text-soft")}>{t('system.protonupOnly.title')}</p>
+                              <p className={cn("text-[9px] font-mono mt-0.5", "text-xl-fg-40")}>
+                                {t('system.protonupOnly.prefix')}<span className="text-xl-ink/60">protonup</span>{t('system.protonupOnly.middle')}
+                                <code className="text-xl-warning-400/80">yay -S lutris</code>{t('system.protonupOnly.suffix')}
                               </p>
                             </div>
                           </div>
                         );
                         if (hasLutris) return (
-                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-blue-500/5 border border-blue-500/20">
-                            <div className="w-2 h-2 rounded-full bg-blue-400 shrink-0" />
+                          <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl bg-xl-primary-500/5 border border-xl-primary-500/20">
+                            <div className="w-2 h-2 rounded-full bg-xl-primary-400 shrink-0" />
                             <div>
-                              <p className="text-[10px] font-black text-blue-300">{t('system.lutrisOnly.title')}</p>
-                              <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
-                                {t('system.lutrisOnly.prefix')}<code className="text-yellow-400/80">yay -S protonup-qt</code>{t('system.lutrisOnly.suffix')}
+                              <p className="text-[10px] font-black text-xl-primary-300">{t('system.lutrisOnly.title')}</p>
+                              <p className={cn("text-[9px] font-mono mt-0.5", "text-xl-fg-40")}>
+                                {t('system.lutrisOnly.prefix')}<code className="text-xl-warning-400/80">yay -S protonup-qt</code>{t('system.lutrisOnly.suffix')}
                               </p>
                             </div>
                           </div>
                         );
                         // nessuno dei due
                         return (
-                          <div className="flex gap-3 mb-4 px-4 py-3 rounded-xl bg-yellow-500/5 border border-yellow-500/30">
-                            <div className="w-2 h-2 rounded-full bg-yellow-400 shrink-0 mt-1" />
+                          <div className="flex gap-3 mb-4 px-4 py-3 rounded-xl bg-xl-warning-500/5 border border-xl-warning-500/30">
+                            <div className="w-2 h-2 rounded-full bg-xl-warning-400 shrink-0 mt-1" />
                             <div className="space-y-2">
-                              <p className="text-[10px] font-black text-yellow-300">
+                              <p className="text-[10px] font-black text-xl-warning-300">
                                 {t('system.neitherFound.title')}
                               </p>
-                              <p className={cn("text-[9px] font-mono leading-relaxed", theme === 'dark' ? "text-white/50" : "text-gray-600")}>
+                              <p className={cn("text-[9px] font-mono leading-relaxed", "text-xl-fg-50")}>
                                 {t('system.neitherFound.desc')}
                               </p>
                               <div className="flex flex-col gap-1 mt-1">
                                 <div className="flex items-center gap-2">
-                                  <span className={cn("text-[8px] uppercase font-black w-16", theme === 'dark' ? "text-white/30" : "text-gray-500")}>ProtonUp</span>
-                                  <code className="text-[9px] font-mono text-green-400/80 bg-black/30 px-2 py-0.5 rounded">yay -S protonup-qt</code>
-                                  <span className="text-[8px] text-white/25 italic">{t('system.neitherFound.recommended')}</span>
+                                  <span className={cn("text-[8px] uppercase font-black w-16", "text-xl-fg-30")}>ProtonUp</span>
+                                  <code className="text-[9px] font-mono text-xl-success-400/80 bg-xl-shade/30 px-2 py-0.5 rounded">yay -S protonup-qt</code>
+                                  <span className="text-[8px] text-xl-ink/25 italic">{t('system.neitherFound.recommended')}</span>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <span className={cn("text-[8px] uppercase font-black w-16", theme === 'dark' ? "text-white/30" : "text-gray-500")}>Lutris</span>
-                                  <code className="text-[9px] font-mono text-green-400/80 bg-black/30 px-2 py-0.5 rounded">yay -S lutris</code>
+                                  <span className={cn("text-[8px] uppercase font-black w-16", "text-xl-fg-30")}>Lutris</span>
+                                  <code className="text-[9px] font-mono text-xl-success-400/80 bg-xl-shade/30 px-2 py-0.5 rounded">yay -S lutris</code>
                                 </div>
                               </div>
                             </div>
@@ -7522,17 +7610,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           return (
                             <div key={r.id} className={cn(
                               "rounded-xl overflow-hidden transition-all",
-                              isRowFocused ? "ring-2 ring-blue-400" : "",
-                              theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                              isRowFocused ? "ring-2 ring-xl-primary-400" : "",
+                              "border bg-xl-box border-xl-border-subtle"
                             )}>
                               <div className="flex items-center gap-3 px-4 py-3">
-                                <Package size={14} className={cn("shrink-0", isInst ? "text-green-400" : theme === 'dark' ? "text-white/30" : "text-gray-400")} />
+                                <Package size={14} className={cn("shrink-0", isInst ? "text-xl-success-400" : "text-xl-icon-muted")} />
                                 <span className="text-xs font-black uppercase tracking-tighter flex-1">{r.id}</span>
-                                <span className={cn("text-[8px] font-mono px-2 py-0.5 rounded-full border", theme === 'dark' ? "text-white/30 bg-white/5 border-white/10" : "text-gray-500 bg-gray-100 border-gray-200")}>
+                                <span className={cn("text-[8px] font-mono px-2 py-0.5 rounded-full border", "text-xl-fg-30 bg-xl-fill-5 border-xl-border")}>
                                   via {r.source}
                                 </span>
                                 {isInst ? (
-                                  <span className="px-2 py-0.5 rounded-full bg-green-500/10 border border-green-500/20 text-[8px] font-black text-green-400 uppercase">{t('system.installedBadge')}</span>
+                                  <span className="px-2 py-0.5 rounded-full bg-xl-success-500/10 border border-xl-success-500/20 text-[8px] font-black text-xl-success-400 uppercase">{t('system.installedBadge')}</span>
                                 ) : (
                                   <Focusable
                                     group="settings"
@@ -7558,19 +7646,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         className={cn(
                                           "relative overflow-hidden px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border min-w-[84px] text-center transition-all",
                                           isThisInstalling
-                                            ? "border-blue-500/30 text-white/80"
+                                            ? "border-xl-primary-500/30 text-xl-ink/80"
                                             : runnerInstalling
-                                              ? "opacity-30 cursor-not-allowed border-white/10"
+                                              ? "opacity-30 cursor-not-allowed border-xl-ink/10"
                                               : isPendingConfirm
-                                                ? "bg-blue-600 border-blue-600 text-white animate-pulse"
+                                                ? "bg-xl-primary-600 border-xl-primary-600 text-xl-on-accent animate-pulse"
                                                 : isFocused
-                                                  ? "bg-blue-600 text-white border-blue-600"
-                                                  : "border-blue-500/40 text-blue-400 hover:bg-blue-600 hover:text-white hover:border-blue-600"
+                                                  ? "bg-xl-primary-600 text-xl-on-accent border-xl-primary-600"
+                                                  : "border-xl-primary-500/40 text-xl-primary-400 hover:bg-xl-primary-600 hover:text-xl-on-accent hover:border-xl-primary-600"
                                         )}
                                       >
                                         {/* Barra indeterminata, riempie da sx verso dx durante l'installazione */}
                                         {isThisInstalling && (
-                                          <span className="absolute inset-y-0 bg-blue-500/40 animate-[runnerProgressLtr_1.2s_ease-in-out_infinite]" />
+                                          <span className="absolute inset-y-0 bg-xl-primary-500/40 animate-[runnerProgressLtr_1.2s_ease-in-out_infinite]" />
                                         )}
                                         <span className="relative z-10">
                                           {isThisInstalling ? t('system.installing') : isPendingConfirm ? t('system.confirmA') : t('system.installAction')}
@@ -7584,7 +7672,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               {progress && progress.length > 0 && (
                                 <div className="px-4 pb-3 space-y-0.5">
                                   {progress.map((line, i) => (
-                                    <p key={i} className={cn("text-[9px] font-mono leading-relaxed", theme === 'dark' ? "text-white/40" : "text-gray-500")}>{line}</p>
+                                    <p key={i} className={cn("text-[9px] font-mono leading-relaxed", "text-xl-fg-40")}>{line}</p>
                                   ))}
                                 </div>
                               )}
@@ -7647,10 +7735,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <div key={key} className={cn(
                                   "flex items-center gap-2 px-3 py-2.5 rounded-xl border text-[10px] font-black uppercase tracking-widest",
                                   ok
-                                    ? theme === 'dark' ? "bg-white/5 border-white/10 text-white/80" : "bg-gray-50 border-gray-200 text-gray-700"
-                                    : theme === 'dark' ? "bg-white/[0.02] border-white/5 text-white/25" : "bg-gray-100/50 border-gray-100 text-gray-400"
+                                    ? "bg-xl-box border-xl-border text-xl-fg-80"
+                                    : "bg-xl-box-faint border-xl-box-faint-border text-xl-fg-25"
                                 )}>
-                                  <div className={cn("w-2 h-2 rounded-full shrink-0", ok ? "bg-green-500" : "bg-white/15")} />
+                                  <div className={cn("w-2 h-2 rounded-full shrink-0", ok ? "bg-xl-success-500" : "bg-xl-ink/15")} />
                                   {label}
                                 </div>
                               );
@@ -7675,7 +7763,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               // v1.1.107-dev.1 — stesso stile unificato di
                               // runners-refresh sopra.
                               "text-[9px] font-black uppercase tracking-widest transition-all px-2 py-1 rounded-lg",
-                              isFocused ? "bg-red-600/20 text-red-400" : "text-blue-400/70"
+                              isFocused ? "bg-xl-danger-600/20 text-xl-danger-400" : "text-xl-primary-400/70"
                             )}>{t('system.refresh')}</button>
                           )}
                         </Focusable>
@@ -7691,38 +7779,38 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           // widget informativo, focus senza anello blu.
                           <div className="rounded-2xl transition-all p-1">
                             {diskUsage ? (
-                              <div className="px-5 py-4 rounded-xl bg-white/5 border border-white/5 space-y-3">
+                              <div className="px-5 py-4 rounded-xl bg-xl-ink/5 border border-xl-ink/5 space-y-3">
                                 <div className="flex items-center gap-4">
-                                  <Monitor size={16} className="text-blue-400 shrink-0" />
+                                  <Monitor size={16} className="text-xl-primary-400 shrink-0" />
                                   <div className="flex-1 min-w-0">
                                     <div className="flex justify-between items-baseline mb-1">
                                       <p className="text-sm font-black">{t('system.freeSpace', { free: diskUsage.freeHuman })}</p>
-                                      <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                                      <p className={cn("text-[9px] font-mono", "text-xl-fg-40")}>
                                         {t('system.usedPercentTotal', { percent: diskUsage.usedPercent, total: diskUsage.totalHuman })}
                                       </p>
                                     </div>
-                                    <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                                    <div className="w-full h-1.5 rounded-full bg-xl-ink/10 overflow-hidden">
                                       <div
                                         className={cn(
                                           "h-full rounded-full transition-all",
                                           // Soglie sullo spazio LIBERO rimanente, non su quello usato:
                                           // verde quando c'è ancora ampio margine, giallo quando resta
                                           // il 30% della capacità totale, rosso quando si scende al 10%.
-                                          diskUsage.usedPercent >= 90 ? "bg-red-500"
-                                            : diskUsage.usedPercent >= 70 ? "bg-yellow-500"
-                                            : "bg-green-500"
+                                          diskUsage.usedPercent >= 90 ? "bg-xl-danger-500"
+                                            : diskUsage.usedPercent >= 70 ? "bg-xl-warning-500"
+                                            : "bg-xl-success-500"
                                         )}
                                         style={{ width: `${diskUsage.usedPercent}%` }}
                                       />
                                     </div>
                                   </div>
                                 </div>
-                                <p className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/25" : "text-gray-400")}>
+                                <p className={cn("text-[9px] font-mono", "text-xl-fg-25")}>
                                   ~/Games: {diskUsage.usedHuman !== '—' ? diskUsage.usedHuman : t('system.folderNotCreated')}
                                 </p>
                               </div>
                             ) : (
-                              <div className="px-5 py-4 rounded-xl bg-white/5 border border-white/5">
+                              <div className="px-5 py-4 rounded-xl bg-xl-ink/5 border border-xl-ink/5">
                                 <p className="text-[10px] font-mono opacity-40">{t('system.loadingEllipsis')}</p>
                               </div>
                             )}
@@ -7736,15 +7824,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 ) : activeSettingsTab === 'plugins' ? (
                   /* ── Plugins tab ── */
                   <div className="space-y-6">
-                    <p className={cn("text-[10px] font-mono mb-8", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                    <p className={cn("text-[10px] font-mono mb-8", "text-xl-fg-30")}>
                       {t('plugins.intro')}
                     </p>
                     {pluginLoadError ? (
                       <div className="flex flex-col gap-3">
-                        <p className="text-xs text-red-400 font-mono">{pluginLoadError}</p>
+                        <p className="text-xs text-xl-danger-400 font-mono">{pluginLoadError}</p>
                         <button
                           onClick={loadPluginRegistry}
-                          className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-white/20 hover:bg-white/10 transition-all"
+                          className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-xl-ink/20 hover:bg-xl-ink/10 transition-all"
                         >{t('plugins.retry')}</button>
                       </div>
                     ) : pluginRegistry.length === 0 ? (
@@ -7752,7 +7840,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <p className="text-xs opacity-40 italic">{t('plugins.loadingPlugins')}</p>
                         <button
                           onClick={loadPluginRegistry}
-                          className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-white/20 hover:bg-white/10 transition-all"
+                          className="self-start px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border border-xl-ink/20 hover:bg-xl-ink/10 transition-all"
                         >{t('plugins.reload')}</button>
                       </div>
                     ) : (
@@ -7763,26 +7851,26 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div key={plugin.id} className={cn(
                             "p-6 rounded-2xl border flex flex-col gap-4 transition-all",
                             isRowFocused
-                              ? "ring-2 ring-blue-400 border-blue-400 scale-[1.01]"
+                              ? "ring-2 ring-xl-primary-400 border-xl-primary-400 scale-[1.01]"
                               : plugin.enabled
-                                ? theme === 'dark' ? "bg-blue-600/10 border-blue-500/30" : "bg-blue-50 border-blue-200"
-                                : theme === 'dark' ? "bg-white/5 border-white/5"          : "bg-gray-50 border-gray-200"
+                                ? "bg-xl-primary-tint border-xl-primary-tint-border"
+                                : "bg-xl-box border-xl-border-subtle"
                           )}>
                             <div className="flex items-start justify-between gap-3">
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-1">
                                   <span className="text-sm font-black truncate">{translateStorePluginName(plugin.id, plugin.name)}</span>
                                   {plugin.drmFree ? (
-                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 shrink-0">{t('plugins.drmFree')}</span>
+                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-xl-success-500/15 text-xl-success-400 border border-xl-success-500/20 shrink-0">{t('plugins.drmFree')}</span>
                                   ) : (
-                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 border border-yellow-500/20 shrink-0">{t('plugins.drm')}</span>
+                                    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-xl-warning-500/15 text-xl-warning-400 border border-xl-warning-500/20 shrink-0">{t('plugins.drm')}</span>
                                   )}
                                 </div>
-                                <p className={cn("text-[10px] leading-relaxed", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                                <p className={cn("text-[10px] leading-relaxed", "text-xl-fg-40")}>
                                   {translateStorePluginDescription(plugin.id, plugin.description)}
                                 </p>
                                 {plugin.requiredTool && (
-                                  <p className={cn("text-[9px] font-mono mt-1", theme === 'dark' ? "text-white/20" : "text-gray-400")}>
+                                  <p className={cn("text-[9px] font-mono mt-1", "text-xl-fg-20")}>
                                     {t('plugins.requires', { tool: plugin.requiredTool })}
                                   </p>
                                 )}
@@ -7805,14 +7893,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     className={cn(
                                       "relative w-12 h-6 rounded-full transition-all duration-300 shrink-0 border",
                                       plugin.enabled
-                                        ? "bg-blue-600 border-blue-500"
+                                        ? "bg-xl-primary-600 border-xl-primary-500"
                                         : isFocused
-                                          ? "bg-white/20 border-white/40"
-                                          : theme === 'dark' ? "bg-white/10 border-white/20" : "bg-gray-200 border-gray-300"
+                                          ? "bg-xl-ink/20 border-xl-ink/40"
+                                          : "bg-xl-fill-10 border-xl-border-strong"
                                     )}
                                   >
                                     <span className={cn(
-                                      "absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all duration-300",
+                                      "absolute top-0.5 w-5 h-5 rounded-full bg-xl-ink shadow transition-all duration-300",
                                       plugin.enabled ? "left-6" : "left-0.5"
                                     )} />
                                   </button>
@@ -7834,7 +7922,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {connectedDevices.length === 0 ? (
                         <div className={cn(
                           "flex items-center gap-3 px-5 py-4 rounded-xl border text-sm opacity-50",
-                          theme === 'dark' ? "bg-white/5 border-white/5" : "bg-gray-50 border-gray-200"
+                          "bg-xl-box border-xl-border-subtle"
                         )}>
                           <Gamepad size={16} />
                           <span className="text-xs font-medium">{t('input.noControllerDetected')}</span>
@@ -7844,17 +7932,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           {connectedDevices.map(dev => (
                             <div key={dev.index} className={cn(
                               "flex items-center gap-4 px-5 py-4 rounded-xl border",
-                              theme === 'dark' ? "bg-white/5 border-white/5" : "bg-gray-50 border-gray-200"
+                              "bg-xl-box border-xl-border-subtle"
                             )}>
-                              <Gamepad size={16} className="text-blue-400 shrink-0" />
+                              <Gamepad size={16} className="text-xl-primary-400 shrink-0" />
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs font-black truncate">{dev.id}</p>
-                                <p className={cn("text-[9px] font-mono mt-0.5", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                                <p className={cn("text-[9px] font-mono mt-0.5", "text-xl-fg-30")}>
                                   {t('input.assignedPlugin', { plugin: dev.pluginId })}
                                   {dev.vendorId ? ` · VID: 0x${dev.vendorId.toString(16).padStart(4,'0').toUpperCase()}` : ''}
                                 </p>
                               </div>
-                              <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
+                              <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-xl-success-500/15 text-xl-success-400 border border-xl-success-500/20">
                                 {t('input.connected')}
                               </span>
                             </div>
@@ -7873,15 +7961,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div key={plugin.id} className={cn(
                             "p-5 rounded-2xl border flex items-center gap-4 transition-all",
                             isRowFocused
-                              ? "ring-2 ring-blue-400 border-blue-400 scale-[1.01]"
+                              ? "ring-2 ring-xl-primary-400 border-xl-primary-400 scale-[1.01]"
                               : plugin.enabled
-                                ? theme === 'dark' ? "bg-blue-600/10 border-blue-500/30" : "bg-blue-50 border-blue-200"
-                                : theme === 'dark' ? "bg-white/5 border-white/5"          : "bg-gray-50 border-gray-200"
+                                ? "bg-xl-primary-tint border-xl-primary-tint-border"
+                                : "bg-xl-box border-xl-border-subtle"
                           )}>
-                            <Gamepad size={18} className={plugin.enabled ? "text-blue-400" : "opacity-30"} />
+                            <Gamepad size={18} className={plugin.enabled ? "text-xl-primary-400" : "opacity-30"} />
                             <div className="flex-1 min-w-0">
                               <p className="text-xs font-black">{translateInputPluginName(plugin.id, plugin.name)}</p>
-                              <p className={cn("text-[9px] mt-0.5 leading-relaxed", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                              <p className={cn("text-[9px] mt-0.5 leading-relaxed", "text-xl-fg-30")}>
                                 {translateInputPluginDescription(plugin.id, plugin.description)}
                               </p>
                             </div>
@@ -7895,14 +7983,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   className={cn(
                                     "relative w-12 h-6 rounded-full transition-all duration-300 shrink-0 border",
                                     plugin.enabled
-                                      ? "bg-blue-600 border-blue-500"
+                                      ? "bg-xl-primary-600 border-xl-primary-500"
                                       : isFocused
-                                        ? "bg-white/20 border-white/40"
-                                        : theme === 'dark' ? "bg-white/10 border-white/20" : "bg-gray-200 border-gray-300"
+                                        ? "bg-xl-ink/20 border-xl-ink/40"
+                                        : "bg-xl-fill-10 border-xl-border-strong"
                                   )}
                                 >
                                   <span className={cn(
-                                    "absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all duration-300",
+                                    "absolute top-0.5 w-5 h-5 rounded-full bg-xl-ink shadow transition-all duration-300",
                                     plugin.enabled ? "left-6" : "left-0.5"
                                   )} />
                                 </button>
@@ -7912,7 +8000,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           );
                         })}
                       </div>
-                      <p className={cn("text-[9px] font-mono mt-4 opacity-50", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                      <p className={cn("text-[9px] font-mono mt-4 opacity-50", "text-xl-fg-30")}>
                         {t('input.genericFallbackNote')}
                       </p>
                     </div>
@@ -7957,16 +8045,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div className="space-y-6">
                     <div className={cn(
                       "flex items-center gap-2 px-4 py-3 rounded-xl mb-6",
-                      theme === 'dark' ? "bg-purple-500/10 border border-purple-500/20" : "bg-purple-50 border border-purple-200"
+                      "border bg-xl-special-tint border-xl-special-tint-border"
                     )}>
-                      <Sparkles size={14} className="text-purple-400 shrink-0" />
-                      <p className="text-[10px] font-black uppercase tracking-widest text-purple-400">{t('aiAdvisor.experimental')}</p>
-                      <p className={cn("text-[10px] font-mono ml-2", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                      <Sparkles size={14} className="text-xl-special-400 shrink-0" />
+                      <p className="text-[10px] font-black uppercase tracking-widest text-xl-special-400">{t('aiAdvisor.experimental')}</p>
+                      <p className={cn("text-[10px] font-mono ml-2", "text-xl-fg-40")}>
                         {t('aiAdvisor.experimentalNote')}
                       </p>
                     </div>
 
-                    <p className={cn("text-[10px] font-mono mb-8", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                    <p className={cn("text-[10px] font-mono mb-8", "text-xl-fg-30")}>
                       {t('aiAdvisor.modelsIntro')}
                     </p>
 
@@ -7984,7 +8072,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {/* v1.1.108-dev.1 — informativo, non focalizzabile:
                           Ollama non ha budget, quindi niente da editare
                           qui, solo quanto ha processato questo mese. */}
-                      <p className={cn("text-[10px] font-mono mb-4", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                      <p className={cn("text-[10px] font-mono mb-4", "text-xl-fg-30")}>
                         {t('aiAdvisor.tokensThisMonth', { used: ollamaUsageThisMonth.toLocaleString(i18n.language), budget: '∞' })}
                       </p>
                       <div className="space-y-2">
@@ -7999,7 +8087,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           // libera da qui, quindi resta un proxy approssimativo
                           // del peso computazionale, non un'analisi hardware reale.
                           const weightLabel = sizeGB < 2 ? t('aiAdvisor.weight.light') : sizeGB < 5 ? t('aiAdvisor.weight.medium') : sizeGB < 10 ? t('aiAdvisor.weight.heavy') : t('aiAdvisor.weight.veryHeavy');
-                          const weightColor = sizeGB < 2 ? 'text-green-400' : sizeGB < 5 ? 'text-blue-400' : sizeGB < 10 ? 'text-orange-400' : 'text-red-400';
+                          const weightColor = sizeGB < 2 ? 'text-xl-success-400' : sizeGB < 5 ? 'text-xl-primary-400' : sizeGB < 10 ? 'text-xl-caution-400' : 'text-xl-danger-400';
                           // v0.99.90 — vicini espliciti su/giù invece di
                           // affidarsi solo allo scoring geometrico: stesso
                           // principio già applicato a VirtualKeyboard dopo
@@ -8019,13 +8107,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           return (
                             <div key={m.name} className={cn(
                               "rounded-xl overflow-hidden transition-all px-4 py-3 flex items-center gap-3",
-                              isRowFocused ? "ring-2 ring-purple-400" : isActive ? "ring-1 ring-purple-400/50" : "",
-                              theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                              isRowFocused ? "ring-2 ring-xl-special-400" : isActive ? "ring-1 ring-xl-special-400/50" : "",
+                              "border bg-xl-box border-xl-border-subtle"
                             )}>
-                              <Sparkles size={14} className="text-purple-400 shrink-0" />
+                              <Sparkles size={14} className="text-xl-special-400 shrink-0" />
                               <div className="flex-1 min-w-0">
                                 <span className="text-xs font-black uppercase tracking-tighter block truncate">{m.name}</span>
-                                <span className={cn("text-[9px] font-mono", theme === 'dark' ? "text-white/30" : "text-gray-500")}>
+                                <span className={cn("text-[9px] font-mono", "text-xl-fg-30")}>
                                   {sizeGB.toFixed(1)} GB{m.parameterSize ? ` · ${m.parameterSize}` : ''}{m.quantization ? ` · ${m.quantization}` : ''}
                                 </span>
                               </div>
@@ -8068,10 +8156,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   <button className={cn(
                                     "px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border min-w-[84px] text-center transition-all shrink-0",
                                     isActive
-                                      ? "bg-purple-600 border-purple-600 text-white"
+                                      ? "bg-xl-special-600 border-xl-special-600 text-xl-on-accent"
                                       : isFocused
-                                        ? "bg-purple-500/20 border-purple-400 text-purple-300"
-                                        : "bg-white/5 border-white/10 opacity-60"
+                                        ? "bg-xl-special-500/20 border-xl-special-400 text-xl-special-300"
+                                        : "bg-xl-ink/5 border-xl-ink/10 opacity-60"
                                   )}>
                                     {isActive ? t('aiAdvisor.active') : t('aiAdvisor.select')}
                                   </button>
@@ -8126,16 +8214,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             <div key={cp.id} className={cn(
                               "rounded-xl p-4 transition-all",
                               isRowFocused
-                                ? "ring-2 ring-purple-400"
-                                : state.enabled ? "ring-1 ring-purple-400/50" : "",
-                              theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                                ? "ring-2 ring-xl-special-400"
+                                : state.enabled ? "ring-1 ring-xl-special-400/50" : "",
+                              "border bg-xl-box border-xl-border-subtle"
                             )}>
                               <div className="flex items-center gap-3 mb-1">
-                                <Sparkles size={14} className="text-purple-400 shrink-0" />
+                                <Sparkles size={14} className="text-xl-special-400 shrink-0" />
                                 <span className="text-xs font-black uppercase tracking-tighter flex-1">{cp.name}</span>
                                 <span className={cn(
                                   "text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full shrink-0",
-                                  cp.requiresPaidAccount ? "bg-orange-500/10 text-orange-400" : "bg-green-500/10 text-green-400"
+                                  cp.requiresPaidAccount ? "bg-xl-caution-500/10 text-xl-caution-400" : "bg-xl-success-500/10 text-xl-success-400"
                                 )}>
                                   {cp.requiresPaidAccount ? t('aiAdvisor.paid') : t('aiAdvisor.freeCheap')}
                                 </span>
@@ -8154,17 +8242,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     <button className={cn(
                                       "px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border min-w-[70px] text-center transition-all shrink-0",
                                       state.enabled
-                                        ? "bg-purple-600 border-purple-600 text-white"
+                                        ? "bg-xl-special-600 border-xl-special-600 text-xl-on-accent"
                                         : isFocused
-                                          ? "bg-purple-500/20 border-purple-400 text-purple-300"
-                                          : "bg-white/5 border-white/10 opacity-60"
+                                          ? "bg-xl-special-500/20 border-xl-special-400 text-xl-special-300"
+                                          : "bg-xl-ink/5 border-xl-ink/10 opacity-60"
                                     )}>
                                       {state.enabled ? t('aiAdvisor.active') : t('aiAdvisor.inactive')}
                                     </button>
                                   )}
                                 </Focusable>
                               </div>
-                              <p className={cn("text-[9px] font-mono leading-relaxed mb-3", theme === 'dark' ? "text-white/30" : "text-gray-500")}>{translateCloudProviderNote(cp.id, cp.note)}</p>
+                              <p className={cn("text-[9px] font-mono leading-relaxed mb-3", "text-xl-fg-30")}>{translateCloudProviderNote(cp.id, cp.note)}</p>
 
                               {state.enabled && (
                                 <div className="flex items-center gap-2">
@@ -8202,9 +8290,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         placeholder={t('aiAdvisor.apiKeyPlaceholder')}
                                         className={cn(
                                           "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
-                                          theme === 'dark' ? "bg-black/40" : "bg-white",
-                                          isFocused ? "border-2 border-blue-500" : state.hasStoredKey || state.apiKeyDraft
-                                            ? "border border-green-500/40" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                          "bg-xl-inset",
+                                          isFocused ? "border-2 border-xl-primary-500" : state.hasStoredKey || state.apiKeyDraft
+                                            ? "border border-xl-success-500/40" : "border border-xl-control-border"
                                         )}
                                       />
                                     )}
@@ -8219,7 +8307,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     {(isFocused) => (
                                       <button className={cn(
                                         "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border shrink-0 transition-all",
-                                        isFocused ? "bg-blue-500/20 border-blue-400 text-blue-300" : "bg-white/5 border-white/10 opacity-70"
+                                        isFocused ? "bg-xl-primary-500/20 border-xl-primary-400 text-xl-primary-300" : "bg-xl-ink/5 border-xl-ink/10 opacity-70"
                                       )}>
                                         {state.testing ? t('aiAdvisor.testing') : t('aiAdvisor.testConnection')}
                                       </button>
@@ -8239,7 +8327,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       {(isFocused) => (
                                         <button className={cn(
                                           "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border shrink-0 transition-all",
-                                          isFocused ? "bg-red-500/20 border-red-400 text-red-300" : "bg-white/5 border-white/10 text-red-400/70 opacity-70"
+                                          isFocused ? "bg-xl-danger-500/20 border-xl-danger-400 text-xl-danger-300" : "bg-xl-ink/5 border-xl-ink/10 text-xl-danger-400/70 opacity-70"
                                         )}>
                                           {t('aiAdvisor.removeKey')}
                                         </button>
@@ -8280,8 +8368,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                         value={String(state.tokenBudget ?? 5_000_000)}
                                         className={cn(
                                           "w-24 px-2 py-1.5 rounded-lg text-[10px] font-mono text-center focus:outline-none transition-colors cursor-pointer shrink-0",
-                                          theme === 'dark' ? "bg-black/40" : "bg-white",
-                                          isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                          "bg-xl-inset",
+                                          isFocused ? "border-2 border-xl-primary-500" : "border border-xl-control-border"
                                         )}
                                       />
                                     )}
@@ -8299,10 +8387,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <p className={cn(
                                   "text-[9px] font-mono mt-2",
                                   (state.usageThisMonth ?? 0) >= (state.tokenBudget ?? 5_000_000)
-                                    ? "text-red-400"
+                                    ? "text-xl-danger-400"
                                     : (state.usageThisMonth ?? 0) >= (state.tokenBudget ?? 5_000_000) * 0.8
-                                      ? "text-orange-400"
-                                      : theme === 'dark' ? "text-white/30" : "text-gray-500"
+                                      ? "text-xl-caution-400"
+                                      : "text-xl-fg-30"
                                 )}>
                                   {t('aiAdvisor.tokensThisMonth', {
                                     used:   (state.usageThisMonth ?? 0).toLocaleString(i18n.language),
@@ -8311,7 +8399,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 </p>
                               )}
                               {state.testResult && (
-                                <p className={cn("text-[9px] font-mono mt-2", state.testResult.success ? "text-green-400" : "text-red-400")}>
+                                <p className={cn("text-[9px] font-mono mt-2", state.testResult.success ? "text-xl-success-400" : "text-xl-danger-400")}>
                                   {state.testResult.success ? '✓ ' : '✗ '}{state.testResult.message}
                                 </p>
                               )}
@@ -8327,7 +8415,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                      elevati (vedi systemInfo.ts) — nessun dmidecode/sudo. */
                   <div className="space-y-4">
                     {!systemInfo ? (
-                      <p className={cn("text-xs font-mono", theme === 'dark' ? "text-white/40" : "text-gray-500")}>
+                      <p className={cn("text-xs font-mono", "text-xl-fg-40")}>
                         {t('hardware.loading')}
                       </p>
                     ) : (
@@ -8341,9 +8429,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       ].map((row, i) => (
                         <div key={i} className={cn(
                           "flex items-center gap-4 p-4 rounded-xl",
-                          theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200"
+                          "border bg-xl-box border-xl-border-subtle"
                         )}>
-                          <row.icon size={18} className="text-blue-400 shrink-0" />
+                          <row.icon size={18} className="text-xl-primary-400 shrink-0" />
                           <span className="text-[10px] font-black uppercase tracking-widest opacity-40 w-32 shrink-0">{row.label}</span>
                           <span className="text-sm font-mono truncate">{row.value}</span>
                         </div>
@@ -8364,7 +8452,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[150] flex items-center justify-center bg-black/70 backdrop-blur-md"
+            className="fixed inset-0 z-[150] flex items-center justify-center bg-xl-shade/70 backdrop-blur-md"
             onClick={(e) => { if (e.target === e.currentTarget) { setShowGameOptions(false); play('back'); } }}
           >
             <motion.div
@@ -8391,7 +8479,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 // contenitore reale (1080px di layout), indipendentemente
                 // dal fattore di scala — corretto a qualunque risoluzione.
                 "w-[700px] max-h-[85%] flex flex-col rounded-3xl border shadow-2xl overflow-hidden",
-                theme === 'dark' ? "bg-[#12141a] border-white/10" : "bg-white border-gray-200"
+                "bg-xl-modal border-xl-border"
               )}
             >
               {/* Header — fuori dall'area di scroll: titolo, copertina e
@@ -8405,19 +8493,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div>
                     <h2 className="text-3xl font-black uppercase tracking-tighter italic leading-none mb-2">{selectedGame.title}</h2>
                     <div className="flex gap-2 flex-wrap items-center">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-blue-400">{translateStorePluginName(selectedGame.store, selectedGame.store)}</span>
-                      <span className={cn("text-[10px] font-black uppercase tracking-widest", theme === 'dark' ? "text-white/30" : "text-gray-400")}>·</span>
-                      <span className={cn("text-[10px] font-black uppercase tracking-widest", theme === 'dark' ? "text-white/50" : selectedGame.runner === 'Wine-Lutris' ? "text-yellow-600" : "text-gray-600")}>{selectedGame.runner}</span>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-xl-primary-400">{translateStorePluginName(selectedGame.store, selectedGame.store)}</span>
+                      <span className={cn("text-[10px] font-black uppercase tracking-widest", "text-xl-icon-muted")}>·</span>
+                      <span className={cn("text-[10px] font-black uppercase tracking-widest", selectedGame.runner === 'Wine-Lutris' ? "text-xl-lutris-text" : "text-xl-fg-50")}>{selectedGame.runner}</span>
                       {runnerVersion && runnerVersion !== selectedGame.runner && (
-                        <span className={cn("text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border", theme === 'dark' ? "text-white/30 bg-white/5 border-white/10" : "text-gray-500 bg-gray-100 border-gray-200")}>
+                        <span className={cn("text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border", "text-xl-fg-30 bg-xl-fill-5 border-xl-border")}>
                           v{runnerVersion}
                         </span>
                       )}
                       <span className={cn(
                         "text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border",
                         selectedGame.isInstalled
-                          ? "text-green-400 bg-green-400/10 border-green-400/20"
-                          : "text-yellow-400 bg-yellow-400/10 border-yellow-400/20"
+                          ? "text-xl-success-400 bg-xl-success-400/10 border-xl-success-400/20"
+                          : "text-xl-warning-400 bg-xl-warning-400/10 border-xl-warning-400/20"
                       )}>
                         {selectedGame.isInstalled ? t('gameOptions:installed') : t('gameOptions:notInstalled')}
                       </span>
@@ -8439,7 +8527,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   {(isFocused) => (
                     <button
                       className={cn("w-10 h-10 rounded-full border flex items-center justify-center transition-all",
-                        isFocused ? "bg-red-600 border-red-600 text-white" : theme === 'dark' ? "border-white/10 hover:bg-red-600 hover:border-red-600 hover:text-white" : "border-gray-300 hover:bg-red-600 hover:border-red-600 hover:text-white"
+                        isFocused ? "bg-xl-danger-600 border-xl-danger-600 text-xl-on-accent" : "border-xl-control-border hover:bg-xl-danger-600 hover:border-xl-danger-600 hover:text-xl-on-accent"
                       )}
                     ><X size={18} /></button>
                   )}
@@ -8472,20 +8560,16 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     DOSBox/ScummVM, mostrarli qui serve solo a confondere
                     l'utente su cosa stia effettivamente per cambiare. */}
                 {selectedGame.store !== 'Classic Console' && (
-                <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                   <div className="flex items-center gap-3 mb-4">
-                    <Cpu size={16} className="text-blue-400" />
+                    <Cpu size={16} className="text-xl-primary-400" />
                     <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:runnerBridge')}</span>
                     {runnerVersion && (
                       <span className={cn(
                         "ml-auto text-[9px] font-mono px-2 py-0.5 rounded-full border",
-                        theme === 'dark'
-                          ? selectedGame?.runner === 'Wine-Lutris'
-                            ? "text-yellow-400 bg-yellow-400/10 border-yellow-400/20"
-                            : "text-white/40 bg-white/5 border-white/10"
-                          : selectedGame?.runner === 'Wine-Lutris'
-                            ? "text-yellow-600 bg-yellow-100 border-yellow-300"
-                            : "text-gray-600 bg-gray-100 border-gray-200"
+                        selectedGame?.runner === 'Wine-Lutris'
+                          ? "text-xl-lutris-badge-text bg-xl-lutris-badge border-xl-lutris-badge-border"
+                          : "text-xl-chip-text bg-xl-fill-5 border-xl-border"
                       )}>
                         {selectedGame?.runner} · {runnerVersion}
                       </span>
@@ -8642,10 +8726,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               <div className={cn(
                                 "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all border",
                                 isFocused
-                                  ? "border-blue-400 bg-blue-500/10"
-                                  : theme === 'dark'
-                                    ? "border-white/10 bg-white/5"
-                                    : "border-gray-200 bg-gray-50",
+                                  ? "border-xl-primary-400 bg-xl-primary-500/10"
+                                  : "border-xl-border bg-xl-box",
                                 runnerLocked && "opacity-50"
                               )}>
                                 {/* Info runner */}
@@ -8667,7 +8749,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 </div>
                                 {/* Badge "attivo" quando è il runner corrente */}
                                 {isActive && (
-                                  <span className="text-[9px] font-black uppercase tracking-widest text-blue-400 shrink-0">
+                                  <span className="text-[9px] font-black uppercase tracking-widest text-xl-primary-400 shrink-0">
                                     {t('gameOptions:active')}
                                   </span>
                                 )}
@@ -8675,11 +8757,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <div className={cn(
                                   "w-10 h-5 rounded-full transition-all relative shrink-0",
                                   isActive
-                                    ? "bg-blue-500"
-                                    : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                                    ? "bg-xl-primary-500"
+                                    : "bg-xl-fill-10-strong"
                                 )}>
                                   <div className={cn(
-                                    "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all",
+                                    "absolute top-0.5 w-4 h-4 rounded-full bg-xl-ink transition-all",
                                     isActive ? "left-[22px]" : "left-0.5"
                                   )} />
                                 </div>
@@ -8700,28 +8782,28 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       tab Sistema, unica fonte per quell'azione. */}
 
                   {availableRunners.length === 0 && (
-                    <p className="text-xs opacity-40 italic">Nessun runner trovato. Apri System → Runner per installarne uno.</p>
+                    <p className="text-xs opacity-40 italic">{t('gameOptions:noRunnerFound')}</p>
                   )}
                 </div>
                 )}
 
                 {/* Sezione adattiva: RetroArch per ROM, Compat Layer per altri, niente per DOS/ScummVM */}
                 {selectedGame.runner === 'RetroArch' ? (
-                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                  <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                     <div className="flex items-center gap-3 mb-4">
-                      <Activity size={16} className="text-blue-400" />
+                      <Activity size={16} className="text-xl-primary-400" />
                       <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:retroarchCore')}</span>
                       {retroarchAvailable === false && (
-                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-red-400">{t('gameOptions:notInstalledStatus')}</span>
+                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-xl-danger-400">{t('gameOptions:notInstalledStatus')}</span>
                       )}
                       {retroarchAvailable === true && (
-                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-green-400">{t('gameOptions:available')}</span>
+                        <span className="ml-auto text-[10px] font-black uppercase tracking-widest text-xl-success-400">{t('gameOptions:available')}</span>
                       )}
                     </div>
                     {retroarchAvailable === false ? (
                       <div className="space-y-3">
                         <p className="text-xs opacity-60 leading-relaxed">{t('gameOptions:retroarchNotInstalledDesc')}</p>
-                        <code className={cn("block text-[10px] font-mono p-3 rounded-xl text-green-400", theme === 'dark' ? "bg-black/40 border border-white/5" : "bg-gray-800 border border-gray-600")}>
+                        <code className={cn("block text-[10px] font-mono p-3 rounded-xl text-xl-success-400", "border bg-xl-console border-xl-console-border")}>
                           sudo pacman -S retroarch
                         </code>
                       </div>
@@ -8796,23 +8878,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 <div className={cn(
                                   "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all border",
                                   isFocused
-                                    ? "border-blue-400 bg-blue-500/10"
-                                    : theme === 'dark'
-                                      ? "border-white/10 bg-white/5"
-                                      : "border-gray-200 bg-gray-50"
+                                    ? "border-xl-primary-400 bg-xl-primary-500/10"
+                                    : "border-xl-border bg-xl-box"
                                 )}>
                                   <div className="flex-1 min-w-0">
                                     <p className="text-[11px] font-black uppercase tracking-widest truncate">{core.name}</p>
                                   </div>
                                   {isActive && (
-                                    <span className="text-[9px] font-black uppercase tracking-widest text-blue-400 shrink-0">{t('gameOptions:active')}</span>
+                                    <span className="text-[9px] font-black uppercase tracking-widest text-xl-primary-400 shrink-0">{t('gameOptions:active')}</span>
                                   )}
                                   <div className={cn(
                                     "w-10 h-5 rounded-full transition-all relative shrink-0",
-                                    isActive ? "bg-blue-500" : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                                    isActive ? "bg-xl-primary-500" : "bg-xl-fill-10-strong"
                                   )}>
                                     <div className={cn(
-                                      "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all",
+                                      "absolute top-0.5 w-4 h-4 rounded-full bg-xl-ink transition-all",
                                       isActive ? "left-[22px]" : "left-0.5"
                                     )} />
                                   </div>
@@ -8832,9 +8912,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     )}
                   </div>
                 ) : selectedGame.store !== 'Classic Console' ? (
-                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                  <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                     <div className="flex items-center gap-3 mb-4">
-                      <Activity size={16} className="text-blue-400" />
+                      <Activity size={16} className="text-xl-primary-400" />
                       <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:compatibilityLayer')}</span>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
@@ -9117,10 +9197,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   // successive senza altro codice da toccare.
                                   "w-full min-h-[76px] flex items-center justify-between px-4 py-3 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all border",
                                   enabled
-                                    ? "bg-blue-600/20 border-blue-500 text-blue-400"
+                                    ? "bg-xl-primary-600/20 border-xl-primary-500 text-xl-primary-400"
                                     : isFocused
-                                      ? theme === 'dark' ? "bg-white/10 border-white/30" : "bg-gray-200 border-gray-400 text-gray-800"
-                                      : theme === 'dark' ? "bg-white/5 border-white/10" : "bg-gray-100 border-gray-200 text-gray-700",
+                                      ? "bg-xl-fill-10 border-xl-border-heavy text-xl-button-text"
+                                      : "bg-xl-fill-5 border-xl-border text-xl-alt-text-700",
                                   !available && "opacity-50"
                                 )}
                               >
@@ -9131,8 +9211,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       <span className={cn(
                                         "text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-full border",
                                         available
-                                          ? "text-green-400 bg-green-400/10 border-green-400/20"
-                                          : "text-red-400 bg-red-400/10 border-red-400/20"
+                                          ? "text-xl-success-400 bg-xl-success-400/10 border-xl-success-400/20"
+                                          : "text-xl-danger-400 bg-xl-danger-400/10 border-xl-danger-400/20"
                                       )}>
                                         {available ? '✓' : '✗'}
                                       </span>
@@ -9143,9 +9223,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 {key === 'mangohud' ? (
                                   // v1.1.104-dev.1 — cursore a 3 posizioni:
                                   // sx spento, centro compatta, dx completa.
-                                  <div className={cn("w-10 h-4 rounded-full transition-all relative shrink-0", mangohudLevel > 0 ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
+                                  <div className={cn("w-10 h-4 rounded-full transition-all relative shrink-0", mangohudLevel > 0 ? "bg-xl-primary-500" : "bg-xl-fill-20")}>
                                     <div className={cn(
-                                      "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                                      "absolute top-0.5 w-3 h-3 rounded-full bg-xl-ink transition-all",
                                       mangohudLevel === 0 ? "left-0.5" : mangohudLevel === 1 ? "left-[14px]" : "left-[26px]"
                                     )} />
                                   </div>
@@ -9154,9 +9234,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   // di mangohud sopra, un passo in più (4
                                   // posizioni invece di 3) — pillola più
                                   // larga per fare spazio al quarto stato.
-                                  <div className={cn("w-14 h-4 rounded-full transition-all relative shrink-0", gamescopeLevel > 0 ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
+                                  <div className={cn("w-14 h-4 rounded-full transition-all relative shrink-0", gamescopeLevel > 0 ? "bg-xl-primary-500" : "bg-xl-fill-20")}>
                                     <div className={cn(
-                                      "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                                      "absolute top-0.5 w-3 h-3 rounded-full bg-xl-ink transition-all",
                                       gamescopeLevel === 0 ? "left-0.5" : gamescopeLevel === 1 ? "left-[13px]" : gamescopeLevel === 2 ? "left-[25px]" : "left-[37px]"
                                     )} />
                                   </div>
@@ -9168,12 +9248,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   // standalone (ora fuso in questa griglia).
                                   <div className="flex items-center gap-1 shrink-0">
                                     <ChevronLeft size={11} className="opacity-30" />
-                                    <span className="text-blue-300 normal-case font-bold text-[9px] max-w-[70px] truncate">{sharedLauncherCurrentLabel}</span>
+                                    <span className="text-xl-primary-300 normal-case font-bold text-[9px] max-w-[70px] truncate">{sharedLauncherCurrentLabel}</span>
                                     <ChevronRight size={11} className="opacity-30" />
                                   </div>
                                 ) : (
-                                  <div className={cn("w-8 h-4 rounded-full transition-all relative shrink-0", enabled ? "bg-blue-500" : theme === 'dark' ? "bg-white/20" : "bg-gray-300")}>
-                                    <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", enabled ? "left-4" : "left-0.5")} />
+                                  <div className={cn("w-8 h-4 rounded-full transition-all relative shrink-0", enabled ? "bg-xl-primary-500" : "bg-xl-fill-20")}>
+                                    <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-xl-ink transition-all", enabled ? "left-4" : "left-0.5")} />
                                   </div>
                                 )}
                               </button>
@@ -9184,15 +9264,15 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     </div>
                   </div>
                 ) : (
-                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                  <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                     <p className="text-xs opacity-40 italic">{t('gameOptions:noAdditionalCompatOptions')}</p>
                   </div>
                 )}
 
                 {/* Step 4 — Game Config completo */}
-                <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                   <div className="flex items-center gap-3 mb-5">
-                    <Monitor size={16} className="text-blue-400" />
+                    <Monitor size={16} className="text-xl-primary-400" />
                     <span className="text-[10px] font-black uppercase tracking-widest">Game Config</span>
                   </div>
                   <div className="space-y-3">
@@ -9200,12 +9280,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Executable Path</span>
                         {localGameConfig.executablePath && (
-                          <span className="text-[9px] font-black uppercase tracking-widest text-green-400 bg-green-400/10 border border-green-400/20 px-1.5 py-0.5 rounded-full">
+                          <span className="text-[9px] font-black uppercase tracking-widest text-xl-success-400 bg-xl-success-400/10 border border-xl-success-400/20 px-1.5 py-0.5 rounded-full">
                             {t('gameOptions:configured')}
                           </span>
                         )}
                         {!localGameConfig.executablePath && (selectedGame.store === 'Epic Games' || selectedGame.store === 'GOG Galaxy') && selectedGame.isInstalled && (
-                          <span className="text-[9px] font-black uppercase tracking-widest text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 px-1.5 py-0.5 rounded-full">
+                          <span className="text-[9px] font-black uppercase tracking-widest text-xl-warning-400 bg-xl-warning-400/10 border border-xl-warning-400/20 px-1.5 py-0.5 rounded-full">
                             {t('gameOptions:requiredToLaunch')}
                           </span>
                         )}
@@ -9237,12 +9317,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             placeholder="/home/archdaniel/Games/Epic/.../Game.exe"
                             className={cn(
                               "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
-                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              "bg-xl-inset",
                               isFocused
-                                ? "border-2 border-blue-500"
+                                ? "border-2 border-xl-primary-500"
                                 : localGameConfig.executablePath
-                                  ? "border border-green-500/40"
-                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                  ? "border border-xl-success-500/40"
+                                  : "border border-xl-control-border"
                             )}
                           />
                         )}
@@ -9293,12 +9373,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             placeholder="-dx9 -windowed"
                             className={cn(
                               "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
-                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              "bg-xl-inset",
                               isFocused
-                                ? "border-2 border-blue-500"
+                                ? "border-2 border-xl-primary-500"
                                 : localGameConfig.launchArgs
-                                  ? "border border-green-500/40"
-                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                  ? "border border-xl-success-500/40"
+                                  : "border border-xl-control-border"
                             )}
                           />
                         )}
@@ -9341,12 +9421,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             placeholder={t('gameOptions:scrapeTitlePlaceholder')}
                             className={cn(
                               "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
-                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              "bg-xl-inset",
                               isFocused
-                                ? "border-2 border-blue-500"
+                                ? "border-2 border-xl-primary-500"
                                 : localGameConfig.scrapeTitle
-                                  ? "border border-green-500/40"
-                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                  ? "border border-xl-success-500/40"
+                                  : "border border-xl-control-border"
                             )}
                           />
                         )}
@@ -9392,8 +9472,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 placeholder="es. 292030"
                                 className={cn(
                                   "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
-                                  theme === 'dark' ? "bg-black/40" : "bg-white",
-                                  isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                  "bg-xl-inset",
+                                  isFocused ? "border-2 border-xl-primary-500" : "border border-xl-control-border"
                                 )}
                               />
                             )}
@@ -9443,8 +9523,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                 title={t('gameOptions:pressEnterToCopy')}
                                 className={cn(
                                   "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer select-all",
-                                  theme === 'dark' ? "bg-black/40 text-white/70" : "bg-white text-gray-600",
-                                  isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                  "bg-xl-inset text-xl-fg-70",
+                                  isFocused ? "border-2 border-xl-primary-500" : "border border-xl-control-border"
                                 )}
                               />
                             )}
@@ -9499,12 +9579,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             placeholder={t('gameOptions:windowClassPlaceholder')}
                             className={cn(
                               "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none transition-colors cursor-pointer",
-                              theme === 'dark' ? "bg-black/40" : "bg-white",
+                              "bg-xl-inset",
                               isFocused
-                                ? "border-2 border-blue-500"
+                                ? "border-2 border-xl-primary-500"
                                 : localGameConfig.windowClass
-                                  ? "border border-green-500/40"
-                                  : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                  ? "border border-xl-success-500/40"
+                                  : "border border-xl-control-border"
                             )}
                           />
                         )}
@@ -9539,8 +9619,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               placeholder="/path/to/game.conf"
                               className={cn(
                                 "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
-                                theme === 'dark' ? "bg-black/40" : "bg-white",
-                                isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                "bg-xl-inset",
+                                isFocused ? "border-2 border-xl-primary-500" : "border border-xl-control-border"
                               )}
                             />
                           )}
@@ -9575,8 +9655,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               placeholder="es. monkey, loom, tentacle"
                               className={cn(
                                 "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
-                                theme === 'dark' ? "bg-black/40" : "bg-white",
-                                isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                "bg-xl-inset",
+                                isFocused ? "border-2 border-xl-primary-500" : "border border-xl-control-border"
                               )}
                             />
                           )}
@@ -9611,8 +9691,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               placeholder="~/.config/retroarch/cores/snes9x_libretro.so"
                               className={cn(
                                 "w-full px-4 py-3 rounded-xl text-sm font-mono focus:outline-none cursor-pointer",
-                                theme === 'dark' ? "bg-black/40" : "bg-white",
-                                isFocused ? "border-2 border-blue-500" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                "bg-xl-inset",
+                                isFocused ? "border-2 border-xl-primary-500" : "border border-xl-control-border"
                               )}
                             />
                           )}
@@ -9670,8 +9750,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             return (
                               <button className={cn(
                                 "w-full flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-black italic transition-all",
-                                isEnabled ? "bg-purple-600 text-white" : theme === 'dark' ? "bg-black/40" : "bg-white",
-                                isFocused && isEnabled ? "border-2 border-purple-300" : isFocused && !isEnabled ? "border-2 border-blue-500" : isEnabled ? "" : theme === 'dark' ? "border border-white/10" : "border border-gray-300"
+                                isEnabled ? "bg-xl-special-600 text-xl-on-accent" : "bg-xl-inset",
+                                isFocused && isEnabled ? "border-2 border-xl-special-300" : isFocused && !isEnabled ? "border-2 border-xl-primary-500" : isEnabled ? "" : "border border-xl-control-border"
                               )}>
                                 <Sparkles size={14} className="shrink-0" />
                                 {remasterToggling
@@ -9696,9 +9776,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     v2.0.41-dev.11: EA App aggiunto, stesso trattamento
                     (Fase B). */}
                 {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games' || selectedGame.store === 'Ubisoft' || selectedGame.store === 'EA App') && (
-                  <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                  <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                     <div className="flex items-center gap-3 mb-4">
-                      <Package size={16} className="text-blue-400" />
+                      <Package size={16} className="text-xl-primary-400" />
                       <span className="text-[10px] font-black uppercase tracking-widest">{t('gameOptions:wineDependencies')}</span>
                       <span className="text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:savedForThisGame')}</span>
                       {/* v1.1.109-dev.1 — richiesta utente: vista compatta
@@ -9725,10 +9805,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             </span>
                             <div className={cn(
                               "w-8 h-4 rounded-full transition-all relative shrink-0 border",
-                              wineDepsExpanded ? "bg-blue-500 border-blue-400" : theme === 'dark' ? "bg-white/20 border-white/10" : "bg-gray-300 border-gray-400",
-                              isFocused && "ring-2 ring-blue-400 ring-offset-1 ring-offset-transparent"
+                              wineDepsExpanded ? "bg-xl-primary-500 border-xl-primary-400" : "bg-xl-fill-20 border-xl-field-border",
+                              isFocused && "ring-2 ring-xl-primary-400 ring-offset-1 ring-offset-transparent"
                             )}>
-                              <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", wineDepsExpanded ? "left-4" : "left-0.5")} />
+                              <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-xl-ink transition-all", wineDepsExpanded ? "left-4" : "left-0.5")} />
                             </div>
                           </div>
                         )}
@@ -9781,26 +9861,26 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               <div className={cn(
                                 "flex items-center gap-3 px-3 py-2 rounded-xl cursor-pointer transition-all border",
                                 isFocused
-                                  ? "bg-blue-600/20 border-blue-500/60"
-                                  : "border-transparent hover:bg-white/5"
+                                  ? "bg-xl-primary-600/20 border-xl-primary-500/60"
+                                  : "border-transparent hover:bg-xl-ink/5"
                               )}>
                                 {/* Checkbox visivo */}
                                 <div className={cn(
                                   "w-4 h-4 rounded border-2 flex items-center justify-center transition-all shrink-0",
                                   isChecked
-                                    ? "bg-blue-600 border-blue-500"
+                                    ? "bg-xl-primary-600 border-xl-primary-500"
                                     : isFocused
-                                      ? "border-blue-400"
-                                      : "border-gray-500"
+                                      ? "border-xl-primary-400"
+                                      : "border-xl-neutral-500"
                                 )}>
-                                  {isChecked && <div className="w-2 h-2 rounded-sm bg-white" />}
+                                  {isChecked && <div className="w-2 h-2 rounded-sm bg-xl-ink" />}
                                 </div>
                                 <span className="text-xs font-mono flex-1">{verb}</span>
                                 {DEFAULT_WINE_VERBS.includes(verb) && (
                                   <span className="text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:recommended')}</span>
                                 )}
                                 {verb === 'dotnet48' && (
-                                  <span className="text-[9px] text-yellow-400/60 uppercase tracking-widest">{t('gameOptions:slowOnlyIfNeeded')}</span>
+                                  <span className="text-[9px] text-xl-warning-400/60 uppercase tracking-widest">{t('gameOptions:slowOnlyIfNeeded')}</span>
                                 )}
                               </div>
                             )}
@@ -9830,11 +9910,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       const osVersionLocked = !!localGameConfig.requiresLauncher;
                       const options = ['', ...OS_VERSION_VERBS];
                       return (
-                        <div className="mt-4 pt-4 border-t border-white/10">
+                        <div className="mt-4 pt-4 border-t border-xl-ink/10">
                           <div className="flex items-center gap-2 mb-3">
                             <span className="text-[10px] font-black uppercase tracking-widest opacity-50">{t('gameOptions:osVersion')}</span>
                             {osVersionLocked && (
-                              <span className="text-[9px] text-yellow-400/60 uppercase tracking-widest">{t('gameOptions:osVersionLockedBySharedLauncher')}</span>
+                              <span className="text-[9px] text-xl-warning-400/60 uppercase tracking-widest">{t('gameOptions:osVersionLockedBySharedLauncher')}</span>
                             )}
                           </div>
                           <div className="space-y-2">
@@ -9870,19 +9950,19 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       "flex items-center gap-3 px-3 py-2 rounded-xl transition-all border",
                                       osVersionLocked ? "opacity-40" : "cursor-pointer",
                                       isFocused
-                                        ? "bg-blue-600/20 border-blue-500/60"
-                                        : "border-transparent hover:bg-white/5"
+                                        ? "bg-xl-primary-600/20 border-xl-primary-500/60"
+                                        : "border-transparent hover:bg-xl-ink/5"
                                     )}>
                                       {/* Indicatore radio, non checkbox: scelta singola */}
                                       <div className={cn(
                                         "w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0",
                                         isSelected
-                                          ? "border-blue-500"
+                                          ? "border-xl-primary-500"
                                           : isFocused
-                                            ? "border-blue-400"
-                                            : "border-gray-500"
+                                            ? "border-xl-primary-400"
+                                            : "border-xl-neutral-500"
                                       )}>
-                                        {isSelected && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                                        {isSelected && <div className="w-2 h-2 rounded-full bg-xl-primary-500" />}
                                       </div>
                                       <span className="text-xs font-mono flex-1">
                                         {verb === '' ? t('gameOptions:osVersionDefault') : verb}
@@ -9907,9 +9987,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     titoli problematici) — mostrarla qui confondeva soltanto,
                     stesso trattamento già dato a Runner Bridge. */}
                 {selectedGame.store !== 'Classic Console' && (
-                <div className={cn("p-5 rounded-2xl", theme === 'dark' ? "bg-white/5 border border-white/5" : "bg-gray-50 border border-gray-200")}>
+                <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                   <div className="flex items-center gap-3 mb-4">
-                    <Terminal size={16} className="text-blue-400" />
+                    <Terminal size={16} className="text-xl-primary-400" />
                     <span className="text-[10px] font-black uppercase tracking-widest">Custom Env Variables</span>
                     <span className="ml-auto text-[9px] opacity-30 uppercase tracking-widest">{t('gameOptions:keyValuePerLine')}</span>
                   </div>
@@ -10030,7 +10110,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             {(isFocused) => (
                               <div className={cn(
                                 "px-3 py-2 rounded-lg text-xs font-mono cursor-pointer transition-all border truncate",
-                                isFocused ? "border-blue-500 bg-blue-500/10" : "border-white/10 bg-black/30",
+                                isFocused ? "border-xl-primary-500 bg-xl-primary-500/10" : "border-xl-ink/10 bg-xl-shade/30",
                                 !display && "opacity-30 italic"
                               )}>
                                 {display || 'KEY=VALUE'}
@@ -10068,8 +10148,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                               <div className={cn(
                                 "px-2.5 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all border shrink-0 whitespace-nowrap",
                                 isPersistent
-                                  ? (isFocused ? "border-blue-400 bg-blue-500/20 text-blue-300" : theme === 'dark' ? "border-white/10 bg-white/5 text-blue-300/70" : "border-blue-300 bg-blue-50 text-blue-700")
-                                  : (isFocused ? "border-amber-400 bg-amber-500/20 text-amber-300" : theme === 'dark' ? "border-amber-500/30 bg-amber-500/5 text-amber-400/80" : "border-amber-400 bg-amber-50 text-amber-700")
+                                  ? (isFocused ? "border-xl-primary-400 bg-xl-primary-500/20 text-xl-primary-300" : "border-xl-primary-border-soft bg-xl-box-primary text-xl-primary-text-dim")
+                                  : (isFocused ? "border-xl-notice-400 bg-xl-notice-500/20 text-xl-notice-300" : "border-xl-notice-tint-border bg-xl-notice-tint text-xl-notice-text")
                               )}>
                                 {isPersistent ? t('gameOptions:persistent') : t('gameOptions:installOnly')}
                               </div>
@@ -10093,7 +10173,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             {(isFocused) => (
                               <div className={cn(
                                 "w-8 h-8 rounded-lg flex items-center justify-center transition-all shrink-0",
-                                isFocused ? "bg-red-600 text-white" : theme === 'dark' ? "bg-white/5 text-white/40" : "bg-gray-200 text-gray-500"
+                                isFocused ? "bg-xl-danger-600 text-xl-on-accent" : "bg-xl-fill-5-strong text-xl-fg-40"
                               )}>
                                 <X size={14} />
                               </div>
@@ -10108,8 +10188,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         <p className={cn(
                           "text-[9px] pl-1",
                           isPersistent
-                            ? (theme === 'dark' ? "text-white/25" : "text-gray-500")
-                            : "text-amber-500/80"
+                            ? ("text-xl-fg-25-alt")
+                            : "text-xl-notice-500/80"
                         )}>
                           {isPersistent
                             ? t('gameOptions:persistentCaption')
@@ -10134,7 +10214,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       {(isFocused) => (
                         <div className={cn(
                           "flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border border-dashed",
-                          isFocused ? "border-blue-500 bg-blue-500/10 text-blue-400" : theme === 'dark' ? "border-white/10 text-white/30" : "border-gray-300 text-gray-500"
+                          isFocused ? "border-xl-primary-500 bg-xl-primary-500/10 text-xl-primary-400" : "border-xl-control-border text-xl-fg-30"
                         )}>
                           {t('gameOptions:addVariable')}
                         </div>
@@ -10171,7 +10251,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     {(isFocused) => (
                       <div className={cn(
                         "p-4 rounded-2xl mb-3 transition-all",
-                        isFocused ? "border-2 border-blue-500 bg-blue-500/5" : theme === 'dark' ? "border border-white/10 bg-white/5" : "border border-gray-200 bg-gray-50"
+                        isFocused ? "border-2 border-xl-primary-500 bg-xl-primary-500/5" : "border border-xl-border bg-xl-box"
                       )}>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-[11px] font-black uppercase tracking-widest">
@@ -10179,10 +10259,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           </span>
                           <div className={cn(
                             "w-11 h-6 rounded-full transition-all relative shrink-0",
-                            disableWineSync ? "bg-blue-500" : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                            disableWineSync ? "bg-xl-primary-500" : "bg-xl-fill-10-strong"
                           )}>
                             <div className={cn(
-                              "absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all",
+                              "absolute top-0.5 w-5 h-5 rounded-full bg-xl-ink transition-all",
                               disableWineSync ? "left-[22px]" : "left-0.5"
                             )} />
                           </div>
@@ -10236,7 +10316,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     {(isFocused) => (
                       <div className={cn(
                         "p-4 rounded-2xl mb-3 transition-all",
-                        isFocused ? "border-2 border-blue-500 bg-blue-500/5" : theme === 'dark' ? "border border-white/10 bg-white/5" : "border border-gray-200 bg-gray-50"
+                        isFocused ? "border-2 border-xl-primary-500 bg-xl-primary-500/5" : "border border-xl-border bg-xl-box"
                       )}>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-[11px] font-black uppercase tracking-widest">
@@ -10244,10 +10324,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           </span>
                           <div className={cn(
                             "w-11 h-6 rounded-full transition-all relative shrink-0",
-                            useKnownFixes ? "bg-blue-500" : theme === 'dark' ? "bg-white/10" : "bg-gray-300"
+                            useKnownFixes ? "bg-xl-primary-500" : "bg-xl-fill-10-strong"
                           )}>
                             <div className={cn(
-                              "absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all",
+                              "absolute top-0.5 w-5 h-5 rounded-full bg-xl-ink transition-all",
                               useKnownFixes ? "left-[22px]" : "left-0.5"
                             )} />
                           </div>
@@ -10273,7 +10353,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     {(isFocused) => (
                       <button className={cn(
                         "w-full py-5 rounded-2xl font-black text-xl italic transition-all flex items-center justify-center gap-3 shadow-2xl",
-                        isFocused ? "bg-red-500 text-white scale-[1.02]" : "bg-red-700/80 hover:bg-red-600 text-white"
+                        isFocused ? "bg-xl-danger-500 text-xl-on-accent scale-[1.02]" : "bg-xl-danger-700/80 hover:bg-xl-danger-600 text-xl-on-accent"
                       )}>
                         <Trash2 size={24} /> {t('gameOptions:uninstall')}
                       </button>
@@ -10311,7 +10391,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     {(isFocused) => (
                       <button className={cn(
                         "w-full py-5 rounded-2xl font-black text-xl italic transition-all flex items-center justify-center gap-3 shadow-2xl",
-                        isFocused ? "bg-green-500 text-white scale-[1.02]" : "bg-green-700 hover:bg-green-600 text-white"
+                        isFocused ? "bg-xl-success-500 text-xl-on-accent scale-[1.02]" : "bg-xl-success-700 hover:bg-xl-success-600 text-xl-on-accent"
                       )}>
                         <Download size={24} /> {t('gameOptions:install')}
                       </button>
@@ -10348,7 +10428,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
           const searchCats   = !activeField ? [...new Set(games.flatMap(g => g.categories ?? []))].slice(0, 5) : [];
           const topRowExternalUpId = searchCats.length > 0 ? 'tag-cat-0' : searchGenres.length > 0 ? 'tag-genre-0' : undefined;
           return (
-          <div className="fixed inset-0 z-[200] flex flex-col items-center justify-end pb-8 md:pb-12 px-2 pointer-events-none bg-black/40 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[200] flex flex-col items-center justify-end pb-8 md:pb-12 px-2 pointer-events-none bg-xl-shade/40 backdrop-blur-sm">
             {/* Testo digitato — visibile dal divano.
                 v1.1.15 — prima mostrava SEMPRE searchQuery, anche quando
                 si stava modificando un campo diverso (executable_path,
@@ -10363,13 +10443,13 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 l'intestazione interna della tastiera è stata rimossa
                 (vedi VirtualKeyboard.tsx). */}
             <div className="pointer-events-none mb-4 w-full max-w-4xl px-2">
-              <div className="flex items-start gap-3 bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl px-6 py-4 min-h-[4.5rem] max-h-[9rem] overflow-y-auto">
+              <div className="flex items-start gap-3 bg-xl-shade/60 backdrop-blur-xl border border-xl-ink/10 rounded-2xl px-6 py-4 min-h-[4.5rem] max-h-[9rem] overflow-y-auto">
                 {activeField
-                  ? <Edit3 size={20} className="text-blue-400 shrink-0 opacity-60 mt-1" />
-                  : <Search size={20} className="text-blue-400 shrink-0 opacity-60 mt-1" />}
+                  ? <Edit3 size={20} className="text-xl-primary-400 shrink-0 opacity-60 mt-1" />
+                  : <Search size={20} className="text-xl-primary-400 shrink-0 opacity-60 mt-1" />}
                 <div className="flex-1 min-w-0">
                   {activeField && (
-                    <div className="text-[10px] font-black uppercase tracking-widest text-blue-300/70 mb-1">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-xl-primary-300/70 mb-1">
                       {activeField.label}
                     </div>
                   )}
@@ -10379,12 +10459,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       variabili d'ambiente, dove "DXVK_ASYNC=1" da solo
                       non dice nulla a chi non lo conosce già. */}
                   {suggestionTip && (
-                    <div className="text-[11px] text-blue-200/80 italic mb-1 leading-snug">
+                    <div className="text-[11px] text-xl-primary-200/80 italic mb-1 leading-snug">
                       {suggestionTip}
                     </div>
                   )}
                   <div className={cn(
-                    "text-white break-all whitespace-pre-wrap leading-snug",
+                    "text-xl-ink break-all whitespace-pre-wrap leading-snug",
                     activeField ? "font-mono text-lg md:text-xl" : "font-black tracking-wide text-2xl"
                   )}>
                     {(() => {
@@ -10409,7 +10489,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       return (
                         <>
                           <span>{currentValue.slice(0, pos)}</span>
-                          <span className="inline-block w-[2px] h-[1em] align-middle bg-blue-400 animate-pulse mx-px" />
+                          <span className="inline-block w-[2px] h-[1em] align-middle bg-xl-primary-400 animate-pulse mx-px" />
                           <span>{currentValue.slice(pos)}</span>
                         </>
                       );
@@ -10417,7 +10497,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   </div>
                 </div>
                 {(activeField ? activeField.value : searchQuery) && (
-                  <span className="text-[10px] font-mono text-white/30 shrink-0 mt-1">
+                  <span className="text-[10px] font-mono text-xl-ink/30 shrink-0 mt-1">
                     {(activeField ? activeField.value : searchQuery).length} car.
                   </span>
                 )}
@@ -10427,7 +10507,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               <div className="pointer-events-auto w-full max-w-4xl px-2 mb-3 space-y-2">
                 {searchGenres.length > 0 && (
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-white/40 italic shrink-0">{t('dashboard:genres')}</span>
+                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-xl-ink/40 italic shrink-0">{t('dashboard:genres')}</span>
                     {searchGenres.map((genre, i) => (
                       <Focusable
                         key={genre}
@@ -10442,10 +10522,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div className={cn(
                             "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
                             isFocused
-                              ? "ring-2 ring-blue-400 scale-105 bg-blue-600 text-white"
+                              ? "ring-2 ring-xl-primary-400 scale-105 bg-xl-primary-600 text-xl-on-accent"
                               : selectedGenre === genre
-                                ? "bg-blue-600 text-white"
-                                : "bg-white/10 text-white/60"
+                                ? "bg-xl-primary-600 text-xl-on-accent"
+                                : "bg-xl-ink/10 text-xl-ink/60"
                           )}>
                             {genre}
                           </div>
@@ -10456,7 +10536,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 )}
                 {searchCats.length > 0 && (
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-white/40 italic shrink-0">{t('dashboard:categories')}</span>
+                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-xl-ink/40 italic shrink-0">{t('dashboard:categories')}</span>
                     {searchCats.map((cat, i) => (
                       <Focusable
                         key={cat}
@@ -10474,10 +10554,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                           <div className={cn(
                             "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
                             isFocused
-                              ? "ring-2 ring-blue-400 scale-105 bg-blue-600 text-white"
+                              ? "ring-2 ring-xl-primary-400 scale-105 bg-xl-primary-600 text-xl-on-accent"
                               : selectedCategory === cat
-                                ? "bg-blue-600 text-white"
-                                : "bg-white/10 text-white/60"
+                                ? "bg-xl-primary-600 text-xl-on-accent"
+                                : "bg-xl-ink/10 text-xl-ink/60"
                           )}>
                             {cat}
                           </div>
@@ -10537,23 +10617,23 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
       {/* Footer */}
       <footer className={cn(
         "h-16 border-t flex items-center px-12 gap-16 shrink-0 z-30 transition-colors",
-        theme === 'dark' ? "bg-[#090a0d] border-white/10" : "bg-white border-gray-200"
+        "bg-xl-footer border-xl-border"
       )}>
         {inputDevice === 'controller' ? (
           <>
-            <Hint icon="A" color="bg-green-500" label={t('dashboard:footer.select')} theme={theme} />
-            <Hint icon="B" color="bg-red-500" label={t('dashboard:footer.back')} theme={theme} />
-            <Hint icon="X" color="bg-blue-500" label={t('dashboard:footer.quickActions')} theme={theme} />
-            <Hint icon="Y" color="bg-yellow-500" label={t('dashboard:footer.globalSearch')} theme={theme} />
-            <div className="h-6 w-[1px] bg-blue-500/20" />
+            <Hint icon="A" color="bg-xl-success-500" label={t('dashboard:footer.select')} theme={theme} />
+            <Hint icon="B" color="bg-xl-danger-500" label={t('dashboard:footer.back')} theme={theme} />
+            <Hint icon="X" color="bg-xl-primary-500" label={t('dashboard:footer.quickActions')} theme={theme} />
+            <Hint icon="Y" color="bg-xl-warning-500" label={t('dashboard:footer.globalSearch')} theme={theme} />
+            <div className="h-6 w-[1px] bg-xl-primary-500/20" />
             <div className="flex items-center gap-4">
               <div className="flex gap-1.5">
-                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">L1</div>
-                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">R1</div>
+                <div className="px-2 py-1 bg-xl-primary-500/10 rounded flex items-center justify-center text-[11px] font-black text-xl-primary-500 border border-xl-primary-500/30">L1</div>
+                <div className="px-2 py-1 bg-xl-primary-500/10 rounded flex items-center justify-center text-[11px] font-black text-xl-primary-500 border border-xl-primary-500/30">R1</div>
               </div>
               <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">{t('dashboard:footer.jumpStore')}</span>
             </div>
-            <div className="h-6 w-[1px] bg-blue-500/20" />
+            <div className="h-6 w-[1px] bg-xl-primary-500/20" />
             {/* v1.0.0 — L2/R2: stesso stile a "pill" rettangolare di L1/R1
                 sopra (non il cerchio colorato di A/B/X/Y — richiesta
                 esplicita di coerenza con quel gruppo). A differenza di
@@ -10563,21 +10643,21 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 condividerne una sola. */}
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-1.5">
-                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">L2</div>
+                <div className="px-2 py-1 bg-xl-primary-500/10 rounded flex items-center justify-center text-[11px] font-black text-xl-primary-500 border border-xl-primary-500/30">L2</div>
                 <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">{t('dashboard:footer.download')}</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <div className="px-2 py-1 bg-blue-500/10 rounded flex items-center justify-center text-[11px] font-black text-blue-500 border border-blue-500/30">R2</div>
+                <div className="px-2 py-1 bg-xl-primary-500/10 rounded flex items-center justify-center text-[11px] font-black text-xl-primary-500 border border-xl-primary-500/30">R2</div>
                 <span className="text-[11px] font-black opacity-30 uppercase tracking-[0.2em] italic">{t('dashboard:footer.notifications')}</span>
               </div>
             </div>
           </>
         ) : (
           <>
-            <Hint icon="⏎" color="bg-gray-500" label={t('dashboard:footer.execute')} theme={theme} />
-            <Hint icon="⎋" color="bg-gray-500" label={t('dashboard:footer.exitView')} theme={theme} />
-            <Hint icon="TAB" color="bg-blue-500" label={t('dashboard:footer.nextGroup')} theme={theme} />
-            <Hint icon="/" color="bg-yellow-500" label={t('dashboard:footer.spotlight')} theme={theme} />
+            <Hint icon="⏎" color="bg-xl-neutral-500" label={t('dashboard:footer.execute')} theme={theme} />
+            <Hint icon="⎋" color="bg-xl-neutral-500" label={t('dashboard:footer.exitView')} theme={theme} />
+            <Hint icon="TAB" color="bg-xl-primary-500" label={t('dashboard:footer.nextGroup')} theme={theme} />
+            <Hint icon="/" color="bg-xl-warning-500" label={t('dashboard:footer.spotlight')} theme={theme} />
           </>
         )}
         
@@ -10594,7 +10674,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
           }}>
             {(isFocused) => (
               <button className={cn("flex items-center gap-4 transition-all", isFocused ? "opacity-100 scale-105" : "hover:opacity-80 opacity-70")}>
-                <Activity size={18} className={cn("transition-colors", downloads.some(d => d.status === 'downloading') ? "text-green-500 animate-pulse" : "text-blue-500")} />
+                <Activity size={18} className={cn("transition-colors", downloads.some(d => d.status === 'downloading') ? "text-xl-success-500 animate-pulse" : "text-xl-primary-500")} />
                 {/* Step 19b (v1.1.59) — segnalato dall'utente: in italiano
                     questo blocco arrivava a spezzarsi su 4 righe (Net /
                     Bridge / 0.0 / MB/s) invece delle 2 attese, perché
@@ -10609,14 +10689,14 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     impedisce che l'intero blocco venga compresso. */}
                 <div className="flex flex-col text-left shrink-0">
                   <span className="text-[9px] font-black opacity-30 uppercase tracking-[0.2em] leading-none whitespace-nowrap">{t('dashboard:footer.netBridge')}</span>
-                  <span className="text-sm font-mono font-black italic text-blue-500 leading-none whitespace-nowrap">
+                  <span className="text-sm font-mono font-black italic text-xl-primary-500 leading-none whitespace-nowrap">
                     {downloads.find(d => d.status === 'downloading')?.speed || "0.0 MB/s"}
                   </span>
                 </div>
               </button>
             )}
           </Focusable>
-          <div className="h-8 w-[1px] bg-blue-500/20" />
+          <div className="h-8 w-[1px] bg-xl-primary-500/20" />
           {/* Campanella notifiche con badge */}
           <Focusable group="footer-bar" id="footer-notifications" onEnter={() => {
             setShowNotifications(p => {
@@ -10633,20 +10713,20 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
             {(isFocused) => (
               <button className={cn(
                 "relative flex items-center justify-center w-9 h-9 rounded-full transition-all",
-                isFocused ? "bg-white/20 scale-110" : "hover:bg-white/10"
+                isFocused ? "bg-xl-ink/20 scale-110" : "hover:bg-xl-ink/10"
               )}>
                 {unreadCount > 0
-                  ? <BellDot size={20} className="text-blue-400" />
+                  ? <BellDot size={20} className="text-xl-primary-400" />
                   : <Bell size={20} className={cn(theme === 'dark' ? "opacity-40" : "opacity-50")} />}
                 {unreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full text-[8px] font-black bg-blue-600 text-white flex items-center justify-center">
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full text-[8px] font-black bg-xl-primary-600 text-xl-on-accent flex items-center justify-center">
                     {unreadCount > 9 ? '9+' : unreadCount}
                   </span>
                 )}
               </button>
             )}
           </Focusable>
-          <div className="h-8 w-[1px] bg-blue-500/20" />
+          <div className="h-8 w-[1px] bg-xl-primary-500/20" />
           <div className="text-xl font-black italic tracking-tighter">
             {time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </div>
@@ -10670,8 +10750,9 @@ function OptionItem({ id, group, icon: Icon, label, value, onClick, pending, ico
           // rosso finché in attesa — A conferma, B annulla e torna blu
           // (comportamento già corretto, era solo l'aspetto a non
           // rifletterlo).
-          pending ? "bg-red-600 border-red-500 text-white scale-105 shadow-xl shadow-red-500/30"
-            : isFocused ? "bg-blue-600 border-blue-500 text-white scale-105 shadow-xl shadow-blue-500/30" : "bg-white/5 border-transparent opacity-60"
+          // v3.1.7-dev.2 — colori con nome del tema (stessi valori di prima).
+          pending ? "bg-xl-danger-600 border-xl-danger-500 text-xl-on-accent scale-105 shadow-xl shadow-xl-danger-500/30"
+            : isFocused ? "bg-xl-primary-600 border-xl-primary-500 text-xl-on-accent scale-105 shadow-xl shadow-xl-primary-500/30" : "bg-xl-item border-transparent opacity-60"
         )}>
           {/* Step 19b (v1.1.45) — flex-1 min-w-0 qui, non prima: senza
               min-w-0 un figlio flex non si restringe mai sotto la
@@ -10706,15 +10787,15 @@ function ToggleItem({ id, group, label, active }: { id: string, group?: string, 
       {(isFocused) => (
         <div className={cn(
           "w-full p-5 rounded-2xl flex items-center justify-between transition-all border shadow-lg",
-          isFocused ? "bg-blue-600 border-blue-400 text-white scale-[1.02]" : "bg-white/5 border-white/5 opacity-70"
+          isFocused ? "bg-xl-primary-600 border-xl-primary-400 text-xl-on-accent scale-[1.02]" : "bg-xl-ink/5 border-xl-ink/5 opacity-70"
         )}>
           <span className="font-black uppercase text-sm tracking-tight italic">{label}</span>
           <div className={cn(
              "w-12 h-6 rounded-full relative transition-colors",
-             active ? "bg-green-500" : "bg-white/20"
+             active ? "bg-xl-success-500" : "bg-xl-ink/20"
           )}>
              <div className={cn(
-               "absolute top-1 w-4 h-4 bg-white rounded-full transition-all",
+               "absolute top-1 w-4 h-4 bg-xl-ink rounded-full transition-all",
                active ? "right-1" : "left-1"
              )} />
           </div>
@@ -10735,7 +10816,7 @@ function Hint({ icon, color, label, theme }: { icon: string, color: string, labe
       </div>
       <span className={cn(
         "text-xs font-black opacity-40 group-hover:opacity-100 transition-opacity uppercase tracking-[0.2em] italic whitespace-nowrap",
-        theme === 'dark' ? "text-white" : "text-black"
+        "text-xl-contrast"
       )}>{label}</span>
     </div>
   );

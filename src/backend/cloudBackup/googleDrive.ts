@@ -19,6 +19,7 @@
 
 import { CloudBackupProvider } from './base';
 import { writeLog } from '../logger';
+import { BUNDLE_MAX_COMPRESSED } from '../restoreSafety';
 import * as db from '../db';
 import { execSync, spawn } from 'child_process';
 import * as http from 'http';
@@ -330,7 +331,15 @@ export class GoogleDriveProvider implements CloudBackupProvider {
         writeLog('error', `[CloudBackup/GoogleDrive] Download fallito (${res.status}): ${errText}`);
         return { success: false, message: `Download fallito (${res.status}): ${errText.slice(0, 300)}` };
       }
+      // v3.0.2-dev.4 — tetto alla dimensione del bundle (input non fidato): si controlla prima l'intestazione, poi i byte letti.
+      const declared = Number(res.headers.get('content-length') ?? 0);
+      if (declared > BUNDLE_MAX_COMPRESSED) {
+        return { success: false, message: `Il backup su Drive e' troppo grande (${(declared / 1048576).toFixed(0)} MB): ripristino annullato.` };
+      }
       const data = Buffer.from(await res.arrayBuffer());
+      if (data.length > BUNDLE_MAX_COMPRESSED) {
+        return { success: false, message: `Il backup su Drive e' troppo grande (${(data.length / 1048576).toFixed(0)} MB): ripristino annullato.` };
+      }
       writeLog('info', `[CloudBackup/GoogleDrive] Backup scaricato (${(data.length / 1024).toFixed(0)} KB).`);
       return { success: true, message: 'Backup scaricato.', data };
     } catch (err) {

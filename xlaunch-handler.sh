@@ -31,6 +31,20 @@ set -u
 # comando invece che con il path reale in /opt/x-launcher.
 PROJECT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LAUNCHER_URL="http://localhost:3000"
+
+# v3.0.2-dev.3 — il demone richiede un token (audit di sicurezza, SECURITY-AUDIT.md). Lo crea al primo
+# avvio in ~/.local/share/x-launcher/api-token (0600). xl_curl = curl che lo aggiunge come header
+# (passato via -K da un descrittore, non come argomento: non compare in `ps`). Letto a ogni chiamata.
+XL_TOKEN_FILE="$HOME/.local/share/x-launcher/api-token"
+xl_curl() {
+  local t=""
+  [ -r "$XL_TOKEN_FILE" ] && t="$(tr -d '[:space:]' < "$XL_TOKEN_FILE" 2>/dev/null)"
+  if [ -n "$t" ]; then
+    curl -K <(printf 'header = "X-XLauncher-Token: %s"\n' "$t") "$@"
+  else
+    curl "$@"
+  fi
+}
 WINDOW_TITLE="X-Launcher HTPC"
 WAIT_TIMEOUT=30
 
@@ -47,6 +61,13 @@ GAME_ID="${URI#xlaunch://}"
 GAME_ID="${GAME_ID%/}"
 if [ -z "$GAME_ID" ]; then
   echo "[XLAUNCH] URI malformato, nessun id estratto da: $URI" >&2
+  exit 1
+fi
+# v3.0.2-dev.5 (audit punto 8) — xlaunch:// e' registrato per tutto il desktop: QUALUNQUE pagina web puo' tentare
+# di aprirlo. L'id finiva dentro una stringa JSON costruita a mano (un URI come xlaunch://x","launchArgsOverride":"..."
+# aggiungeva campi al corpo). Ora si accettano solo gli id reali (lettere, cifre, . _ -) e nient'altro.
+if ! [[ "$GAME_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$ ]]; then
+  echo "[XLAUNCH] Id non valido (ammessi solo lettere, cifre, '.', '_' e '-'): rifiutato." >&2
   exit 1
 fi
 echo "[XLAUNCH] Richiesta lancio per id: $GAME_ID"
@@ -74,7 +95,9 @@ if [ "$NEEDS_WINDOW" = "true" ]; then
   # primo piano e la gestione pannelli XFCE (vedi i due guard aggiunti lì
   # per questo stesso motivo) — la finestra, una volta comparsa, viene
   # nascosta qui sotto PRIMA che l'utente possa vederla, non dopo.
-  X_LAUNCHER_START_HIDDEN=true "$PROJECT_DIR/kiosk-launch.sh" &>/tmp/xlaunch-kiosk.log &
+  XLAUNCH_LOG="${XDG_RUNTIME_DIR:-$HOME/.cache}/xlaunch-kiosk.log"   # non in /tmp (percorso prevedibile: symlink attack)
+  mkdir -p "$(dirname "$XLAUNCH_LOG")" 2>/dev/null
+  X_LAUNCHER_START_HIDDEN=true "$PROJECT_DIR/kiosk-launch.sh" &>"$XLAUNCH_LOG" &
 
   echo "[XLAUNCH] Attendo la comparsa della finestra per nasconderla..."
   for i in $(seq 1 $WAIT_TIMEOUT); do
@@ -96,7 +119,7 @@ for i in $(seq 1 $WAIT_TIMEOUT); do
     break
   fi
   if [ "$i" -eq "$WAIT_TIMEOUT" ]; then
-    echo "[XLAUNCH] Timeout: il daemon non ha risposto in ${WAIT_TIMEOUT}s. Log: /tmp/xlaunch-kiosk.log" >&2
+    echo "[XLAUNCH] Timeout: il daemon non ha risposto in ${WAIT_TIMEOUT}s. Log: ${XLAUNCH_LOG:-?}" >&2
     exit 1
   fi
   sleep 1
@@ -104,7 +127,7 @@ done
 
 # --- Delega il lancio vero e proprio — stesso endpoint del pulsante Play ---
 echo "[XLAUNCH] Richiesta lancio: $GAME_ID"
-curl -s -X POST "${LAUNCHER_URL}/api/launch" \
+xl_curl -s -X POST "${LAUNCHER_URL}/api/launch" \
   -H "Content-Type: application/json" \
-  -d "{\"id\":\"${GAME_ID}\"}"
+  -d "$(printf '{"id":"%s"}' "$GAME_ID")"
 echo ""

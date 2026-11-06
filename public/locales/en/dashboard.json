@@ -70,7 +70,34 @@
     "startTyping": "Start typing...",
     "paste": "Paste",
     "clipboardEmpty": "Clipboard empty",
-    "clipboardUnavailable": "Clipboard unavailable"
+    "clipboardUnavailable": "Clipboard unavailable",
+    "tips": {
+      "windowed": "Start windowed — the most cited fix for hangs/freezes caused by exclusive fullscreen under Wine/Proton",
+      "noborder": "Borderless window — combined with -windowed for a \"fullscreen\" without the problems of exclusive fullscreen",
+      "dx9": "Force DirectX 9 — often fewer quirks under Wine/DXVK than later versions of the same game",
+      "nointro": "Skip the intro videos — a frequent cause of crashes under Wine because of codec problems",
+      "novid": "Like -nointro, Source engine variant (Half-Life 2, CS:S, TF2, Portal, Left 4 Dead)",
+      "high": "High process priority — suggested for stutter in Source/older games",
+      "nojoy": "Disable the game's joystick detection — useful if it conflicts with the Dashboard's controller detection",
+      "retroarchCrt": "Ready-to-use CRT filter (crt-easymode) — --appendconfig= turns out to be ignored by RetroArch, this is the flag verified to work",
+      "retroarchVerbose": "Verbose log — the first step to diagnose a core or a ROM that won't start",
+      "retroarchMaxFrames": "Closes RetroArch after N frames — only useful for automated tests, not for normal use",
+      "winedebug": "Silences Wine's debug log — less noise, slightly less overhead",
+      "winearch": "Force a 64-bit prefix",
+      "wineesync": "Enable esync — lighter synchronization, useful on older kernels",
+      "winefsync": "Enable fsync — the more modern equivalent of esync, recent kernels",
+      "wineLargeAddressAware": "Lets 32-bit games use more than 2 GB of RAM — a widely cited fix",
+      "winemenubuilder": "Stops Wine from automatically creating shortcuts/menu entries",
+      "d3d11Native": "Force the native DLL instead of the built-in one — useful for specific graphics problems",
+      "protonLog": "Enable Proton logging to file — the first step of any diagnosis",
+      "protonNoEsync": "Disable esync — sometimes needed for compatibility",
+      "protonNoFsync": "Disable fsync — same reason as NO_ESYNC",
+      "protonWined3d": "Force WineD3D instead of DXVK/VKD3D — useful if DXVK has specific problems",
+      "protonLargeAddressAware": "Proton equivalent of the RAM fix for 32-bit games",
+      "dxvkHud": "DXVK overlay with on-screen FPS — quick diagnostics, changes nothing",
+      "dxvkAsync": "Reduces shader compilation stutter — one of the most cited fixes of all"
+    },
+    "crtFilter": "📺 CRT filter"
   },
   "notif": {
     "launchBlockedTitle": "Launch blocked — {{title}}",
@@ -95,6 +122,27 @@
   },
   "launcherDescriptions": {
     "ea_app_launcher": "EA App launcher — required by some EA games bought on Epic, GOG, Amazon Games, or Steam. Install it once: it'll be shared by every game that requires it.",
-    "ubisoft_connect_launcher": "Ubisoft Connect launcher — required by some Ubisoft games bought on Epic, GOG, or Amazon Games. Install it once: it'll be shared by every game that requires it."
+    "ubisoft_connect_launcher": "Ubisoft Connect launcher — required by some Ubisoft games bought on Epic, GOG, or Amazon Games. Install it once: it'll be shared by every game that requires it.",
+    "steam_bigpicture_launcher": "Switch to Steam in Big Picture mode, with your full Steam library and Valve's native controller-first interface."
+  },
+  "splash": {
+    "launchingFrom": "Launching from {{store}}...",
+    "launching": "Launching...",
+    "verifying": "Checking the environment",
+    "done": "Ready.",
+    "failed": "Launch failed.",
+    "timeout": "Timed out — launch stopped.",
+    "cancelled": "Launch cancelled."
+  },
+  "logPanel": {
+    "pauseScroll": "Pause auto-scroll",
+    "resumeScroll": "Resume auto-scroll",
+    "copyLogs": "Copy log to clipboard",
+    "downloadLogs": "Download log as file",
+    "empty": "No logs.",
+    "emptyFiltered": "No logs for the selected filter.",
+    "entries_one": "{{count}} entry",
+    "entries_other": "{{count}} entries",
+    "filterActive": " · filter active ({{count}})"
   }
 }

@@ -4,6 +4,33 @@
 # =============================================================
 
 LAUNCHER_URL="http://localhost:3000"
+
+# v3.0.2-dev.3 — il demone richiede un token (audit di sicurezza, SECURITY-AUDIT.md). Lo crea al primo
+# avvio in ~/.local/share/x-launcher/api-token (0600). xl_curl = curl che lo aggiunge come header
+# (passato via -K da un descrittore, non come argomento: non compare in `ps`). Letto a ogni chiamata.
+XL_TOKEN_FILE="$HOME/.local/share/x-launcher/api-token"
+xl_curl() {
+  local t=""
+  [ -r "$XL_TOKEN_FILE" ] && t="$(tr -d '[:space:]' < "$XL_TOKEN_FILE" 2>/dev/null)"
+  if [ -n "$t" ]; then
+    curl -K <(printf 'header = "X-XLauncher-Token: %s"\n' "$t") "$@"
+  else
+    curl "$@"
+  fi
+}
+
+# xl_browser_url URL — aggiunge all'URL un codice monouso (60 s) con cui il browser ottiene il cookie
+# di sessione. Se il demone non risponde o l'autenticazione e' spenta, restituisce l'URL invariato.
+xl_browser_url() {
+  local url="$1" n
+  n="$(xl_curl -s --max-time 3 -X POST "${LAUNCHER_URL}/api/auth/nonce" 2>/dev/null | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')" || n=""
+  if [ -z "$n" ]; then printf '%s' "$url"; return; fi
+  case "$url" in
+    *\?*) printf '%s&xl_nonce=%s' "$url" "$n" ;;
+    *)    printf '%s/?xl_nonce=%s' "${url%/}" "$n" ;;
+  esac
+}
+
 WAIT_TIMEOUT=30
 # v2.2.17-dev.1 — BUG REALE segnalato dall'utente: install.sh crea un
 # symlink in /usr/local/bin/x-launcher → questo script in /opt/x-launcher/.
@@ -94,6 +121,13 @@ if [ "$X_LAUNCHER_SPACES_MODE" = "true" ]; then
     *\?*) BROWSER_URL="${BROWSER_URL}&spaces=1" ;;
     *)    BROWSER_URL="${BROWSER_URL}/?spaces=1" ;;
   esac
+  # v3.2.0-Mars — badge "Modalità spazi" nel quick-menu: per default solo con la copia di sviluppo
+  # (--local-server). X_LAUNCHER_SPACES_BADGE=1 (es. in ~/.config/openbox/environment) lo mostra anche
+  # nella sessione stabile, =0 lo spegne anche in sviluppo.
+  case "${X_LAUNCHER_SPACES_BADGE:-}" in
+    1|true|on|yes)  BROWSER_URL="${BROWSER_URL}&spacesbadge=1" ;;
+    0|false|off|no) BROWSER_URL="${BROWSER_URL}&spacesbadge=0" ;;
+  esac
   echo "[KIOSK] MODALITA' SPAZI — la Dashboard gestisce il congelamento dell'input per spazio (URL: ${BROWSER_URL})."
 fi
 
@@ -114,7 +148,7 @@ fi
 # assunzione, lo stesso meccanismo già collaudato per ogni gioco.
 if [ "$X_LAUNCHER_LOCAL_SERVER" != "true" ] && curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null && command -v wmctrl &>/dev/null && wmctrl -l 2>/dev/null | grep -q "X-Launcher HTPC"; then
   echo "[KIOSK] Daemon e finestra già attivi — rientro da Steam Big Picture, nessun nuovo avvio."
-  curl -s -X POST "${LAUNCHER_URL}/api/system/steam-bigpicture-closed" &>/dev/null
+  xl_curl -s -X POST "${LAUNCHER_URL}/api/system/steam-bigpicture-closed" &>/dev/null
   wmctrl -a "X-Launcher HTPC" 2>/dev/null
   exit 0
 fi
@@ -495,6 +529,9 @@ if [ "$X_LAUNCHER_DEDICATED_SESSION" = "true" ]; then
   fi
 
   echo "[KIOSK] Avvio di X-Launcher in sessione dedicata tramite Gamescope..."
+
+  # v3.0.2-dev.3 — codice monouso per il cookie di sessione del browser (il token non va nella riga di comando).
+  BROWSER_URL="$(xl_browser_url "$BROWSER_URL")"
   
   if [ "$BROWSER_TYPE" = "firefox" ]; then
     # v1.1.81 — FIX segnalato dall'utente: --new-instance da solo non
@@ -540,6 +577,24 @@ if [ "$X_LAUNCHER_DEDICATED_SESSION" = "true" ]; then
 
 # CASO 2: AVVIO SOPRA UN DESKTOP ENVIRONMENT ESISTENTE (XFCE/MATE/GNOME/Plasma)
 else
+  # v3.2.1-dev.1 — in modalità spazi il browser della Dashboard parte in uno scope systemd utente
+  # "xlauncher-dashboard-<ts>": così spaces.py può congelarlo (cgroup freezer) quando il gioco in primo
+  # piano è in un altro spazio, e scongelarlo prima di tornare allo spazio 0. Il blocco in pagina resta
+  # come ripiego. Se systemd-run non funziona, o con X_LAUNCHER_SPACES_FREEZE_DASHBOARD=0, il browser
+  # parte come prima (nessuno scope, la Dashboard non si congela).
+  DASH_WRAP=()
+  case "${X_LAUNCHER_SPACES_FREEZE_DASHBOARD:-1}" in
+    0|false|off|no) ;;
+    *)
+      if [ "$X_LAUNCHER_SPACES_MODE" = "true" ] && command -v systemd-run &>/dev/null \
+         && systemd-run --user --scope --quiet --collect --unit="xlauncher-probe-$$" true &>/dev/null; then
+        DASH_WRAP=(systemd-run --user --scope --quiet --collect --unit="xlauncher-dashboard-$(date +%s)" --)
+        echo "[KIOSK] Dashboard avviata nello scope ${DASH_WRAP[5]#--unit=} (congelabile da spaces.py)."
+      elif [ "$X_LAUNCHER_SPACES_MODE" = "true" ]; then
+        echo "[KIOSK] systemd-run --user non disponibile: la Dashboard non si congela (resta il blocco in pagina)."
+      fi
+      ;;
+  esac
   # v2.2.19-dev.2 — BUG REALE CONFERMATO: xdash.service ha DISPLAY=:0
   # fisso — corretto finché esiste solo questa sessione, ma se prima era
   # attiva la sessione Kiosk (gamescope, DISPLAY diverso) il daemon resta
@@ -549,10 +604,13 @@ else
   # v2.2.19-dev.7 — kind:"desktop" azzera lo stato "sessione Kiosk attiva"
   # nel daemon quando si torna qui da gamescope, così il pulsante
   # "Modalità Gamescope" nel menu torna correttamente a "Disattivo".
-  curl -sf -X POST "${LAUNCHER_URL}/api/system/active-display" \
+  xl_curl -sf -X POST "${LAUNCHER_URL}/api/system/active-display" \
     -H "Content-Type: application/json" \
     -d "{\"display\":\"${DISPLAY:-:0}\",\"kind\":\"desktop\"}" &>/dev/null \
     || echo "[KIOSK] ATTENZIONE: segnalazione DISPLAY al daemon fallita (curl)."
+
+  # v3.0.2-dev.3 — codice monouso per il cookie di sessione del browser (il token non va nella riga di comando).
+  BROWSER_URL="$(xl_browser_url "$BROWSER_URL")"
 
   if [ "$BROWSER_TYPE" = "firefox" ]; then 
     # v1.1.81 — -no-remote + profilo dedicato, altrimenti la Dashboard
@@ -569,7 +627,7 @@ else
       # stesso obiettivo dell'utente per il ramo Chromium: un solo
       # comportamento uniforme su ogni desktop, senza trick per-DE.
       echo "[KIOSK] Firefox in modalità -kiosk reale (default)." 
-      "$BROWSER" -kiosk --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${BROWSER_URL}" & 
+      ${DASH_WRAP[@]+"${DASH_WRAP[@]}"} "$BROWSER" -kiosk --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${BROWSER_URL}" & 
       BROWSER_PID=$! 
       focus_dashboard_window & 
       wait "$BROWSER_PID" 
@@ -587,7 +645,7 @@ else
       # rimandato a una sessione futura.
       maybe_enable_xfce_panel_autohide 
       maybe_enable_xfwm4_titleless 
-      "$BROWSER" --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${BROWSER_URL}" & 
+      ${DASH_WRAP[@]+"${DASH_WRAP[@]}"} "$BROWSER" --no-remote --profile "$FIREFOX_PROFILE_DIR" --private-window --new-instance "${BROWSER_URL}" & 
       BROWSER_PID=$! 
       focus_dashboard_window & 
       remove_window_decorations & 
@@ -595,7 +653,7 @@ else
     fi 
   else 
     if [ "$DISPLAY_MODE" = "window" ]; then 
-      "$BROWSER" \
+      ${DASH_WRAP[@]+"${DASH_WRAP[@]}"} "$BROWSER" \
         --app="${BROWSER_URL}" \
         --window-size=1280,800 \
         --window-position=100,100 \
@@ -621,7 +679,7 @@ else
       # cambiava — vedi CHANGELOG-5.md per la cronologia completa).
       maybe_enable_xfce_panel_autohide 
       maybe_enable_xfwm4_titleless 
-      "$BROWSER" \
+      ${DASH_WRAP[@]+"${DASH_WRAP[@]}"} "$BROWSER" \
         --app="${BROWSER_URL}" \
         --start-maximized \
         --use-system-title-bar \
@@ -655,7 +713,7 @@ else
       # un test reale, non qualcosa su cui pre-applicare alla cieca gli
       # stessi trick che questo cambiamento vuole eliminare.
       echo "[KIOSK] Chromium in modalità --kiosk reale (default)." 
-      "$BROWSER" \
+      ${DASH_WRAP[@]+"${DASH_WRAP[@]}"} "$BROWSER" \
         --app="${BROWSER_URL}" \
         --kiosk \
         --noerrdialogs \

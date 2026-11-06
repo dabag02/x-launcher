@@ -15,5 +15,9 @@
   "kioskMode": "Kiosk",
   "borderlessMode": "Senza Bordi",
   "exit": "Esci",
-  "confirmA": "Conferma con A"
+  "confirmA": "Conferma con A",
+  "localServerBadge": "Server locale · :{{port}}",
+  "spacesBadge": "Modalità spazi · spazio {{space}} · giochi {{games}}",
+  "spacesBadgeUnreachable": "Modalità spazi · gestore non raggiungibile",
+  "credits": "ideato e sviluppato con Claude Code da Daniele Bagaglini"
 }

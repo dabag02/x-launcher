@@ -33,7 +33,7 @@
 import { DownloadTask, DownloadPhase } from '../types';
 import { spawn, execSync, execFile, ChildProcess } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, readdirSync, mkdirSync, statSync, readFileSync, rmSync } from 'fs';
+import { existsSync, readdirSync, mkdirSync, statSync, readFileSync, rmSync, realpathSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
 import * as db from './db';
@@ -45,6 +45,7 @@ import { getSharedPrefixBasePath, resolveSharedPrefixExecutionPath } from './sha
 import { getThirdPartyLauncherDefinition, getThirdPartyLauncherByStoreId, ThirdPartyLauncherDefinition } from './plugins/thirdPartyLaunchers';
 import { browseForFile } from './filePicker';
 import { getActiveDisplayEnv } from './activeDisplay';
+import { findFirst, findAll, globToRegExp, EXE_EXCLUDES_STD } from './safeExec';
 
 // v0.99.35 — versione asincrona di execFile, usata per "sync" tra
 // download e creazione prefix (vedi runEpic/runGOG). Non sostituisce
@@ -504,14 +505,11 @@ export function resolveGogExe(installPath: string): {
 export function findMainExe(basePath: string): string | null {
   if (!existsSync(basePath)) return null;
   try {
-    const result = execSync(
-      `find "${basePath}" -maxdepth 4 -iname "*.exe" ` +
-      `! -iname "unins*" ! -iname "UnityCrashHandler*" ` +
-      `! -iname "CrashReporter*" ! -iname "vcredist*" ` +
-      `! -iname "dxsetup*" ! -iname "vc_redist*" ` +
-      `| head -1`,
-      { encoding: 'utf-8', timeout: 8000 }
-    ).trim();
+    // v3.0.2-dev.5 — find senza shell (safeExec.ts).
+    const result = findFirst(basePath, {
+      maxDepth: 4, inames: ['*.exe'],
+      excludeInames: ['unins*', 'UnityCrashHandler*', 'CrashReporter*', 'vcredist*', 'dxsetup*', 'vc_redist*'],
+    });
     return result || null;
   } catch {
     return null;
@@ -541,19 +539,8 @@ export function findInstalledLauncherExe(driveCPath: string, hintRelPath?: strin
   for (const sub of ['Program Files (x86)', 'Program Files']) {
     const base = path.join(driveCPath, sub);
     if (!existsSync(base)) continue;
-    try {
-      const result = execSync(
-        `find "${base}" -maxdepth 5 -iname "*.exe" ` +
-        `! -iname "unins*" ! -iname "*crashhandler*" ! -iname "*crashreporter*" ` +
-        `! -iname "vcredist*" ! -iname "vc_redist*" ! -iname "dxsetup*" ` +
-        `! -iname "*explorer*" ! -iname "*helper*" ! -iname "*updater*" ` +
-        `| head -1`,
-        { encoding: 'utf-8', timeout: 8000 }
-      ).trim();
-      if (result) return result;
-    } catch {
-      // continua col prossimo sub-percorso
-    }
+    const result = findFirst(base, { maxDepth: 5, inames: ['*.exe'], excludeInames: [...EXE_EXCLUDES_STD] });
+    if (result) return result;
   }
   return null;
 }
@@ -633,16 +620,20 @@ export function resolveDownloadsDir(): string | null {
 function findInstallerInDownloads(filenameHints: string[] = []): string | null {
   const downloadsDir = resolveDownloadsDir();
   if (!downloadsDir) return null;
-  const nameFilter = filenameHints.length > 0
-    ? ` \\( ${filenameHints.map(h => `-iname "${h}"`).join(' -o ')} \\) `
-    : ' ';
+  // v3.0.2-dev.5 — niente shell: elenco della cartella, filtro sul nome e ordine per data in JS.
   try {
-    const result = execSync(
-      `find "${downloadsDir}" -maxdepth 1 -iname "*.exe" ${nameFilter}` +
-      `-printf "%T@ %p\\n" | sort -rn | head -1 | cut -d' ' -f2-`,
-      { encoding: 'utf-8', timeout: 5000 }
-    ).trim();
-    return result || null;
+    const hints = filenameHints.map(globToRegExp);
+    let best: { file: string; mtime: number } | null = null;
+    for (const name of readdirSync(downloadsDir)) {
+      if (!/\.exe$/i.test(name)) continue;
+      if (hints.length > 0 && !hints.some(rx => rx.test(name))) continue;
+      const full = path.join(downloadsDir, name);
+      let st;
+      try { st = statSync(full); } catch { continue; }
+      if (!st.isFile()) continue;
+      if (!best || st.mtimeMs > best.mtime) best = { file: full, mtime: st.mtimeMs };
+    }
+    return best ? best.file : null;
   } catch {
     return null;
   }
@@ -824,6 +815,27 @@ type Listener = (task: DownloadTask) => void;
 // ---------------------------------------------------------------------------
 // DownloadManager
 // ---------------------------------------------------------------------------
+
+/** v3.0.2-dev.6 — l'installer scelto dall'utente (o inviato alla rotta installer-select) verra' eseguito
+ *  sotto Wine: accetta solo un file regolare .exe/.msi/.cab con percorso assoluto. Nessuna restrizione
+ *  sulla cartella (gli installer stanno ovunque), ma niente directory, device, FIFO o percorsi relativi. */
+export function validateInstallerFile(p: unknown): { ok: true; path: string } | { ok: false; message: string } {
+  if (typeof p !== 'string' || p.length === 0 || p.length > 4096 || p.includes('\0')) {
+    return { ok: false, message: 'Percorso non valido.' };
+  }
+  if (!path.isAbsolute(p)) return { ok: false, message: 'Il percorso deve essere assoluto.' };
+  let real: string;
+  try {
+    real = realpathSync(p);
+    if (!statSync(real).isFile()) return { ok: false, message: 'Il percorso selezionato non è un file.' };
+  } catch {
+    return { ok: false, message: 'Il file selezionato non esiste più.' };
+  }
+  if (!/\.(exe|msi|cab)$/i.test(real)) {
+    return { ok: false, message: 'Seleziona un installer .exe, .msi o .cab.' };
+  }
+  return { ok: true, path: real };
+}
 
 class DownloadManager {
   private tasks     = new Map<string, DownloadTask>();
@@ -1241,28 +1253,19 @@ class DownloadManager {
 
     // Step 4: Cerca installer .exe — lgogdownloader crea una sottocartella col nome del gioco
     // Struttura attesa: installer/<slug>/setup_<slug>_<ver>.exe
-    let findExeResult = '';
-    try {
-      findExeResult = execSync(
-        `find "${task.installerPath}" -type f -iname "setup*.exe" | head -1`,
-        { encoding: 'utf-8', timeout: 5000 }
-      ).trim();
-    } catch { /* find non ha trovato nulla */ }
+    // v3.0.2-dev.5 — find senza shell (safeExec.ts). installerPath e' sempre impostato a questo punto (come agli step 1-3).
+    const installerDir = task.installerPath!;
+    let findExeResult = findFirst(installerDir, { type: 'f', inames: ['setup*.exe'], timeoutMs: 5000 });
 
     // Fallback: qualsiasi .exe che non sia un extra
     if (!findExeResult) {
-      try {
-        findExeResult = execSync(
-          `find "${task.installerPath}" -type f -iname "*.exe" ! -path "*/extras/*" | head -1`,
-          { encoding: 'utf-8', timeout: 5000 }
-        ).trim();
-      } catch { /* nessun exe */ }
+      findExeResult = findFirst(installerDir, { type: 'f', inames: ['*.exe'], excludePaths: ['*/extras/*'], timeoutMs: 5000 });
     }
 
     this.log(task, 'system', `[GOG] Step 4 — Installer trovato: ${findExeResult || '(nessuno)'}`);
 
     if (!findExeResult) {
-      const allFound = execSync(`find "${task.installerPath}" -type f`, { encoding: 'utf-8', timeout: 5000 }).trim();
+      const allFound = findAll(installerDir, { type: 'f', timeoutMs: 5000 }).join('\n');
       this.log(task, 'error', `[GOG] File trovati in installer dir:\n${allFound || '(nessuno)'}`);
       throw new Error(
         `[GOG] Nessun installer .exe in ${task.installerPath}. ` +
@@ -1816,7 +1819,9 @@ class DownloadManager {
     if (result.outcome !== 'selected' || !result.path) {
       return { success: false, message: 'Nessun file selezionato.' };
     }
-    this.completeWithInstaller(task, result.path);
+    const v = validateInstallerFile(result.path);
+    if (!v.ok) return { success: false, message: v.message };
+    this.completeWithInstaller(task, v.path);
     return { success: true, message: 'Installer selezionato, installazione avviata.' };
   }
 
@@ -1833,10 +1838,9 @@ class DownloadManager {
     if (!task || task.status !== 'awaiting_installer') {
       return { success: false, message: 'Nessuna installazione in attesa per questo gioco.' };
     }
-    if (!existsSync(filePath)) {
-      return { success: false, message: 'Il file selezionato non esiste più.' };
-    }
-    this.completeWithInstaller(task, filePath);
+    const v = validateInstallerFile(filePath);
+    if (!v.ok) return { success: false, message: v.message };
+    this.completeWithInstaller(task, v.path);
     return { success: true, message: 'Installer selezionato, installazione avviata.' };
   }
 

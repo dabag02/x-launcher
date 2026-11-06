@@ -639,22 +639,18 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
   const keyClass = (isFocused: boolean) => cn(
     'w-full aspect-square md:w-11 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center text-xs md:text-sm font-black transition-all touch-none',
     isFocused
-      ? 'bg-blue-600 text-white scale-110 shadow-lg shadow-blue-500/20'
-      : isLight
-        ? 'bg-gray-100 text-gray-800 border border-gray-200 opacity-80'
-        : 'bg-white/5 opacity-80'
+      ? 'bg-xl-primary-600 text-xl-on-accent scale-110 shadow-lg shadow-xl-primary-500/20'
+      : ('opacity-80 bg-xl-fill-5 text-xl-button-text' + (isLight ? ' border border-xl-border' : ''))
   );
 
   const wideKeyClass = (isFocused: boolean, accent: 'red' | 'green' | 'blue' | 'neutral') => cn(
     'h-full aspect-square md:w-11 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none shrink-0',
     isFocused
-      ? accent === 'red'   ? 'bg-red-600 text-white scale-110 shadow-lg shadow-red-500/20'
-      : accent === 'green' ? 'bg-green-600 text-white scale-110 shadow-lg shadow-green-500/20'
-      : accent === 'blue'  ? 'bg-blue-600 text-white scale-110 shadow-lg shadow-blue-500/20'
-      : 'bg-blue-600/50 text-white scale-110 shadow-lg'
-      : isLight
-        ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-        : 'bg-white/5 opacity-80'
+      ? accent === 'red'   ? 'bg-xl-danger-600 text-xl-on-accent scale-110 shadow-lg shadow-xl-danger-500/20'
+      : accent === 'green' ? 'bg-xl-success-600 text-xl-on-accent scale-110 shadow-lg shadow-xl-success-500/20'
+      : accent === 'blue'  ? 'bg-xl-primary-600 text-xl-on-accent scale-110 shadow-lg shadow-xl-primary-500/20'
+      : 'bg-xl-primary-600/50 text-xl-ink scale-110 shadow-lg'
+      : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
   );
 
   const renderLetterKey = (rowIndex: number, keyDef: KeyDef, i: number) => {
@@ -682,9 +678,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
       exit={{ y: 20, opacity: 0 }}
       className={cn(
         'backdrop-blur-3xl rounded-[1.5rem] md:rounded-[2rem] p-4 md:p-6 shadow-2xl flex flex-col gap-2 md:gap-3 w-[95vw] md:w-full max-w-4xl border',
-        isLight
-          ? 'bg-white/95 border-gray-200'
-          : 'bg-[#12141a]/95 border-white/10',
+        'bg-xl-keyboard-glass border-xl-border',
         className
       )}
     >
@@ -734,10 +728,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               <div className={cn(
                 'px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold transition-all touch-none',
                 isFocused
-                  ? 'bg-blue-600 text-white scale-105'
-                  : isLight
-                    ? 'bg-gray-100 text-gray-500 border border-gray-200'
-                    : 'bg-white/5 text-white/50'
+                  ? 'bg-xl-primary-600 text-xl-on-accent scale-105'
+                  : ('bg-xl-fill-5 text-xl-fg-50-alt' + (isLight ? ' border border-xl-border' : ''))
               )}>
                 {s.label ?? s.value}
               </div>
@@ -768,7 +760,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
                     invece che scoprirlo di colpo dopo 4 secondi. */}
                 {clearHoldProgress > 0 && (
                   <div
-                    className="absolute inset-x-0 bottom-0 bg-white/30 pointer-events-none"
+                    className="absolute inset-x-0 bottom-0 bg-xl-ink/30 pointer-events-none"
                     style={{ height: `${clearHoldProgress * 100}%` }}
                   />
                 )}
@@ -802,12 +794,10 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               <div className={cn(
                 'w-full aspect-square md:w-11 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
                 isShift
-                  ? 'bg-blue-600 text-white shadow-lg'
+                  ? 'bg-xl-primary-600 text-xl-on-accent shadow-lg'
                   : isFocused
-                    ? 'bg-blue-600/50 text-white scale-110 shadow-lg'
-                    : isLight
-                      ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-                      : 'bg-white/5 opacity-80'
+                    ? 'bg-xl-primary-600/50 text-xl-ink scale-110 shadow-lg'
+                    : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
               )}>
                 <ArrowBigUp size={16} />
               </div>
@@ -822,7 +812,7 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
             sopra la riga, non permanente: non sposta il layout quando
             non serve. */}
         {pasteStatus !== 'idle' && (
-          <p className="text-center text-[9px] font-black uppercase tracking-widest text-red-400 -mb-0.5">
+          <p className="text-center text-[9px] font-black uppercase tracking-widest text-xl-danger-400 -mb-0.5">
             {pasteStatus === 'empty' ? t('dashboard:keyboard.clipboardEmpty') : t('dashboard:keyboard.clipboardUnavailable')}
           </p>
         )}
@@ -866,10 +856,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center gap-1.5 text-[9px] font-black uppercase tracking-widest transition-all touch-none',
                 isFocused
-                  ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
-                  : isLight
-                    ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-                    : 'bg-white/5 opacity-80'
+                  ? 'bg-xl-primary-600 text-xl-on-accent scale-y-105 shadow-lg shadow-xl-primary-500/20'
+                  : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
               )}>
                 <Languages size={13} />
                 {layout.label}
@@ -888,10 +876,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
                 isFocused
-                  ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
-                  : isLight
-                    ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-                    : 'bg-white/5 opacity-80'
+                  ? 'bg-xl-primary-600 text-xl-on-accent scale-y-105 shadow-lg shadow-xl-primary-500/20'
+                  : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
               )}>
                 <ChevronLeft size={16} />
               </div>
@@ -902,10 +888,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
                 isFocused
-                  ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
-                  : isLight
-                    ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-                    : 'bg-white/5 opacity-80'
+                  ? 'bg-xl-primary-600 text-xl-on-accent scale-y-105 shadow-lg shadow-xl-primary-500/20'
+                  : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
               )}>
                 <Space size={16} />
               </div>
@@ -916,10 +900,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
                 isFocused
-                  ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
-                  : isLight
-                    ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-                    : 'bg-white/5 opacity-80'
+                  ? 'bg-xl-primary-600 text-xl-on-accent scale-y-105 shadow-lg shadow-xl-primary-500/20'
+                  : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
               )}>
                 <ChevronRight size={16} />
               </div>
@@ -934,10 +916,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
                 <div className={cn(
                   'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center transition-all touch-none',
                   isFocused
-                    ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
-                    : isLight
-                      ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-                      : 'bg-white/5 opacity-80'
+                    ? 'bg-xl-primary-600 text-xl-on-accent scale-y-105 shadow-lg shadow-xl-primary-500/20'
+                    : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
                 )}>
                   <FolderOpen size={16} />
                 </div>
@@ -949,10 +929,8 @@ export const VirtualKeyboard: React.FC<VirtualKeyboardProps> = ({
               <div className={cn(
                 'w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center gap-1.5 text-[9px] font-black uppercase tracking-widest transition-all touch-none',
                 isFocused
-                  ? 'bg-blue-600 text-white scale-y-105 shadow-lg shadow-blue-500/20'
-                  : isLight
-                    ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-80'
-                    : 'bg-white/5 opacity-80'
+                  ? 'bg-xl-primary-600 text-xl-on-accent scale-y-105 shadow-lg shadow-xl-primary-500/20'
+                  : ('opacity-80 bg-xl-fill-5 text-xl-alt-text-700' + (isLight ? ' border border-xl-border' : ''))
               )}>
                 <ClipboardPaste size={13} />
                 {t('dashboard:keyboard.paste')}

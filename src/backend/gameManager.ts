@@ -1,6 +1,7 @@
 import { Game, Store, LogEntry, StoreType, DownloadTask, CompatibilityProfile } from '../types';
 import { readFileSync } from 'fs';
 import { execFileSync, execSync, spawn } from 'child_process';
+import { isSafeStoreId } from './safeExec';
 import { emitLaunchPhase } from './launchPhaseTracker';
 import { captureWindowSnapshot } from './windowDetector';
 import { raceSplashClose } from './splashOrchestrator';
@@ -185,7 +186,8 @@ class GameManager {
   private pgrepGameStillRunning(hint: string): boolean {
     let pids: string[];
     try {
-      pids = execSync(`pgrep -f -- "${hint}"`, { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n').filter(Boolean);
+      // v3.0.2-dev.5 — senza shell: `hint` (nome dell'exe) e' un argomento, non testo che una shell reinterpreta.
+      pids = execFileSync('pgrep', ['-f', '--', hint], { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n').filter(Boolean);
     } catch {
       // v2.1.10-dev.13 — diagnostica per il bug segnalato dall'utente:
       // i giochi Proton risultano "chiusi" pochi secondi dopo l'avvio
@@ -210,7 +212,7 @@ class GameManager {
     // i successivi.
     const diagEntries = pids.map(pid => {
       try {
-        const cmdline = execSync(`ps -o args= -p ${pid}`, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        const cmdline = execFileSync('ps', ['-o', 'args=', '-p', String(parseInt(pid, 10))], { encoding: 'utf-8', stdio: 'pipe' }).trim();
         return `pid=${pid} cmdline="${cmdline}"`;
       } catch {
         return `pid=${pid} (sparito prima di poter leggere la cmdline — race normale fra pgrep e ps)`;
@@ -221,7 +223,7 @@ class GameManager {
     const gamescopeFamilyPids: string[] = [];
     for (const pid of pids) {
       try {
-        const comm = execSync(`ps -o comm= -p ${pid}`, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        const comm = execFileSync('ps', ['-o', 'comm=', '-p', String(parseInt(pid, 10))], { encoding: 'utf-8', stdio: 'pipe' }).trim();
         // v2.0.41-dev.30 — BUG UTENTE, causa reale trovata con un dato
         // concreto (ps -eo pid,ppid,stat,comm sul sistema dell'utente):
         // il confronto ESATTO `comm === 'gamescope'` non corrispondeva
@@ -1765,11 +1767,17 @@ class GameManager {
       }
 
       const effectiveLaunchArgs = overrideLaunchArgs !== undefined ? overrideLaunchArgs : game.launchArgs;
+      // v3.0.2-dev.1 — `--no-splash` negli argomenti di lancio: niente splash, niente rilevamento finestra e
+      // niente timeout di sicurezza di 10 minuti (raceSplashClose non parte). L'opzione e' di X-Launcher: viene
+      // tolta e il gioco non la riceve.
+      const splitLaunchArgs = effectiveLaunchArgs ? shellSplitArgs(effectiveLaunchArgs) : undefined;
+      const noSplash = !!splitLaunchArgs?.includes('--no-splash');
+      const gameLaunchArgs = splitLaunchArgs?.filter(a => a !== '--no-splash');
 
       const runnerConfig = {
         env:      profile?.customEnv,
         prefix:   effectivePrefixPath,
-        args:     effectiveLaunchArgs ? shellSplitArgs(effectiveLaunchArgs) : undefined,
+        args:     gameLaunchArgs && gameLaunchArgs.length > 0 ? gameLaunchArgs : undefined,
         cwd:      game.launchCwd,
         fsr:      profile?.fsr      ?? false,
         gameMode: profile?.gameMode ?? false,
@@ -1926,7 +1934,7 @@ class GameManager {
         // launchGame(). Gate esplicito su isThisGameASharedLauncherApp
         // — prima implicito tramite splashHandle null, ora che non c'è
         // più alcuna finestra da aprire va verificato direttamente.
-        if (!isThisGameASharedLauncherApp) {
+        if (!isThisGameASharedLauncherApp && !noSplash) {
           raceSplashClose(id, windowSnapshotBefore, effectiveSharedLauncherId, result.pid).catch(err => {
             this.addLog(`[SPLASH] Orchestrazione splash fallita (non bloccante): ${err}`, 'warning');
           });
@@ -2303,8 +2311,10 @@ class GameManager {
     if (game.store === 'Epic Games') {
       const appName = game.id.replace(/^epic-/, '');
       try {
-        const { execSync } = require('child_process');
-        execSync(`legendary --yes uninstall ${appName} --keep-files`, {
+        // v3.0.2-dev.5 — senza shell e con l'id validato: un appName con metacaratteri o che inizia con '-'
+        // (opzione) non arriva mai a legendary.
+        if (!isSafeStoreId(appName)) throw new Error(`identificativo Epic non valido: ${JSON.stringify(appName).slice(0, 60)}`);
+        execFileSync('legendary', ['--yes', 'uninstall', appName, '--keep-files'], {
           stdio:   'ignore',
           timeout: 30_000,
         });
@@ -2332,8 +2342,8 @@ class GameManager {
     if (game.store === 'Amazon Games') {
       const productId = game.id.replace(/^amazon-/, '');
       try {
-        const { execSync } = require('child_process');
-        execSync(`nile uninstall ${productId}`, {
+        if (!isSafeStoreId(productId)) throw new Error(`identificativo Amazon non valido: ${JSON.stringify(productId).slice(0, 60)}`);
+        execFileSync('nile', ['uninstall', productId], {
           stdio:   'ignore',
           timeout: 30_000,
         });

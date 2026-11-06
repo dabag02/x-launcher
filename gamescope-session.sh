@@ -63,6 +63,33 @@
 set -u
 
 LAUNCHER_URL="http://localhost:3000"
+
+# v3.0.2-dev.3 — il demone richiede un token (audit di sicurezza, SECURITY-AUDIT.md). Lo crea al primo
+# avvio in ~/.local/share/x-launcher/api-token (0600). xl_curl = curl che lo aggiunge come header
+# (passato via -K da un descrittore, non come argomento: non compare in `ps`). Letto a ogni chiamata.
+XL_TOKEN_FILE="$HOME/.local/share/x-launcher/api-token"
+xl_curl() {
+  local t=""
+  [ -r "$XL_TOKEN_FILE" ] && t="$(tr -d '[:space:]' < "$XL_TOKEN_FILE" 2>/dev/null)"
+  if [ -n "$t" ]; then
+    curl -K <(printf 'header = "X-XLauncher-Token: %s"\n' "$t") "$@"
+  else
+    curl "$@"
+  fi
+}
+
+# xl_browser_url URL — aggiunge all'URL un codice monouso (60 s) con cui il browser ottiene il cookie
+# di sessione. Se il demone non risponde o l'autenticazione e' spenta, restituisce l'URL invariato.
+xl_browser_url() {
+  local url="$1" n
+  n="$(xl_curl -s --max-time 3 -X POST "${LAUNCHER_URL}/api/auth/nonce" 2>/dev/null | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')" || n=""
+  if [ -z "$n" ]; then printf '%s' "$url"; return; fi
+  case "$url" in
+    *\?*) printf '%s&xl_nonce=%s' "$url" "$n" ;;
+    *)    printf '%s/?xl_nonce=%s' "${url%/}" "$n" ;;
+  esac
+}
+
 WAIT_TIMEOUT=30
 GAMESCOPE_LOG_WAIT=10  # secondi massimi di attesa della riga "Xwayland :N" nel log
 
@@ -138,7 +165,7 @@ launch_gamescope() {
   echo "[GAMESCOPE-SESSION] Avvio gamescope standalone (DRM/KMS) + Chromium kiosk su ${LAUNCHER_URL}..."
   gamescope -W "$GAMESCOPE_W" -H "$GAMESCOPE_H" -f -- \
     chromium \
-      --app="${LAUNCHER_URL}" \
+      --app="$(xl_browser_url "${LAUNCHER_URL}")" \
       --kiosk \
       --noerrdialogs \
       --disable-infobars \
@@ -177,7 +204,7 @@ launch_gamescope() {
 
   if [ -n "$found_display" ]; then
     echo "[GAMESCOPE-SESSION] Xwayland rilevato: DISPLAY=${found_display} — segnalo al daemon."
-    curl -sf -X POST "${LAUNCHER_URL}/api/system/active-display" \
+    xl_curl -sf -X POST "${LAUNCHER_URL}/api/system/active-display" \
       -H "Content-Type: application/json" \
       -d "{\"display\":\"${found_display}\",\"kind\":\"kiosk\",\"resolution\":\"${GAMESCOPE_RES_LABEL}\"}" &>/dev/null \
       && echo "[GAMESCOPE-SESSION] Segnalazione riuscita." \

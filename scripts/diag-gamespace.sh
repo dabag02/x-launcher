@@ -104,6 +104,20 @@ SKIP_REAL=1
 SKIP_UNMAP=1
 WATCH_SECS=60
 PORT="${PORT:-3000}"
+
+# v3.0.2-dev.3 — il demone richiede un token (audit di sicurezza, SECURITY-AUDIT.md). Lo crea al primo
+# avvio in ~/.local/share/x-launcher/api-token (0600). xl_curl = curl che lo aggiunge come header
+# (passato via -K da un descrittore, non come argomento: non compare in `ps`). Letto a ogni chiamata.
+XL_TOKEN_FILE="$HOME/.local/share/x-launcher/api-token"
+xl_curl() {
+  local t=""
+  [ -r "$XL_TOKEN_FILE" ] && t="$(tr -d '[:space:]' < "$XL_TOKEN_FILE" 2>/dev/null)"
+  if [ -n "$t" ]; then
+    curl -K <(printf 'header = "X-XLauncher-Token: %s"\n' "$t") "$@"
+  else
+    curl "$@"
+  fi
+}
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_FILE="$HOME/x-launcher-diag-gamespace-$STAMP.log"
 
@@ -1218,7 +1232,7 @@ command -v xrandr >/dev/null && run 8 xrandr --current
 # =============================================================== T05 backend
 sec T05 "Backend: Process Manager, scope cgroup, log del daemon"
 PM_JSON="$TMP/pm.json"
-if command -v curl >/dev/null && curl -s --max-time 3 "http://127.0.0.1:$PORT/api/process-manager/list" > "$PM_JSON" 2>/dev/null && [ -s "$PM_JSON" ]; then
+if command -v curl >/dev/null && xl_curl -s --max-time 3 "http://127.0.0.1:$PORT/api/process-manager/list" > "$PM_JSON" 2>/dev/null && [ -s "$PM_JSON" ]; then
   say "GET /api/process-manager/list (porta $PORT):"
   sed 's/^/    /' "$PM_JSON" | cut -c1-400 | tee -a "$BODY"
   mapfile -t UNITS < <(python3 - "$PM_JSON" <<'PY'
@@ -1324,7 +1338,7 @@ select_windows() {
     say "Scope del gioco (dal cgroup della finestra): $GAME_SCOPE"
     run 6 systemctl --user is-active "$GAME_SCOPE.scope"
     local sc_active="$RUN_OUT" pm pm_has
-    pm="$(curl -s --max-time 3 "http://127.0.0.1:$PORT/api/process-manager/list" 2>/dev/null)"
+    pm="$(xl_curl -s --max-time 3 "http://127.0.0.1:$PORT/api/process-manager/list" 2>/dev/null)"
     say "Process Manager list adesso: $(printf '%s' "$pm" | cut -c1-300)"
     if printf '%s' "$pm" | grep -q "$GAME_SCOPE"; then pm_has=SI; else pm_has=NO; fi
     add_s "scope del gioco=$GAME_SCOPE is-active=$sc_active; presente in /api/process-manager/list=$pm_has"

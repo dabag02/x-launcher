@@ -46,7 +46,8 @@ openbox/autostart):
     rileva il collegamento e lo scollegamento (riscansione ogni 3 s).
 
   * CANALE LOCALE. Socket Unix (stesso percorso calcolato dal backend):
-        /run/user/<uid>/x-launcher-spaces.sock  (altrimenti /tmp/...)
+        /run/user/<uid>/x-launcher-spaces.sock  (altrimenti ~/.cache/x-launcher/spaces.sock,
+        in una cartella 0700: mai piu' un percorso prevedibile in /tmp)
     Protocollo: una riga JSON per richiesta, una per risposta.
         {"cmd":"state"} | {"cmd":"next"} | {"cmd":"prev"} |
         {"cmd":"switch","space":N} | {"cmd":"dashboard"}
@@ -120,6 +121,12 @@ LAUNCH_GRACE_S = float(os.environ.get("XL_SPACES_LAUNCH_GRACE_S", "20.0"))
 LAUNCH_WINDOW_S = float(os.environ.get("XL_SPACES_LAUNCH_WINDOW_S", "45.0"))
 FREEZE_DELAY_S = float(os.environ.get("XL_SPACES_FREEZE_DELAY_S", "0.4"))
 THAW_SETTLE_S = float(os.environ.get("XL_SPACES_THAW_SETTLE_S", "0.25"))
+# v3.2.1-dev.1 — la Dashboard si congela piu' tardi dei giochi: la pagina deve fare in tempo a ricevere
+# "gioco pronto" e a chiudere la splash prima di fermarsi.
+try:
+    DASHBOARD_FREEZE_DELAY_S = max(0.0, min(30.0, float(os.environ.get("XL_SPACES_DASHBOARD_FREEZE_DELAY_S", "2.0"))))
+except ValueError:
+    DASHBOARD_FREEZE_DELAY_S = 2.0
 NOFREEZE_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                              "x-launcher", "spaces-nofreeze.conf")
 SYSTEMCTL = os.environ.get("XL_SPACES_SYSTEMCTL", "systemctl")
@@ -127,7 +134,9 @@ DASHBOARD_TITLE = "X-Launcher HTPC"
 HOTKEY_DEBOUNCE_S = 0.25
 PAD_RESCAN_S = 3.0
 
-SCOPE_RX = re.compile(r"(xlauncher-(?:game|shared-launcher)-[^/]+?)\.scope")
+SCOPE_RX = re.compile(r"(xlauncher-(?:game|shared-launcher|dashboard)-[^/]+?)\.scope")
+# v3.2.1-dev.1 — scope della Dashboard (kiosk-launch.sh avvia il browser in "xlauncher-dashboard-<ts>")
+DASHBOARD_SCOPE_PREFIX = "xlauncher-dashboard-"
 STEAM_CLASS_RX = re.compile(r"^steam_app_(\d+)$")
 NOISE_NAME_RX = re.compile(r"Default IME|MSCTFIME|GDI\+ Window|DDE Server")
 IGNORED_TYPES = {
@@ -172,7 +181,17 @@ def socket_path():
     run_dir = "/run/user/%d" % uid
     if os.path.isdir(run_dir):
         return os.path.join(run_dir, "x-launcher-spaces.sock")
-    return "/tmp/x-launcher-spaces-%d.sock" % uid
+    # fallback: cartella privata dell'utente (prima era /tmp/x-launcher-spaces-<uid>.sock, un nome
+    # prevedibile in una cartella scrivibile da tutti). Va tenuto identico a spacesClient.ts.
+    return os.path.join(os.path.expanduser("~"), ".cache", "x-launcher", "spaces.sock")
+
+
+_SCOPE_RE = re.compile(r"^xlauncher-[A-Za-z0-9_.@-]{1,200}$")
+
+
+def valid_scope(sc):
+    """Nome di scope accettato dal freezer ('xlauncher-...'): niente spazi, '/' o '--' iniziali."""
+    return isinstance(sc, str) and _SCOPE_RE.fullmatch(sc) is not None
 
 
 # --------------------------------------------------------------------------- X helpers
@@ -335,6 +354,11 @@ def freeze_enabled_from_env():
     return os.environ.get("X_LAUNCHER_SPACES_FREEZE", "1").strip().lower() not in ("0", "false", "off", "no")
 
 
+def freeze_dashboard_from_env():
+    """v3.2.1-dev.1 — congela anche la Dashboard negli altri spazi (X_LAUNCHER_SPACES_FREEZE_DASHBOARD=0 per spegnerlo)."""
+    return os.environ.get("X_LAUNCHER_SPACES_FREEZE_DASHBOARD", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
 def read_nofreeze():
     """Scope (o prefissi) da non congelare: una riga ciascuno, # per i commenti."""
     out = []
@@ -361,10 +385,14 @@ class Freezer:
         self.state_lock = threading.Lock()
         self.op_lock = threading.Lock()
         self.errors = 0
+        self.dashboard_enabled = freeze_dashboard_from_env()
 
-    @staticmethod
-    def freezable(scope):
-        return bool(scope) and scope.startswith("xlauncher-game-")
+    def freezable(self, scope):
+        if not scope:
+            return False
+        if scope.startswith(DASHBOARD_SCOPE_PREFIX):
+            return self.dashboard_enabled
+        return scope.startswith("xlauncher-game-")
 
     def excluded(self, scope):
         for pat in read_nofreeze():
@@ -373,6 +401,9 @@ class Freezer:
         return False
 
     def _systemctl(self, verb, scope):
+        if not valid_scope(scope):
+            log("freezer: scope rifiutato: %r" % (scope,))
+            return False
         try:
             r = subprocess.run([SYSTEMCTL, "--user", verb, scope + ".scope"], capture_output=True,
                                text=True, timeout=10)
@@ -428,13 +459,13 @@ class Freezer:
                 return True
         return False
 
-    def schedule_freeze(self, scope):
+    def schedule_freeze(self, scope, delay=None):
         if not self.enabled or not self.freezable(scope) or self.excluded(scope):
             return
         with self.state_lock:
             if scope in self.frozen:
                 return
-        t = threading.Timer(FREEZE_DELAY_S, self._freeze_now, args=(scope,))
+        t = threading.Timer(FREEZE_DELAY_S if delay is None else delay, self._freeze_now, args=(scope,))
         t.daemon = True
         t.start()
 
@@ -467,7 +498,8 @@ class Freezer:
         """All'avvio: scongela gli scope dei giochi rimasti congelati da una sessione precedente."""
         try:
             r = subprocess.run([SYSTEMCTL, "--user", "list-units", "--all", "--no-legend", "--plain",
-                                "xlauncher-game-*.scope"], capture_output=True, text=True, timeout=10)
+                                "xlauncher-game-*.scope", "xlauncher-dashboard-*.scope"],
+                               capture_output=True, text=True, timeout=10)
         except Exception as e:  # noqa
             log("freezer: list-units fallito: %s" % e)
             return
@@ -510,6 +542,7 @@ class SpacesManager:
         self.scope_t0 = {}                   # scope -> istante della prima finestra
         self.timers = {}                     # scope -> threading.Timer
         self.dashboard_wid = None
+        self.dashboard_scope = None          # scope "xlauncher-dashboard-*" del browser, se avviato da kiosk-launch.sh
         self.cur_space = 0
         self.prev_space = 0
         self.target_space = 0                # spazio verso cui si sta andando (decide i congelamenti)
@@ -591,9 +624,14 @@ class SpacesManager:
     def _apply(self, info, initial):
         wid, kind = info["wid"], info["kind"]
         if kind == "dashboard":
+            sc = info.get("scope")
             with self.lock:
                 self.dashboard_wid = wid
-            log("Dashboard: finestra 0x%x (%s)" % (wid, info["class"]))
+                self.dashboard_scope = sc if (sc and sc.startswith(DASHBOARD_SCOPE_PREFIX)) else None
+                dsc = self.dashboard_scope
+            log("Dashboard: finestra 0x%x (%s) scope=%s%s" % (
+                wid, info["class"], dsc or "-",
+                "" if dsc else "  [nessuno scope xlauncher-dashboard: la Dashboard non si congela, resta il blocco in pagina]"))
             return
         if kind == "launcher":
             log("launcher %s: finestra 0x%x '%s' — nessuno slot" % (info["scope"], wid, info["name"]))
@@ -627,7 +665,12 @@ class SpacesManager:
             with self.lock:
                 if self.dashboard_wid == wid:
                     self.dashboard_wid = None
+                    gone_scope, self.dashboard_scope = self.dashboard_scope, None
+                else:
+                    gone_scope = None
             log("Dashboard: finestra 0x%x chiusa" % wid)
+            if gone_scope:
+                self.freezer.release(gone_scope)     # fuori dal lock: evita lo stallo con _freeze_now
             return
         if info["kind"] != "game" or info["noise"]:
             return
@@ -708,8 +751,8 @@ class SpacesManager:
         target = activate or self.space_window(space)
         with self.lock:
             self.target_space = space
-            scope_to = self.slots.get(space)
-        # scongela il gioco di destinazione PRIMA di mostrarlo
+            scope_to = self.scope_for_space(space)
+        # scongela il gioco (o la Dashboard) di destinazione PRIMA di mostrarlo
         if scope_to and not thaw_delay and self.freezer.thaw_sync(scope_to):
             time.sleep(THAW_SETTLE_S)
         self.xa.switch_desktop(space)
@@ -719,15 +762,25 @@ class SpacesManager:
         self._freeze_others(space)
         return True
 
+    def scope_for_space(self, space):
+        """Scope da congelare/scongelare per uno spazio: il gioco dello slot, o (spazio 0) la Dashboard."""
+        with self.lock:
+            return self.dashboard_scope if space == 0 else self.slots.get(space)
+
     def _should_freeze(self, scope):
         with self.lock:
+            if scope and scope == self.dashboard_scope:
+                return self.target_space != 0
             return scope in self.scope_slot and scope != self.slots.get(self.target_space)
 
     def _freeze_others(self, space):
         with self.lock:
             others = [sc for sl, sc in self.slots.items() if sl != space]
+            dash = self.dashboard_scope if space != 0 else None
         for sc in others:
             self.freezer.schedule_freeze(sc)
+        if dash:
+            self.freezer.schedule_freeze(dash, DASHBOARD_FREEZE_DELAY_S)
 
     def _align_freeze(self, space):
         """Il desktop e' cambiato per cause esterne (scorciatoie del WM...): riallinea i congelamenti."""
@@ -735,7 +788,7 @@ class SpacesManager:
             if space == self.target_space:
                 return
             self.target_space = space
-            scope_to = self.slots.get(space)
+            scope_to = self.scope_for_space(space)
         if scope_to:
             self.freezer.thaw_sync(scope_to)
         self._freeze_others(space)
@@ -832,8 +885,7 @@ class SpacesManager:
             self.freezer.thaw_sync(scope)
 
     def overlay_scope_of(self, space):
-        with self.lock:
-            return self.slots.get(space)
+        return self.scope_for_space(space)
 
     def overlay_closed(self):
         if self.pad_listener:
@@ -849,7 +901,7 @@ class SpacesManager:
                 return                      # reopened meanwhile: it owns freeze and grab again
             if scope:
                 with self.lock:
-                    wanted = self.slots.get(self.target_space) == scope
+                    wanted = self.scope_for_space(self.target_space) == scope
                 if wanted:
                     self.freezer.thaw_sync(scope)
             self.overlay_closed()
@@ -912,7 +964,9 @@ class SpacesManager:
         if cmd == "thaw":
             sc = req.get("scope")
             if sc:
-                self.freezer.thaw_sync(str(sc))
+                if not valid_scope(sc):
+                    return {"ok": False, "error": "scope non valido"}
+                self.freezer.thaw_sync(sc)
             else:
                 self.freezer.thaw_all()
             return {"ok": True, "freeze": self.freezer.snapshot()}
@@ -1025,8 +1079,16 @@ class ControlServer(threading.Thread):
                     os.unlink(self.path)
                 finally:
                     probe.close()
+            parent = os.path.dirname(self.path)
+            if not parent.startswith("/run/user/"):
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+                os.chmod(parent, 0o700)
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.bind(self.path)
+            old_umask = os.umask(0o177)          # il socket nasce gia' 0600 (niente finestra fra bind e chmod)
+            try:
+                s.bind(self.path)
+            finally:
+                os.umask(old_umask)
             os.chmod(self.path, 0o600)
             s.listen(4)
         except Exception as e:
@@ -1343,6 +1405,8 @@ def run_forever():
             time.sleep(3600)
     mgr = SpacesManager()
     log("congelamento dei giochi negli altri spazi: %s" % ("ATTIVO" if mgr.freezer.enabled else "disattivato"))
+    log("congelamento della Dashboard fuori dallo spazio 0: %s (ritardo %.1f s)" % (
+        "ATTIVO" if (mgr.freezer.enabled and mgr.freezer.dashboard_enabled) else "disattivato", DASHBOARD_FREEZE_DELAY_S))
     log("overlay degli spazi (X_LAUNCHER_SPACES_OVERLAY): %s" % ("ATTIVO" if mgr.overlay_on else "disattivato"))
     mgr.init_overlay()
 

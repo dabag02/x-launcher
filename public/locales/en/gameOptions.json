@@ -61,5 +61,6 @@
   "gamescopeOff": "off",
   "gamescopeFullscreen": "fullscreen — monitor resolution",
   "gamescope4k": "fullscreen — 4K override",
-  "gamescopeWindowed": "windowed"
+  "gamescopeWindowed": "windowed",
+  "noRunnerFound": "No runner found. Open System → Runner to install one."
 }

@@ -1,9 +1,10 @@
 import { Game, CompatibilityProfile } from '../types';
-import { execSync, exec } from 'child_process';
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { execSync, execFile, execFileSync } from 'child_process';
+import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
 import { findSteamRoot, findAllLibraryPaths, parseVdf } from './plugins/steamPlugin';
+import { isValidRunnerId, resolveInside, downloadTarGz } from './runnerSafety';
 
 // v2.2.19-dev.14 — BUG REALE CONFERMATO dall'utente: ProtonUp-Qt
 // installato via flatpak (net.davidotek.pupgui2) non veniva mai
@@ -197,13 +198,21 @@ class CompatibilityManager {
    *   2. Altrimenti: download diretto da GitHub Releases via curl + tar
    */
   async downloadProton(id: string, onLogging: (msg: string) => void) {
+    // v3.0.2-dev.2 (audit di sicurezza, punto 2) — `id` arriva da una richiesta HTTP e prima
+    // finiva dentro stringhe di shell (`$(...)` eseguiva comandi). Ora e' validato e i
+    // comandi sono lanciati senza shell, con argomenti separati.
+    if (!isValidRunnerId(id)) {
+      const msg = 'Identificativo runner non valido.';
+      onLogging(`[COMPAT] ${msg}`);
+      throw new Error(msg);
+    }
     onLogging(`[COMPAT] Avvio download per ${id}...`);
 
     // Strategia 1: ProtonUp-Qt CLI
     if (this.binaryExists('protonup')) {
       onLogging(`[COMPAT] ProtonUp CLI trovato. Invocando protonup -i ${id}...`);
       return new Promise<void>((resolve, reject) => {
-        exec(`protonup -i "${id}"`, (err, stdout, stderr) => {
+        execFile('protonup', ['-i', id], (err, _stdout, stderr) => {
           if (err) {
             onLogging(`[COMPAT] protonup fallito: ${stderr}`);
             reject(err);
@@ -228,20 +237,14 @@ class CompatibilityManager {
     onLogging(`[COMPAT] Fetching: ${url}`);
     onLogging(`[COMPAT] Destinazione: ${destDir}`);
 
-    return new Promise<void>((resolve, reject) => {
-      exec(
-        `mkdir -p "${destDir}" && curl -L "${url}" | tar -xz -C "${destDir}"`,
-        (err, stdout, stderr) => {
-          if (err) {
-            onLogging(`[COMPAT] Download fallito: ${stderr}`);
-            reject(err);
-          } else {
-            onLogging(`[COMPAT] ${id} estratto in ${destDir}. Riavvia Steam per rilevarlo.`);
-            resolve();
-          }
-        }
-      );
-    });
+    try {
+      mkdirSync(destDir, { recursive: true });
+      await downloadTarGz(url, destDir);       // curl | tar senza shell, solo https
+      onLogging(`[COMPAT] ${id} estratto in ${destDir}. Riavvia Steam per rilevarlo.`);
+    } catch (err) {
+      onLogging(`[COMPAT] Download fallito: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
   }
 
   getSuggestedFixes(gameId: string): CommunityFix[] {
@@ -260,7 +263,15 @@ class CompatibilityManager {
   async uninstallProton(id: string, onLogging: (msg: string) => void) {
     // v1.1.66 — stessa correzione di getProtonDirs()/downloadProton().
     const compatDir = path.join(findSteamRoot() ?? `${homedir()}/.local/share/Steam`, 'compatibilitytools.d');
-    const target = path.join(compatDir, id);
+    // v3.0.2-dev.2 (audit di sicurezza, punto 3) — prima `path.join(compatDir, id)` con id
+    // "../../..." usciva da compatibilitytools.d e `rm -rf` cancellava la cartella indicata.
+    // Ora l'id e' validato e il percorso deve restare DENTRO compatDir.
+    const target = isValidRunnerId(id) ? resolveInside(compatDir, id) : null;
+    if (!target) {
+      const msg = 'Identificativo runner non valido.';
+      onLogging(`[COMPAT] ${msg}`);
+      throw new Error(msg);
+    }
 
     if (!existsSync(target)) {
       const msg = `${id} non trovato in compatibilitytools.d — impossibile disinstallare (potrebbe essere un runner Steam ufficiale, gestito da Steam stesso, non da X-Launcher).`;
@@ -269,17 +280,13 @@ class CompatibilityManager {
     }
 
     onLogging(`[COMPAT] Rimozione ${id} da ${compatDir}...`);
-    return new Promise<void>((resolve, reject) => {
-      exec(`rm -rf "${target}"`, (err, stdout, stderr) => {
-        if (err) {
-          onLogging(`[COMPAT] Disinstallazione fallita: ${stderr}`);
-          reject(err);
-        } else {
-          onLogging(`[COMPAT] ${id} disinstallato con successo.`);
-          resolve();
-        }
-      });
-    });
+    try {
+      rmSync(target, { recursive: true, force: true });   // su un link simbolico toglie il link, non la destinazione
+      onLogging(`[COMPAT] ${id} disinstallato con successo.`);
+    } catch (err) {
+      onLogging(`[COMPAT] Disinstallazione fallita: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
   }
 
   getAutoMapping(gameTitle: string): string {
@@ -471,7 +478,8 @@ class CompatibilityManager {
     // Spazio usato da ~/Games (0 se la cartella non esiste ancora)
     let usedBytes = 0;
     try {
-      const raw = execSync(`du -sb "${gamesDir}" 2>/dev/null`, { encoding: 'utf-8', timeout: 8000 });
+      // v3.0.2-dev.5 — senza shell (execFileSync, argomenti separati).
+      const raw = execFileSync('du', ['-sb', '--', gamesDir], { encoding: 'utf-8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] });
       usedBytes = parseInt(raw.split('\t')[0]) || 0;
     } catch { /* cartella non ancora creata */ }
 
@@ -479,9 +487,9 @@ class CompatibilityManager {
     let totalBytes = 0, freeBytes = 0;
     try {
       // df -B1 restituisce byte esatti; usiamo homedir() come punto di mount certo
-      const df = execSync(`df -B1 --output=size,avail "${homedir()}" 2>/dev/null | tail -1`, {
-        encoding: 'utf-8', timeout: 5000,
-      });
+      const df = execFileSync('df', ['-B1', '--output=size,avail', homedir()], {
+        encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim().split('\n').pop() ?? '';
       const parts = df.trim().split(/\s+/);
       totalBytes = parseInt(parts[0]) || 0;
       freeBytes  = parseInt(parts[1]) || 0;

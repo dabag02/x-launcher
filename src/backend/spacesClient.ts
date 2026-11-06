@@ -11,12 +11,15 @@
 
 import net from 'net';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 export function spacesSocketPath(): string {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
   const runDir = `/run/user/${uid}`;
   if (fs.existsSync(runDir)) return `${runDir}/x-launcher-spaces.sock`;
-  return `/tmp/x-launcher-spaces-${uid}.sock`;
+  // cartella privata 0700 creata da spaces.py (prima: /tmp/x-launcher-spaces-<uid>.sock, nome prevedibile)
+  return path.join(os.homedir(), '.cache', 'x-launcher', 'spaces.sock');
 }
 
 export interface SpaceEntry {
