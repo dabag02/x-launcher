@@ -14,6 +14,8 @@ import { DATA_DIR, ENV_PATH } from './paths';
 const SENSITIVE_FILES = [
   'x-launcher.db', 'x-launcher.db-wal', 'x-launcher.db-shm',
   'tokens.json', 'api-token',
+  // v3.2.2-dev.2 — chiave di cifratura a riposo e passphrase (cifrata) del backup
+  'secret.key', 'backup-passphrase.enc',
 ];
 
 /** Cartella dati 0700 e file sensibili 0600. Solo se appartengono all'utente corrente; non lancia mai. */

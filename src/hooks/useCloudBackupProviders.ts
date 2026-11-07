@@ -18,6 +18,11 @@ export interface CloudBackupProviderState {
   lastBackupAt: string | null;
   clientIdDraft: string;
   clientSecretDraft: string;
+  // v3.2.2-dev.2 — passphrase che cifra il bundle: il server dice solo SE c'e' (passphraseSet); i due campi di
+  // inserimento restano nella bozza finche' non coincidono, poi vengono inviati e svuotati.
+  passphraseSet: boolean;
+  passphraseDraft: string;
+  passphraseConfirmDraft: string;
   connecting: boolean;
   actionStatus: { success: boolean; message: string } | null;
   actionRunning: 'backup' | 'restore' | null;
@@ -35,6 +40,7 @@ interface RawCloudBackupProvider {
   hasCredentials: boolean;
   authenticated: boolean;
   lastBackupAt: string | null;
+  passphraseSet?: boolean;
 }
 
 /**
@@ -65,6 +71,9 @@ export function useCloudBackupProviders(showSettings: boolean) {
               lastBackupAt:      p.lastBackupAt,
               clientIdDraft:     prev[p.providerId]?.clientIdDraft ?? '',
               clientSecretDraft: prev[p.providerId]?.clientSecretDraft ?? '',
+              passphraseSet:     p.passphraseSet ?? false,
+              passphraseDraft:        prev[p.providerId]?.passphraseDraft ?? '',
+              passphraseConfirmDraft: prev[p.providerId]?.passphraseConfirmDraft ?? '',
               connecting:        prev[p.providerId]?.connecting ?? false,
               actionStatus:      prev[p.providerId]?.actionStatus ?? null,
               actionRunning:     prev[p.providerId]?.actionRunning ?? null,
@@ -113,6 +122,43 @@ export function useCloudBackupProviders(showSettings: boolean) {
     }).then(() => refreshCloudBackupProviders()).catch(() => {});
   }, [cloudBackupProviders, refreshCloudBackupProviders]);
 
+  /**
+   * v3.2.2-dev.2 — inserimento a due campi (passphrase + conferma, per non cifrare con un refuso). Quando i due
+   * campi sono compilati e coincidono la passphrase viene inviata al server e le bozze svuotate; se non coincidono
+   * resta un messaggio e la bozza del campo appena scritto sostituisce la precedente.
+   */
+  const commitBackupPassphrase = useCallback((
+    id: string,
+    field: 'main' | 'confirm',
+    value: string,
+    messages: { mismatch: string; waitingConfirm: string },
+  ) => {
+    const cur = cloudBackupProviders[id];
+    const main    = field === 'main'    ? value : (cur?.passphraseDraft ?? '');
+    const confirm = field === 'confirm' ? value : (cur?.passphraseConfirmDraft ?? '');
+    const setDrafts = (m: string, c: string, status: { success: boolean; message: string } | null) =>
+      setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], passphraseDraft: m, passphraseConfirmDraft: c, actionStatus: status } }));
+    if (!main || !confirm) {
+      setDrafts(main, confirm, value ? { success: true, message: messages.waitingConfirm } : null);
+      return;
+    }
+    if (main !== confirm) {
+      setDrafts(main, confirm, { success: false, message: messages.mismatch });
+      return;
+    }
+    fetch('/api/cloud-backup/passphrase', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passphrase: main }),
+    })
+      .then(r => r.json())
+      .then((res: { success: boolean; message: string }) => {
+        setDrafts('', '', res);
+        if (res.success) refreshCloudBackupProviders();
+      })
+      .catch(e => setDrafts(main, confirm, { success: false, message: String(e) }));
+  }, [cloudBackupProviders, refreshCloudBackupProviders]);
+
   const connectCloudBackupProvider = useCallback((id: string) => {
     setCloudBackupProviders(prev => ({ ...prev, [id]: { ...prev[id], connecting: true } }));
     fetch(`/api/cloud-backup/providers/${id}/login`, { method: 'POST' })
@@ -154,6 +200,7 @@ export function useCloudBackupProviders(showSettings: boolean) {
     // insieme allo spostamento.
     setCloudBackupProviders,
     saveCloudBackupProvider,
+    commitBackupPassphrase,
     connectCloudBackupProvider,
     disconnectCloudBackupProvider,
     runCloudBackupAction,

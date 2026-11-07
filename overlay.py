@@ -26,12 +26,16 @@ pad viene "preso" in esclusiva (EVIOCGRAB) finche' l'overlay e' aperto, cosi' il
 non riceve ne' i tasti dell'overlay ne' eventi accodati. Alla chiusura il pad viene
 rilasciato solo quando nessun tasto e' premuto (niente tasti "incollati" nel gioco).
 
-Servizi: volume (wpctl o pactl) funzionante; Bluetooth, Wi-Fi e LAN mostrano lo stato
-(bluetoothctl, nmcli, in ripiego /sys/class/net). Sono gia' predisposti come pulsanti:
-si abilitano con X_LAUNCHER_OVERLAY_TOGGLES=bt,wifi,lan (default: nessuno).
+Servizi: volume (wpctl o pactl); Bluetooth, Wi-Fi e LAN (bluetoothctl, nmcli, in ripiego
+/sys/class/net) sono pulsanti con lo stato in vista (Acceso/Spento, Collegata/Scollegata).
+Accendere e' immediato; SPEGNERE chiede conferma, come "Esci" nel quick-menu: il primo A arma
+il pulsante ("Conferma con A", tutto il pulsante rosso), il secondo A esegue e torna blu. B, un movimento o 4 s senza
+input annullano la richiesta (B annulla solo la richiesta, l'overlay resta aperto).
+Volume -, valore (muto) e + restano a selezione normale, senza conferma.
 
 Variabili:
-    X_LAUNCHER_OVERLAY_TOGGLES=bt,wifi,lan   servizi attivabili con A (default vuoto)
+    X_LAUNCHER_OVERLAY_TOGGLES=bt,wifi,lan   servizi attivabili con A (default: tutti e tre;
+                                             vuoto = solo stato; esempio "wifi" = solo Wi-Fi)
     X_LAUNCHER_OVERLAY_GRAB=0                non prendere il pad in esclusiva
     X_LAUNCHER_OVERLAY_IDLE_S=60             chiusura automatica senza input
     X_LAUNCHER_OVERLAY_FONT=/percorso.ttf    font da usare (default: assets/fonts/NotoSans-*.ttf)
@@ -67,6 +71,8 @@ VOL_STEP = 5
 VOL_REPEAT_DELAY_S = 0.45
 VOL_REPEAT_EVERY_S = 0.12
 SERVICE_REFRESH_S = 3.0
+CONFIRM_TIMEOUT_S = 4.0       # conferma di spegnimento: scade da sola
+TOGGLE_ITEMS = ("bt", "wifi", "lan")
 
 # ordine di navigazione della riga dei servizi
 ITEMS = ["bt", "wifi", "lan", "vminus", "vol", "vplus"]
@@ -88,6 +94,7 @@ AMBER = (255, 185, 0)
 BTN_A = (0, 201, 80)
 BTN_B = (251, 44, 54)
 BTN_INK = (0, 0, 0)
+DANGER = (231, 0, 11)           # conferma di spegnimento (Dashboard: danger-600, come "Esci")
 DASH_CARD = (21, 93, 252)      # riquadro della Dashboard: il blu del logo "X" (primary-600)
 
 # v3.1.7-dev.1 — tavolozza dal tema della Dashboard (themes/<id>.json, sezione "overlay").
@@ -97,7 +104,7 @@ THEME_KEYS = {
     "bg": "BG", "panel": "PANEL", "card-selected": "CARD_SEL", "line": "LINE", "text": "TEXT",
     "muted": "MUTED", "accent": "ACCENT", "accent-ink": "ACCENT_INK", "green": "GREEN",
     "grey": "GREY", "amber": "AMBER", "button-a": "BTN_A", "button-b": "BTN_B",
-    "button-ink": "BTN_INK", "dashboard-card": "DASH_CARD",
+    "button-ink": "BTN_INK", "dashboard-card": "DASH_CARD", "danger": "DANGER",
 }
 # Se la sezione "overlay" non ha una chiave, la si ricava da questo colore della Dashboard
 # ("colors"), purché sia scritto come #rrggbb.
@@ -117,6 +124,8 @@ STR = {
         "disc": "Scollegata", "notconn": "Non collegato", "dash": "Dashboard", "game": "Gioco",
         "readonly": "Solo stato: non attivabile", "noaudio": "Audio non disponibile",
         "btpad": "Il controller in uso è Bluetooth: non lo spengo", "failed": "Operazione non riuscita",
+        "confirm_off": "Conferma con A", "busy": "In corso…", "turnoff": "Spegni", "turnon": "Accendi",
+        "confirm_hint": "Conferma",
     },
     "en": {
         "title": "Spaces", "space": "SPACE", "here": "You are here", "open": "A · Open",
@@ -127,6 +136,8 @@ STR = {
         "disc": "Disconnected", "notconn": "Not connected", "dash": "Dashboard", "game": "Game",
         "readonly": "Status only: not switchable", "noaudio": "Audio not available",
         "btpad": "The controller in use is Bluetooth: not turning it off", "failed": "Operation failed",
+        "confirm_off": "Confirm with A", "busy": "Working…", "turnoff": "Turn off", "turnon": "Turn on",
+        "confirm_hint": "Confirm",
     },
 }
 
@@ -293,7 +304,8 @@ class Services:
             "wifi": {"available": False, "on": False, "ssid": "", "up": False},
             "lan": {"available": False, "up": False},
         }
-        self.toggles = {t.strip() for t in os.environ.get("X_LAUNCHER_OVERLAY_TOGGLES", "").split(",") if t.strip()}
+        self.toggles = {t.strip() for t in os.environ.get("X_LAUNCHER_OVERLAY_TOGGLES", "bt,wifi,lan").split(",") if t.strip()}
+        self.busy = set()
         self.audio = "wpctl" if shutil.which("wpctl") else ("pactl" if shutil.which("pactl") else "")
         self.has_bt = bool(shutil.which("bluetoothctl"))
         self.has_nm = bool(shutil.which("nmcli"))
@@ -482,29 +494,78 @@ class Services:
         with self.lock:
             return {k: dict(v) for k, v in self.data.items()}, self.version
 
-    # ----- pulsanti (predisposti; attivi solo se abilitati)
-    def activate(self, name):
-        """Ritorna una chiave di messaggio per il toast, oppure None."""
+    # ----- pulsanti Bluetooth / Wi-Fi / LAN
+    def is_on(self, name):
+        """True se il servizio e' ora acceso/collegato (cioe' agire significa SPEGNERE)."""
+        snap, _ = self.snapshot()
+        if name == "lan":
+            return bool(snap["lan"]["up"])
+        if name == "wifi":
+            return bool(snap["wifi"]["on"])
+        return bool(snap.get(name, {}).get("on"))
+
+    def precheck(self, name):
+        """Chiave di messaggio se l'azione non e' possibile (toast), altrimenti None.
+        Va chiamato PRIMA di chiedere la conferma, cosi' non si conferma l'impossibile."""
         if name not in self.toggles:
             return "readonly"
         snap, _ = self.snapshot()
-        ok = False
+        if name in self.busy:
+            return "busy"
         if name == "bt":
             if not snap["bt"]["available"]:
                 return "na"
-            turn_on = not snap["bt"]["on"]
-            if not turn_on and self.bt_pad_in_use():
+            if snap["bt"]["on"] and self.bt_pad_in_use():
                 return "btpad"
-            rc, _ = self._run("bt-power", ["bluetoothctl", "power", "on" if turn_on else "off"], 5.0)
-            ok = rc == 0
         elif name == "wifi":
             if not (self.has_nm and snap["wifi"]["available"]):
                 return "na"
-            rc, _ = self._run("nm-radio-set", ["nmcli", "radio", "wifi", "off" if snap["wifi"]["on"] else "on"], 5.0)
-            ok = rc == 0
         elif name == "lan":
             if not (self.has_nm and snap["lan"]["available"]):
                 return "na"
+        return None
+
+    def activate_async(self, name, done=None):
+        """Esegue l'azione in un thread (nmcli puo' impiegare secondi: l'overlay non si blocca).
+        done(msg_key_or_None) viene chiamato a fine lavoro. Ritorna la chiave di un toast se
+        l'azione non parte, altrimenti None."""
+        msg = self.precheck(name)
+        if msg:
+            return msg
+        self.busy.add(name)
+
+        def work():
+            try:
+                res = self.activate(name)
+            except Exception as e:  # noqa
+                self.log("services: activate %s error: %r" % (name, e))
+                res = "failed"
+            finally:
+                self.busy.discard(name)
+            self.refresh_async()
+            if done:
+                try:
+                    done(res)
+                except Exception:  # noqa
+                    pass
+        threading.Thread(target=work, name="svc-" + name, daemon=True).start()
+        return None
+
+    def activate(self, name):
+        """Sincrona (usata dal thread). Ritorna una chiave di messaggio per il toast, oppure None."""
+        msg = self.precheck_core(name)
+        if msg:
+            return msg
+        snap, _ = self.snapshot()
+        ok = False
+        if name == "bt":
+            turn_on = not snap["bt"]["on"]
+            rc, _ = self._run("bt-power", ["bluetoothctl", "power", "on" if turn_on else "off"], 5.0)
+            ok = rc == 0
+        elif name == "wifi":
+            rc, _ = self._run("nm-radio-set", ["nmcli", "radio", "wifi", "off" if snap["wifi"]["on"] else "on"], 5.0)
+            ok = rc == 0
+        elif name == "lan":
             rc, out = self._run("nm-dev2", ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"])
             devs = [l.split(":")[0] for l in out.splitlines() if l.endswith(":ethernet")]
             verb = "disconnect" if snap["lan"]["up"] else "connect"
@@ -512,8 +573,17 @@ class Services:
             for dev in devs:
                 rc, _ = self._run("nm-lan-set", ["nmcli", "device", verb, dev], 8.0)
                 ok = ok and rc == 0
-        self.refresh_async()
         return None if ok else "failed"
+
+    def precheck_core(self, name):
+        """Come precheck ma senza il controllo 'busy' (il thread stesso lo ha impostato)."""
+        was = name in self.busy
+        self.busy.discard(name)
+        try:
+            return self.precheck(name)
+        finally:
+            if was:
+                self.busy.add(name)
 
 
 # --------------------------------------------------------------------------- disegno
@@ -792,9 +862,16 @@ class Renderer:
         y = S(28)
         pos = {}
 
-        def focus_box(i, x0, x1):
-            on = zone == "services" and ITEMS[svc_i] == i
-            return (ACCENT, S(4)) if on else (LINE, max(2, S(2)))
+        def sty(i, armed=False):
+            """Stile dei pulsanti dei servizi come le righe del quick-menu: selezionato = tutto il
+            pulsante nel blu del logo (bordo primary-500), conferma di spegnimento = rosso,
+            non selezionato = riquadro scuro. Ritorna (riempimento, bordo, spessore, testo o None)."""
+            bw = max(2, S(2))
+            if armed:
+                return DANGER, BTN_B, bw, ACCENT_INK
+            if zone == "services" and ITEMS[svc_i] == i:
+                return DASH_CARD, ACCENT, bw, ACCENT_INK
+            return PANEL, LINE, bw, None
 
         def status_color(avail, on):
             return GREY if not avail else (GREEN if on else MUTED)
@@ -804,42 +881,52 @@ class Renderer:
             ("bt", "bt", snap["bt"]["available"], snap["bt"]["on"],
              t["on"] if snap["bt"]["on"] else t["off"]),
             ("wifi", "wifi", snap["wifi"]["available"], snap["wifi"]["on"] and snap["wifi"]["up"],
-             (snap["wifi"]["ssid"] or t["conn"]) if snap["wifi"]["up"] else (t["off"] if not snap["wifi"]["on"] else t["notconn"])),
+             t["off"] if not snap["wifi"]["on"] else ((snap["wifi"]["ssid"] or t["conn"]) if snap["wifi"]["up"] else t["notconn"])),
             ("lan", "lan", snap["lan"]["available"], snap["lan"]["up"],
              t["conn"] if snap["lan"]["up"] else t["disc"]),
         ]
+        pending, busy = model.get("pending"), model.get("busy") or []
         for key, ico, avail, on, label in tiles:
-            col, bw = focus_box(key, x, x + tw)
-            self.rrect(d, (x, y, x + tw, y + th), S(16), fill=PANEL, outline=col, width=bw)
-            icol = TEXT if (avail and on) else (MUTED if avail else GREY)
+            armed = pending == key
+            working = key in busy
+            fill, col, bw, fg = sty(key, armed)
+            self.rrect(d, (x, y, x + tw, y + th), S(16), fill=fill, outline=col, width=bw)
+            icol = fg or (TEXT if (avail and on) else (MUTED if avail else GREY))
             self.icon(d, ico, x + S(12) + S(11), y + th // 2, S(22), icol, max(2, S(2)))
             if not avail:
                 label = t["na"]
-            self.text(d, x + S(43), y + S(9), t[key], S(13), TEXT if avail else MUTED, True, maxw=tw - S(62))
-            self.text(d, x + S(43), y + S(28), label, S(11), MUTED, False, maxw=tw - S(52))
-            dc = status_color(avail, on)
+            self.text(d, x + S(43), y + S(9), t[key], S(13), fg or (TEXT if avail else MUTED), True, maxw=tw - S(62))
+            lcol = fg or MUTED
+            if working:
+                label, lcol = t["busy"], fg or AMBER
+            elif armed:
+                label, lcol = t["confirm_off"], fg
+            elif avail and on and not fg:
+                lcol = GREEN
+            self.text(d, x + S(43), y + S(28), label, S(11), lcol, bool(armed or working), maxw=tw - S(52))
+            dc = (fg if armed else AMBER) if (armed or working) else status_color(avail, on)
             self.ellipse(d, [x + tw - S(16), y + S(8), x + tw - S(9), y + S(15)], fill=dc)
             pos[key] = (x, y)
             x += tw + gap
         # volume - / valore / +
         vol = snap["volume"]
         for key, ico in (("vminus", "minus"),):
-            col, bw = focus_box(key, x, x + vb)
-            self.rrect(d, (x, y, x + vb, y + th), S(16), fill=PANEL, outline=col, width=bw)
-            self.icon(d, ico, x + vb // 2, y + th // 2, S(22), TEXT if vol["available"] else GREY, max(2, S(2)))
+            fill, col, bw, fg = sty(key)
+            self.rrect(d, (x, y, x + vb, y + th), S(16), fill=fill, outline=col, width=bw)
+            self.icon(d, ico, x + vb // 2, y + th // 2, S(22), fg or (TEXT if vol["available"] else GREY), max(2, S(2)))
             x += vb + gap
-        col, bw = focus_box("vol", x, x + vw)
-        self.rrect(d, (x, y, x + vw, y + th), S(16), fill=PANEL, outline=col, width=bw)
+        fill, col, bw, fg = sty("vol")
+        self.rrect(d, (x, y, x + vw, y + th), S(16), fill=fill, outline=col, width=bw)
         if vol["available"]:
             label = ("%d%%" % vol["percent"]) if not vol["muted"] else t["muted"]
-            self.text(d, x + vw // 2, y + S(8), label, S(20) if not vol["muted"] else S(15), TEXT if not vol["muted"] else AMBER, True, "m", maxw=vw - S(8))
+            self.text(d, x + vw // 2, y + S(8), label, S(20) if not vol["muted"] else S(15), fg or (TEXT if not vol["muted"] else AMBER), True, "m", maxw=vw - S(8))
         else:
             self.text(d, x + vw // 2, y + S(8), "--", S(20), GREY, True, "m")
-        self.text(d, x + vw // 2, y + S(32), t["volume"], S(10), MUTED, False, "m", maxw=vw - S(6))
+        self.text(d, x + vw // 2, y + S(32), t["volume"], S(10), fg or MUTED, False, "m", maxw=vw - S(6))
         x += vw + gap
-        col, bw = focus_box("vplus", x, x + vb)
-        self.rrect(d, (x, y, x + vb, y + th), S(16), fill=PANEL, outline=col, width=bw)
-        self.icon(d, "plus", x + vb // 2, y + th // 2, S(22), TEXT if vol["available"] else GREY, max(2, S(2)))
+        fill, col, bw, fg = sty("vplus")
+        self.rrect(d, (x, y, x + vb, y + th), S(16), fill=fill, outline=col, width=bw)
+        self.icon(d, "plus", x + vb // 2, y + th // 2, S(22), fg or (TEXT if vol["available"] else GREY), max(2, S(2)))
 
         # ---- carte degli spazi
         n = max(1, len(entries))
@@ -887,7 +974,15 @@ class Renderer:
         if zone == "spaces":
             items = [("lr", t["choose"]), ("A", t["confirm"]), ("B", t["cancel"]), ("u", t["services"])]
         else:
-            items = [("lr", t["move"]), ("A", t["activate"] if ITEMS[svc_i] in ("bt", "wifi", "lan", "vol") else t["adjust"]), ("B", t["cancel"]), ("d", t["spaces"])]
+            cur = ITEMS[svc_i]
+            if cur in TOGGLE_ITEMS and cur in (model.get("toggles") or ()):
+                if pending == cur:
+                    alab = t["confirm_hint"]
+                else:
+                    alab = t["turnoff"] if snap[cur].get("on" if cur != "lan" else "up") else t["turnon"]
+            else:
+                alab = t["activate"] if cur in ("bt", "wifi", "lan", "vol") else t["adjust"]
+            items = [("lr", t["move"]), ("A", alab), ("B", t["cancel"]), ("d", t["spaces"])]
         cd = S(28)  # circle diameter, like the Dashboard footer hints
         fs = S(14)
         widths = []
@@ -958,6 +1053,8 @@ class SpacesOverlay:
         self.last_input = 0.0
         self.a_down_t = None
         self.a_last = 0.0
+        self.pending = None          # servizio con la conferma di spegnimento armata
+        self.pending_until = 0.0
         self.services = Services(log, getattr(mgr, "bt_pad_in_use", None))
         self.renderer = None
         self.available, self.reason = self._check_deps()
@@ -1028,6 +1125,7 @@ class SpacesOverlay:
             self.last_input = time.time()
             self._last_entries = time.time()
             self._svc_ver = -1
+            self.pending = None
             self.opened = True
         ev = threading.Event()
         res = {"ok": False}
@@ -1071,6 +1169,13 @@ class SpacesOverlay:
         with self.lock:
             self.last_input = time.time()
             n = len(self.entries)
+            # la conferma armata vale solo finche' non ci si muove: ogni spostamento la annulla;
+            # B la annulla senza chiudere l'overlay (come B su "Esci" nel quick-menu)
+            if self.pending and action in ("left", "right", "up", "down", "b"):
+                self.pending = None
+                if action == "b":
+                    self.q.put(("draw",))
+                    return True
             if action in ("left", "right"):
                 dlt = -1 if action == "left" else 1
                 if self.zone == "spaces":
@@ -1105,9 +1210,7 @@ class SpacesOverlay:
                         if not self.services.toggle_mute():
                             self._set_toast("noaudio")
                     else:
-                        msg = self.services.activate(item)
-                        if msg:
-                            self._set_toast(msg)
+                        self._toggle_service(item)
             else:
                 return False
         if finish:
@@ -1115,6 +1218,34 @@ class SpacesOverlay:
         else:
             self.q.put(("draw",))
         return True
+
+    def _toggle_service(self, item):
+        """Bluetooth / Wi-Fi / LAN. Accendere e' immediato; spegnere richiede un secondo A.
+        Chiamato con self.lock preso."""
+        if self.pending == item:
+            self.pending = None
+            msg = self.services.activate_async(item, self._svc_done)
+            if msg:
+                self._set_toast(msg)
+            return
+        self.pending = None
+        msg = self.services.precheck(item)
+        if msg:
+            self._set_toast(msg)
+            return
+        if self.services.is_on(item):
+            self.pending = item
+            self.pending_until = time.time() + CONFIRM_TIMEOUT_S
+            return
+        msg = self.services.activate_async(item, self._svc_done)
+        if msg:
+            self._set_toast(msg)
+
+    def _svc_done(self, res):
+        with self.lock:
+            if res:
+                self._set_toast(res)
+        self.q.put(("draw",))
 
     def _set_toast(self, key):
         self.toast = (self.t.get(key, key), time.time() + 2.2)
@@ -1205,6 +1336,12 @@ class SpacesOverlay:
         _, ver = self.services.snapshot()
         if ver != self._svc_ver:
             redraw = True
+        with self.lock:
+            if self.pending and now > self.pending_until:
+                self.pending = None
+                redraw = True
+        if self.services.busy:
+            redraw = True
         if self.toast[0] and now > self.toast[1]:
             self.toast = ("", 0.0)
             redraw = True
@@ -1294,7 +1431,8 @@ class SpacesOverlay:
                              "color": col, "ink": ink, "current": e["space"] == self.cur,
                              "cover": e.get("cover"), "hero": e.get("hero")})
             return {"zone": self.zone, "sel": self.sel, "svc": self.svc, "entries": ents, "services": snap,
-                    "toast": self.toast[0]}
+                    "toast": self.toast[0], "pending": self.pending, "busy": sorted(self.services.busy),
+                    "toggles": sorted(self.services.toggles)}
 
     def _x_draw(self):
         win = self._win

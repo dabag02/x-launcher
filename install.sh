@@ -80,11 +80,26 @@
 #  senza i temi l'overlay usa la tavolozza interna, senza i font Dashboard e overlay
 #  usano i font di sistema. Il tema scelto è in app.conf (theme=), per utente.
 #
+#  v3.2.5-Mars — (arrivata con le dev.1/dev.2 del ciclo) opzione --devel per le versioni di SVILUPPO: la Dashboard viene
+#  installata in /opt come sempre, ma gli script che l'utente e il sistema lanciano
+#  (symlink ~/.config/openbox/{rc.xml,autostart,spaces-ctl}, /usr/local/bin/x-launcher
+#  e x-launcher-spaces, Exec= delle voci di sessione Kiosk e di xlaunch://) puntano al
+#  PACCHETTO LOCALE, cioe' alla cartella da cui lanci l'installer, invece che a /opt.
+#  Cosi' si prova la copia di sviluppo (autostart passa da solo --local-server) senza
+#  perdere l'installazione di sistema. E' il contrario di --relink-openbox, che riporta
+#  i link a /opt; per tornare alla stabile: sudo ./install.sh --relink-openbox
+#  La cifratura dei segreti (secret.key, backup-passphrase.enc) e' creata dal demone al
+#  primo avvio con permessi 0600: l'installer non la tocca e non deve farlo.
+#  (dalla cartella della versione stabile).
+#
 #  Uso:
 #    sudo ./install.sh                    # installa/aggiorna /opt/x-launcher
 #    sudo ./install.sh --relink-openbox   # idem, e riporta a /opt anche i symlink
 #                                         # ~/.config/openbox che puntano altrove
 #                                         # (es. a una copia di sviluppo)
+#    sudo ./install.sh --devel            # SVILUPPO: installa in /opt ma fa puntare
+#                                         # script, symlink e sessioni a QUESTA cartella
+#                                         # (non combinabile con --relink-openbox)
 #    sudo ./install.sh --no-openbox       # idem, senza toccare ~/.config dell'utente
 #    sudo ./install.sh --uninstall        # rimuove /opt/x-launcher e i link
 # =============================================================
@@ -114,15 +129,38 @@ SPACES_CTL_LINK="/usr/local/bin/x-launcher-spaces"
 UNINSTALL=0
 RELINK_OPENBOX=0
 SKIP_OPENBOX=0
+DEVEL=0
 for _arg in "$@"; do
   case "$_arg" in
     --uninstall) UNINSTALL=1 ;;
     --relink-openbox) RELINK_OPENBOX=1 ;;
     --no-openbox) SKIP_OPENBOX=1 ;;
+    --devel) DEVEL=1 ;;
     -h|--help) sed -n '/^#  Uso:/,/^# =====/p' "$0"; exit 0 ;;
     *) echo "[INSTALL] Opzione sconosciuta: $_arg (usa --help)"; exit 2 ;;
   esac
 done
+
+if [ "$DEVEL" = 1 ] && [ "$RELINK_OPENBOX" = 1 ]; then
+  echo "[INSTALL] --devel e --relink-openbox sono opposti (puntare al pacchetto locale / riportare a /opt): usane uno solo."
+  exit 2
+fi
+
+# v3.2.2-dev.1 — LINK_DIR: la cartella a cui puntano gli script. Di norma /opt (INSTALL_DIR);
+# con --devel il pacchetto locale (PROJECT_DIR).
+LINK_DIR="$INSTALL_DIR"
+if [ "$DEVEL" = 1 ]; then
+  if [ "$PROJECT_DIR" = "$INSTALL_DIR" ]; then
+    echo "[INSTALL] --devel va lanciato dalla cartella di sviluppo, non da ${INSTALL_DIR}."
+    exit 2
+  fi
+  # il percorso finisce nei file .desktop (Exec=): niente spazi o caratteri speciali
+  if ! printf '%s' "$PROJECT_DIR" | grep -Eq '^[A-Za-z0-9_./+-]+$'; then
+    echo "[INSTALL] --devel: il percorso ${PROJECT_DIR} contiene spazi o caratteri speciali. Sposta il pacchetto in una cartella con un percorso semplice."
+    exit 2
+  fi
+  LINK_DIR="$PROJECT_DIR"
+fi
 
 # -------------------------------------------------------------
 # v2.6.6-Mercury — sessione Openbox "Shell" (Step 21).
@@ -176,7 +214,7 @@ setup_openbox_session() {
 
   local name src dst cur bak
   for name in rc.xml autostart spaces-ctl; do
-    src="$INSTALL_DIR/openbox/$name"
+    src="$LINK_DIR/openbox/$name"
     dst="$home/.config/openbox/$name"
     if [ ! -e "$src" ]; then
       echo "[INSTALL]   ⚠ manca $src — ${name} non collegato."
@@ -186,7 +224,7 @@ setup_openbox_session() {
       cur="$(readlink "$dst")"
       if [ "$cur" = "$src" ]; then
         echo "[INSTALL]   ok   $dst -> $src"
-      elif [ "$RELINK_OPENBOX" = 1 ]; then
+      elif [ "$RELINK_OPENBOX" = 1 ] || [ "$DEVEL" = 1 ]; then
         _as_user ln -sfn "$src" "$dst"
         echo "[INSTALL]   ripuntato $dst: $cur -> $src"
       elif [ -t 0 ] && [ -t 1 ]; then
@@ -244,17 +282,17 @@ setup_openbox_session() {
   if [ ! -f /usr/share/xsessions/openbox.desktop ]; then
     echo "[INSTALL]   ⚠ /usr/share/xsessions/openbox.desktop assente: la voce \"Openbox\" non comparirà nel greeter finché non installi il pacchetto openbox."
   fi
-  if [ ! -x "$INSTALL_DIR/.venv-tray/bin/python3" ]; then
-    echo "[INSTALL]   ⚠ ${INSTALL_DIR}/.venv-tray assente: esegui ./build.sh compile prima di installare (tray.py e spaces.py girano con quel python)."
-  elif [ -f "$INSTALL_DIR/overlay.py" ]; then
+  if [ ! -x "$LINK_DIR/.venv-tray/bin/python3" ]; then
+    echo "[INSTALL]   ⚠ ${LINK_DIR}/.venv-tray assente: esegui ./build.sh compile prima di installare (tray.py e spaces.py girano con quel python)."
+  elif [ -f "$LINK_DIR/overlay.py" ]; then
     # v3.0.1-Mars — overlay degli spazi: solo avviso (senza, Select + D-pad cambia spazio direttamente)
-    if (cd "$INSTALL_DIR" && "$INSTALL_DIR/.venv-tray/bin/python3" -c 'import overlay; assert overlay.HAVE_PIL and overlay.HAVE_XLIB' &>/dev/null); then
+    if (cd "$LINK_DIR" && "$LINK_DIR/.venv-tray/bin/python3" -c 'import overlay; assert overlay.HAVE_PIL and overlay.HAVE_XLIB' &>/dev/null); then
       echo "[INSTALL]   overlay degli spazi: pronto (pillow + python-xlib nel venv)"
     else
       echo "[INSTALL]   ⚠ overlay degli spazi non utilizzabile con il venv di ${INSTALL_DIR} (manca pillow o python-xlib?): esegui ./build.sh compile nella cartella del progetto e reinstalla. Nel frattempo Select + D-pad cambia spazio direttamente."
     fi
   else
-    echo "[INSTALL]   ⚠ ${INSTALL_DIR}/overlay.py assente: nessun overlay degli spazi (cambio diretto)."
+    echo "[INSTALL]   ⚠ ${LINK_DIR}/overlay.py assente: nessun overlay degli spazi (cambio diretto)."
   fi
 }
 
@@ -271,6 +309,8 @@ cleanup_openbox_session() {
       cur="$(readlink "$dst")"
       case "$cur" in
         "$INSTALL_DIR"/openbox/*) rm -f "$dst"; echo "[INSTALL] Rimosso symlink $dst" ;;
+        # v3.2.2-dev.1 — link creati con --devel: puntano a una copia di sviluppo (cartella con kiosk-launch.sh)
+        */openbox/"$name") if [ -f "${cur%/openbox/*}/kiosk-launch.sh" ]; then rm -f "$dst"; echo "[INSTALL] Rimosso symlink di sviluppo $dst"; fi ;;
       esac
     fi
   done
@@ -369,11 +409,11 @@ for _f in autostart display.sh spaces-ctl; do
   [ -f "$INSTALL_DIR/openbox/$_f" ] && chmod +x "$INSTALL_DIR/openbox/$_f"
 done
 
-echo "[INSTALL] Creo il symlink ${BIN_LINK} → ${INSTALL_DIR}/kiosk-launch.sh..."
-ln -sf "$INSTALL_DIR/kiosk-launch.sh" "$BIN_LINK"
-if [ -f "$INSTALL_DIR/openbox/spaces-ctl" ]; then
-  echo "[INSTALL] Creo il symlink ${SPACES_CTL_LINK} → ${INSTALL_DIR}/openbox/spaces-ctl (controllo degli spazi da riga di comando)..."
-  ln -sf "$INSTALL_DIR/openbox/spaces-ctl" "$SPACES_CTL_LINK"
+echo "[INSTALL] Creo il symlink ${BIN_LINK} → ${LINK_DIR}/kiosk-launch.sh..."
+ln -sf "$LINK_DIR/kiosk-launch.sh" "$BIN_LINK"
+if [ -f "$LINK_DIR/openbox/spaces-ctl" ]; then
+  echo "[INSTALL] Creo il symlink ${SPACES_CTL_LINK} → ${LINK_DIR}/openbox/spaces-ctl (controllo degli spazi da riga di comando)..."
+  ln -sf "$LINK_DIR/openbox/spaces-ctl" "$SPACES_CTL_LINK"
 fi
 
 # v2.2.19-dev.1 — sessione Kiosk (Wayland/gamescope standalone). Il file
@@ -384,9 +424,12 @@ fi
 echo "[INSTALL] Installo la sessione LightDM (Wayland/gamescope) in ${KIOSK_SESSION_FILE}..."
 mkdir -p "$KIOSK_SESSION_DIR"
 cp "$INSTALL_DIR/xlauncher-kiosk.desktop" "$KIOSK_SESSION_FILE"
+# v3.2.2-dev.1 — --devel: l'Exec= della sessione punta al pacchetto locale
+[ "$DEVEL" = 1 ] && sed -i "s|^Exec=${INSTALL_DIR}/|Exec=${LINK_DIR}/|" "$KIOSK_SESSION_FILE"
 
 echo "[INSTALL] Registro il protocollo xlaunch:// in ${XLAUNCH_DESKTOP_FILE}..."
 cp "$INSTALL_DIR/xlaunch-protocol.desktop" "$XLAUNCH_DESKTOP_FILE"
+[ "$DEVEL" = 1 ] && sed -i "s|^Exec=${INSTALL_DIR}/|Exec=${LINK_DIR}/|" "$XLAUNCH_DESKTOP_FILE"
 update-desktop-database /usr/share/applications 2>/dev/null || true
 
 # xdg-mime default va eseguito dall'utente reale, non da root (scrive in
@@ -413,6 +456,11 @@ fi
 
 echo ""
 echo "[INSTALL] Completato."
+if [ "$DEVEL" = 1 ]; then
+  echo "[INSTALL] MODALITA' SVILUPPO (--devel): installato in ${INSTALL_DIR}, ma symlink, comandi e sessioni puntano a ${LINK_DIR}."
+  echo "[INSTALL]   Dopo ogni ./build.sh compile basta riavviare la sessione: non serve reinstallare. Per tornare alla stabile:"
+  echo "[INSTALL]   dalla cartella della versione stabile: sudo ./install.sh --relink-openbox"
+fi
 echo "[INSTALL] - Avvio da riga di comando, qualunque cartella: x-launcher"
 echo "[INSTALL] - Sessione Kiosk (Wayland/gamescope, senza desktop): selezionabile come 'X-Launcher Kiosk' dal menu sessioni alla schermata di login LightDM."
 echo "[INSTALL] - Sessione Openbox 'Shell' (Xorg + Openbox, Dashboard e giochi in spazi separati; Select + D-pad per cambiare spazio): selezionabile come 'Openbox' dal greeter LightDM (richiede il pacchetto openbox). Comando di controllo: x-launcher-spaces state|next|prev|dashboard|switch N|clients|freeze on|off|status|thaw [scope]|overlay on|off|open|close|status. Select + D-pad apre l'overlay degli spazi e dei servizi (spegnerlo: X_LAUNCHER_SPACES_OVERLAY=0 in ~/.config/openbox/environment)."

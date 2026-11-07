@@ -39,6 +39,7 @@ import { isValidRunnerId } from './src/backend/runnerSafety';
 import { hardenDataPermissions } from './src/backend/dataPermissions';
 import { parseHttpUrl } from './src/backend/urlSafety';
 import { loadOrCreateToken, authMiddleware, authenticate, NonceStore, TOKEN_FILE_NAME } from './src/backend/authToken';
+import { hasBackupPassphrase, validatePassphrase, setBackupPassphrase, clearBackupPassphrase } from './src/backend/cloudBackup/backupCrypto';
 
 // Stesso pattern già usato in altri moduli backend (downloadManager.ts,
 // runners/implementations.ts, plugins/gogPlugin.ts, plugins/epicPlugin.ts)
@@ -1624,6 +1625,8 @@ async function startServer() {
         hasCredentials: !!(cred?.clientId && cred?.clientSecret),
         authenticated: await p.isAuthenticated(),
         lastBackupAt:  cred?.lastBackupAt ?? null,
+        // v3.2.2-dev.2 — la passphrase non esce mai dal server: la UI sa solo se c'e'.
+        passphraseSet: hasBackupPassphrase(),
       };
     }));
     res.json(result);
@@ -1644,6 +1647,26 @@ async function startServer() {
       lastBackupAt:  existing?.lastBackupAt,
     });
     res.json({ success: true });
+  });
+
+  // v3.2.2-dev.2 (audit punto 5) — passphrase che cifra il bundle di backup. POST la imposta (minimo 8 caratteri),
+  // DELETE la rimuove (i backup successivi non saranno cifrati). Mai restituita in nessuna risposta.
+  app.post('/api/cloud-backup/passphrase', (req, res) => {
+    const passphrase: unknown = req.body?.passphrase;
+    const problem = validatePassphrase(passphrase);
+    if (problem) return res.status(400).json({ success: false, message: problem });
+    try {
+      setBackupPassphrase(passphrase as string);
+      res.json({ success: true, message: 'Passphrase impostata: i prossimi backup saranno cifrati.' });
+    } catch (err) {
+      writeLog('error', `[CloudBackup] Passphrase non salvata: ${err}`);
+      res.status(500).json({ success: false, message: 'Impossibile salvare la passphrase.' });
+    }
+  });
+
+  app.delete('/api/cloud-backup/passphrase', (_req, res) => {
+    clearBackupPassphrase();
+    res.json({ success: true, message: 'Passphrase rimossa: i prossimi backup non saranno cifrati.' });
   });
 
   app.post('/api/cloud-backup/providers/:id/login', async (req, res) => {
@@ -1674,9 +1697,15 @@ async function startServer() {
     const provider = getCloudBackupProvider(active.providerId);
     if (!provider) return res.json({ success: false, message: 'Provider sconosciuto.' });
     try {
-      const { buildBackupBundle, BACKUP_FILENAME } = await import('./src/backend/cloudBackup/bundle');
-      const bundle = buildBackupBundle();
-      const result = await provider.uploadBackup(bundle, BACKUP_FILENAME);
+      const { buildBackupPayload, BACKUP_FILENAME } = await import('./src/backend/cloudBackup/bundle');
+      // v3.2.2-dev.2 — con una passphrase impostata il bundle viene cifrato prima di lasciare la macchina.
+      const payload = buildBackupPayload();
+      const result = await provider.uploadBackup(payload.data, BACKUP_FILENAME);
+      if (result.success) {
+        result.message += payload.encrypted
+          ? ' (cifrato con la tua passphrase)'
+          : ' — ATTENZIONE: non cifrato, imposta una passphrase in Gestisci account';
+      }
       res.json(result);
     } catch (err) {
       writeLog('error', `[CloudBackup] Backup fallito: ${err}`);
@@ -1994,6 +2023,9 @@ async function startServer() {
   app.listen(PORT, BIND_HOST, () => {
     writeLog('system', `Daemon started on http://${BIND_HOST}:${PORT}`);
     // v3.0.2-dev.4 — cartella dati 0700, DB/.env/token 0600 (anche i file nati dopo l'avvio, es. tokens.json).
+    // v3.2.2-dev.2 — cifra a riposo i segreti ancora in chiaro (chiavi API, client secret, token), poi stringe i permessi
+    // (secret.key nasce 0600 al primo uso).
+    db.migrateSecretsAtRest();
     const tightened = hardenDataPermissions();
     if (tightened.length > 0) writeLog('system', `[SECURITY] Permessi stretti su: ${tightened.join(', ')}`);
     if (AUTH_ENABLED) {

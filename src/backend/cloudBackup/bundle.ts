@@ -10,6 +10,8 @@
  *       tokens.json, credenziali provider AI Advisor/Cloud Backup,
  *       lingua e scelta avatar corrente (preferenze, non dati)
  *
+ * v3.2.2-dev.2: se l'utente ha impostato una passphrase il file compresso viene anche CIFRATO (backupCrypto.ts).
+ *
  * Formato: un singolo oggetto JSON, compresso con gzip (zlib nativo di
  * Node) prima dell'upload. Le immagini avatar viaggiano come base64
  * dentro lo stesso JSON invece di un vero archivio zip — niente
@@ -25,6 +27,7 @@ import * as db from '../db';
 import { knowledgeBase } from '../knowledgeBase';
 import { restoreAppConfFromText } from '../appConfig';
 import { resolveInside } from '../runnerSafety';
+import { isEncryptedBundle, encryptBundle, decryptBundle, getBackupPassphrase, BundleCryptoError } from './backupCrypto';
 import {
   filterEnvForBackup, mergeEnvFromBackup, isSafeAvatarName, decodeAvatar,
   AVATAR_MAX_COUNT, BUNDLE_MAX_DECOMPRESSED, BUNDLE_MAX_ROWS,
@@ -92,6 +95,22 @@ export function buildBackupBundle(): Buffer {
 }
 
 /**
+ * v3.2.2-dev.2 — bundle pronto per l'upload: cifrato con la passphrase dell'utente se ne ha impostata una
+ * (vedi backupCrypto.ts), altrimenti il gzip semplice di prima.
+ */
+export function buildBackupPayload(): { data: Buffer; encrypted: boolean } {
+  const gz = buildBackupBundle();
+  const passphrase = getBackupPassphrase();
+  if (!passphrase) {
+    writeLog('warning', '[CloudBackup] Nessuna passphrase impostata: il backup parte NON cifrato.');
+    return { data: gz, encrypted: false };
+  }
+  const data = encryptBundle(gz, passphrase);
+  writeLog('info', `[CloudBackup] Bundle cifrato (AES-256-GCM, ${data.length} byte).`);
+  return { data, encrypted: true };
+}
+
+/**
  * Ripristina un bundle scaricato. Riga per riga per compat_profiles (una
  * riga che referenzia un gioco non ancora nella libreria — non ancora
  * scansionata su questa installazione — viene saltata, non blocca il
@@ -106,6 +125,20 @@ export function restoreFromBundle(compressed: Buffer): {
   knowledgeBaseImported?: number;
   avatarsRestored?: number;
 } {
+  // v3.2.2-dev.2 — bundle cifrato: serve la passphrase salvata su questa macchina (impostala in Gestisci account
+  // prima di ripristinare su un'altra macchina). Una passphrase sbagliata e' un errore chiaro, mai dati sbagliati.
+  if (isEncryptedBundle(compressed)) {
+    const passphrase = getBackupPassphrase();
+    if (!passphrase) {
+      return { success: false, message: 'Il backup su Drive e\' cifrato: imposta in Gestisci account la passphrase usata per cifrarlo, poi riprova il ripristino.' };
+    }
+    try {
+      compressed = decryptBundle(compressed, passphrase);
+    } catch (err) {
+      const msg = err instanceof BundleCryptoError ? err.message : String(err);
+      return { success: false, message: `${msg} Controlla la passphrase in Gestisci account.` };
+    }
+  }
   // v3.0.2-dev.4 — il bundle e' input NON fidato (arriva da Drive): limiti di dimensione, struttura verificata,
   // ogni parte ripulita prima di toccare disco o DB. Vedi restoreSafety.ts.
   let bundle: BackupBundle;

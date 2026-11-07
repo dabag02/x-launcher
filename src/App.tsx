@@ -691,6 +691,7 @@ function MainApp() {
     cloudBackupProviders,
     setCloudBackupProviders,
     saveCloudBackupProvider,
+    commitBackupPassphrase,
     connectCloudBackupProvider,
     disconnectCloudBackupProvider,
     runCloudBackupAction,
@@ -902,7 +903,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v3.2.1-Mars');
+  const [appVersion, setAppVersion] = useState('v3.2.5-Mars');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -7210,7 +7211,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     // effettivamente renderizzato sotto
                                     // (Connetti se non ancora autenticato,
                                     // Backup/Ripristina se già connesso).
-                                    neighbors={{ down: !p.hasCredentials ? undefined : (p.authenticated ? `cloud-backup-run-${id}` : `cloud-backup-connect-${id}`) }}
+                                    neighbors={{ up: `cloud-backup-clientid-${id}`, down: `cloud-backup-passphrase-${id}` }}
                                     onEnter={() => openKeyboardForField(
                                       `cloud-backup-secret-${id}`,
                                       `${p.name} — Client Secret`,
@@ -7237,11 +7238,74 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                     )}
                                   </Focusable>
                                 </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0 w-20">{t('accounts.passphrase')}</span>
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-backup-passphrase-${id}`}
+                                    neighbors={{ up: `cloud-backup-secret-${id}`, down: `cloud-backup-passphrase-confirm-${id}` }}
+                                    onEnter={() => openKeyboardForField(
+                                      `cloud-backup-passphrase-${id}`,
+                                      `${p.name} — ${t('accounts.passphrase')}`,
+                                      '',
+                                      (val) => commitBackupPassphrase(id, 'main', val, { mismatch: t('accounts.passphraseMismatch'), waitingConfirm: t('accounts.passphraseWaitingConfirm') }),
+                                      'settings'
+                                    )}
+                                  >
+                                    {(isFocused) => (
+                                      <input
+                                        type="text"
+                                        readOnly
+                                        value={p.passphraseDraft ? '••••••••' : (p.passphraseSet ? '••••••••' : '')}
+                                        placeholder={t('accounts.passphraseNotSet')}
+                                        className={cn(
+                                          "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
+                                          "bg-xl-inset",
+                                          isFocused ? "border-2 border-xl-special-500" : "border border-xl-control-border"
+                                        )}
+                                      />
+                                    )}
+                                  </Focusable>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] font-black uppercase tracking-widest opacity-40 shrink-0 w-20">{t('accounts.passphraseConfirm')}</span>
+                                  <Focusable
+                                    group="settings"
+                                    id={`cloud-backup-passphrase-confirm-${id}`}
+                                    // v3.2.2-dev.2 — ultima riga del blocco: da qui si scende al pulsante che e' effettivamente
+                                    // renderizzato sotto (Connetti se non ancora autenticato, Backup/Ripristina se connesso).
+                                    neighbors={{ up: `cloud-backup-passphrase-${id}`, down: !p.hasCredentials ? undefined : (p.authenticated ? `cloud-backup-run-${id}` : `cloud-backup-connect-${id}`) }}
+                                    onEnter={() => openKeyboardForField(
+                                      `cloud-backup-passphrase-confirm-${id}`,
+                                      `${p.name} — ${t('accounts.passphraseConfirm')}`,
+                                      '',
+                                      (val) => commitBackupPassphrase(id, 'confirm', val, { mismatch: t('accounts.passphraseMismatch'), waitingConfirm: t('accounts.passphraseWaitingConfirm') }),
+                                      'settings'
+                                    )}
+                                  >
+                                    {(isFocused) => (
+                                      <input
+                                        type="text"
+                                        readOnly
+                                        value={p.passphraseConfirmDraft ? '••••••••' : ''}
+                                        placeholder={t('accounts.passphraseConfirmHint')}
+                                        className={cn(
+                                          "flex-1 px-3 py-1.5 rounded-lg text-xs font-mono focus:outline-none transition-colors cursor-pointer",
+                                          "bg-xl-inset",
+                                          isFocused ? "border-2 border-xl-special-500" : "border border-xl-control-border"
+                                        )}
+                                      />
+                                    )}
+                                  </Focusable>
+                                </div>
+                                <p className={cn("text-[9px] font-mono leading-relaxed", p.passphraseSet ? "text-xl-success-400" : "text-xl-caution-400")}>
+                                  {p.passphraseSet ? t('accounts.passphraseActive') : t('accounts.passphraseWarning')}
+                                </p>
                               </div>
                             )}
 
                             {p.enabled && p.hasCredentials && !p.authenticated && (
-                              <Focusable group="settings" id={`cloud-backup-connect-${id}`} neighbors={{ up: `cloud-backup-secret-${id}` }} onEnter={() => connectCloudBackupProvider(id)}>
+                              <Focusable group="settings" id={`cloud-backup-connect-${id}`} neighbors={{ up: `cloud-backup-passphrase-confirm-${id}` }} onEnter={() => connectCloudBackupProvider(id)}>
                                 {(isFocused) => (
                                   <button className={cn(
                                     "w-full py-2.5 rounded-xl text-[10px] font-black uppercase italic tracking-[0.2em] transition-all",
@@ -7264,7 +7328,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   <Focusable
                                     group="settings"
                                     id={`cloud-backup-run-${id}`}
-                                    neighbors={{ up: `cloud-backup-secret-${id}`, down: `cloud-backup-disconnect-${id}` }}
+                                    neighbors={{ up: `cloud-backup-passphrase-confirm-${id}`, down: `cloud-backup-disconnect-${id}` }}
                                     sequentialChain={`cloud-backup-actions-${id}`}
                                     chainAxis="horizontal"
                                     onEnter={() => runCloudBackupAction(id, 'backup')}
@@ -7281,7 +7345,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                   <Focusable
                                     group="settings"
                                     id={`cloud-backup-restore-${id}`}
-                                    neighbors={{ up: `cloud-backup-secret-${id}`, down: `cloud-backup-disconnect-${id}` }}
+                                    neighbors={{ up: `cloud-backup-passphrase-confirm-${id}`, down: `cloud-backup-disconnect-${id}` }}
                                     sequentialChain={`cloud-backup-actions-${id}`}
                                     chainAxis="horizontal"
                                     onEnter={() => runCloudBackupAction(id, 'restore')}

@@ -29,6 +29,7 @@ import { DATA_DIR } from './paths';
 import { writeLog } from './logger';
 import { sanitizeCompatRow } from './restoreSafety';
 import { hardenDataPermissions } from './dataPermissions';
+import { encryptSecret, decryptSecret, isEncryptedSecret } from './secretBox';
 
 // ---------------------------------------------------------------------------
 // Percorso DB
@@ -193,6 +194,9 @@ db.exec(`
   );
 
   -- v0.99.90 — Step 15d: credenziali/configurazione per provider AI.
+  -- v3.2.2-dev.2: da questa versione api_key (e client_secret piu' sotto, e i token
+  -- di tokens.json) sono cifrati a riposo con secretBox.ts; il commento che segue
+  -- descrive la situazione PRECEDENTE ed e' lasciato come storia.
   -- ATTENZIONE, decisione esplicita da segnalare: api_key qui è salvata
   -- in CHIARO, non cifrata — stessa convenzione già in uso in tutto il
   -- resto di questo DB (nessun altro campo sensibile del progetto è
@@ -1195,15 +1199,55 @@ export function saveToken(storeId: string, token: string): void {
   try {
     tokens = JSON.parse(require('fs').readFileSync(TOK_PATH, 'utf-8'));
   } catch { /* file non ancora creato */ }
-  tokens[storeId] = token;
+  // v3.2.2-dev.2 — i valori sono cifrati a riposo (secretBox); i vecchi in chiaro restano leggibili e vengono
+  // riscritti cifrati da migrateSecretsAtRest().
+  tokens[storeId] = encryptSecret(token) ?? token;
   require('fs').writeFileSync(TOK_PATH, JSON.stringify(tokens, null, 2), { mode: 0o600 });
 }
 
 export function loadToken(storeId: string): string | undefined {
   try {
     const tokens = JSON.parse(require('fs').readFileSync(TOK_PATH, 'utf-8'));
-    return tokens[storeId];
+    return decryptSecret(tokens[storeId]);
   } catch { return undefined; }
+}
+
+/**
+ * v3.2.2-dev.2 (audit punto 5) — all'avvio riscrive cifrati i segreti ancora in chiaro: api_key dei provider AI,
+ * client_secret del Cloud Backup, valori di tokens.json. Idempotente (salta quelli gia' cifrati) e a prova di
+ * errore: se la chiave non e' utilizzabile lascia tutto com'e'.
+ */
+export function migrateSecretsAtRest(): { ai: number; backup: number; tokens: number } {
+  const out = { ai: 0, backup: 0, tokens: 0 };
+  try {
+    for (const r of db.prepare('SELECT provider_id, api_key FROM ai_provider_credentials WHERE api_key IS NOT NULL AND api_key != \'\'').all() as { provider_id: string; api_key: string }[]) {
+      if (isEncryptedSecret(r.api_key)) continue;
+      const enc = encryptSecret(r.api_key);
+      if (enc && isEncryptedSecret(enc)) { db.prepare('UPDATE ai_provider_credentials SET api_key = ? WHERE provider_id = ?').run(enc, r.provider_id); out.ai++; }
+    }
+    for (const r of db.prepare('SELECT provider_id, client_secret FROM cloud_backup_credentials WHERE client_secret IS NOT NULL AND client_secret != \'\'').all() as { provider_id: string; client_secret: string }[]) {
+      if (isEncryptedSecret(r.client_secret)) continue;
+      const enc = encryptSecret(r.client_secret);
+      if (enc && isEncryptedSecret(enc)) { db.prepare('UPDATE cloud_backup_credentials SET client_secret = ? WHERE provider_id = ?').run(enc, r.provider_id); out.backup++; }
+    }
+    const fs = require('fs');
+    if (fs.existsSync(TOK_PATH)) {
+      const tokens = JSON.parse(fs.readFileSync(TOK_PATH, 'utf-8')) as Record<string, string>;
+      let changed = false;
+      for (const [k, v] of Object.entries(tokens)) {
+        if (typeof v !== 'string' || v === '' || isEncryptedSecret(v)) continue;
+        const enc = encryptSecret(v);
+        if (enc && isEncryptedSecret(enc)) { tokens[k] = enc; changed = true; out.tokens++; }
+      }
+      if (changed) fs.writeFileSync(TOK_PATH, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+    }
+    if (out.ai + out.backup + out.tokens > 0) {
+      writeLog('info', `[SECRETS] Segreti cifrati a riposo: ${out.ai} chiavi API, ${out.backup} client secret, ${out.tokens} token.`);
+    }
+  } catch (err) {
+    writeLog('warning', `[SECRETS] Migrazione dei segreti non completata (non bloccante): ${err}`);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,7 +1369,7 @@ export function getAiProviderCredential(providerId: string): AiProviderCredentia
   return {
     providerId: row.provider_id,
     enabled:    row.enabled === 1,
-    apiKey:     row.api_key    ?? undefined,
+    apiKey:     decryptSecret(row.api_key),       // v3.2.2-dev.2: cifrata a riposo (secretBox)
     baseUrl:    row.base_url   ?? undefined,
     model:      row.model      ?? undefined,
     priority:   row.priority,
@@ -1353,7 +1397,7 @@ export function getAllAiProviderCredentials(): AiProviderCredential[] {
     .map(row => ({
       providerId: row.provider_id,
       enabled:    row.enabled === 1,
-      apiKey:     row.api_key  ?? undefined,
+      apiKey:     decryptSecret(row.api_key),
       baseUrl:    row.base_url ?? undefined,
       model:      row.model    ?? undefined,
       priority:   row.priority,
@@ -1385,7 +1429,7 @@ export function upsertAiProviderCredential(cred: AiProviderCredential): void {
   `).run({
     providerId: cred.providerId,
     enabled:    cred.enabled ? 1 : 0,
-    apiKey:     cred.apiKey  ?? null,
+    apiKey:     encryptSecret(cred.apiKey),          // v3.2.2-dev.2: cifrata a riposo (secretBox)
     baseUrl:    cred.baseUrl ?? null,
     model:      cred.model   ?? null,
     priority:   cred.priority,
@@ -1433,7 +1477,7 @@ export function getCloudBackupCredential(providerId: string): CloudBackupCredent
     providerId:    row.provider_id,
     enabled:       row.enabled === 1,
     clientId:      row.client_id     ?? undefined,
-    clientSecret:  row.client_secret ?? undefined,
+    clientSecret:  decryptSecret(row.client_secret),   // v3.2.2-dev.2: cifrato a riposo (secretBox)
     lastBackupAt:  row.last_backup_at ?? undefined,
   };
 }
@@ -1443,7 +1487,7 @@ export function getAllCloudBackupCredentials(): CloudBackupCredential[] {
     providerId:    row.provider_id,
     enabled:       row.enabled === 1,
     clientId:      row.client_id     ?? undefined,
-    clientSecret:  row.client_secret ?? undefined,
+    clientSecret:  decryptSecret(row.client_secret),
     lastBackupAt:  row.last_backup_at ?? undefined,
   }));
 }
@@ -1469,7 +1513,7 @@ export function upsertCloudBackupCredential(cred: CloudBackupCredential): void {
     providerId:    cred.providerId,
     enabled:       cred.enabled ? 1 : 0,
     clientId:      cred.clientId     ?? null,
-    clientSecret:  cred.clientSecret ?? null,
+    clientSecret:  encryptSecret(cred.clientSecret),   // v3.2.2-dev.2: cifrato a riposo (secretBox)
     lastBackupAt:  cred.lastBackupAt ?? null,
   });
 }

@@ -205,8 +205,8 @@ Il server fa richieste verso URL controllabili: `baseUrl` di Ollama (`GET /api/a
 | 2 — Iniezione di comandi (id runner) | **Corretto**: validazione + `execFile`, nessuna shell | 3.0.2-dev.2 |
 | 3 — Traversal e `rm -rf` (id runner) | **Corretto**: validazione + percorso verificato + `rmSync` | 3.0.2-dev.2 |
 | GET con effetti collaterali → POST | **Non più necessario**: token + cookie SameSite=Strict + rifiuto cross-site li proteggono (`EventSource` richiede GET) | 3.0.2-dev.3 |
-| 4 — Ripristino backup cloud | **Corretto**: avatar, `.env` (lista bianca + unione), `app.conf`, `customEnv`, limiti di dimensione. In più, **nuovo (trovato durante la correzione): iniezione SQL tramite i nomi di colonna dei profili di compatibilità**, corretta. Non fatto: cifratura/firma del bundle con passphrase | 3.0.2-dev.4 |
-| 5 — Segreti in chiaro | **Mitigato**: cartella dati `0700`, DB/`.env`/token `0600`; `.env` del bundle ridotto alle chiavi documentate. Restano: chiavi API in chiaro nel DB e nel bundle su Drive (serve cifratura con passphrase / keyring) | 3.0.2-dev.4 |
+| 4 — Ripristino backup cloud | **Corretto**: avatar, `.env` (lista bianca + unione), `app.conf`, `customEnv`, limiti di dimensione. In più, **nuovo (trovato durante la correzione): iniezione SQL tramite i nomi di colonna dei profili di compatibilità**, corretta. Cifratura del bundle con passphrase: fatta in 3.2.2-dev.2 (vedi punto 5); la firma del bundle non è prevista | 3.0.2-dev.4, 3.2.2-dev.2 |
+| 5 — Segreti in chiaro | **Corretto** (v3.0.2-dev.4 + v3.2.2-dev.2): cartella dati `0700`, DB/`.env`/token `0600`; `.env` del bundle ridotto alle chiavi documentate; **chiavi API, client secret e token di Drive cifrati a riposo** (AES-256-GCM, chiave casuale in `secret.key` 0600, migrazione automatica); **bundle su Drive cifrato con la passphrase dell'utente** (scrypt + AES-256-GCM). Restano: il file `.env` locale è in chiaro (lo modifichi a mano) e chi esegue processi con il tuo utente può leggere anche `secret.key`. | 3.0.2-dev.4, 3.2.2-dev.2 |
 | 6 — Fughe di informazioni | **Mitigato**: richiedono il token (dev.3); `POST /api/logs` ripulito; `filesystem/list` con tetto di voci. Il percorso non è limitato alla home (il selettore di file lo richiede) | 3.0.2-dev.3 / dev.4 |
 | 7 — `open-url` | **Corretto**: solo http/https puliti | 3.0.2-dev.5 |
 | 8 — `xlaunch-handler.sh` | **Corretto**: id validato, JSON composto dopo il controllo, log fuori da `/tmp`. Resta per scelta di progetto: una pagina web può far lanciare (con la conferma del browser) un gioco già installato, con la sua configurazione | 3.0.2-dev.5 |
@@ -216,4 +216,4 @@ Il server fa richieste verso URL controllabili: `baseUrl` di Ollama (`GET /api/a
 | 12 — SSRF | **Corretto**: download copertine con filtro sugli indirizzi alla connessione, redirect riconvalidati, copie locali solo di immagini; URL dei provider AI solo http/https | 3.0.2-dev.5 |
 | 13–16 | Fatto | v3.0.2-dev.6 |
 
-Ciclo chiuso con la milestone v3.1.6-Mars (ripasso finale fatto). Restano da decidere cifratura del bundle Drive con passphrase e cifratura delle chiavi API a riposo.
+Ciclo chiuso con la milestone v3.1.6-Mars (ripasso finale fatto). La cifratura del bundle Drive con passphrase e quella delle chiavi API a riposo sono state fatte in v3.2.2-dev.2 e fanno parte della milestone v3.2.5-Mars: **tutti i punti dell'audit sono chiusi**.

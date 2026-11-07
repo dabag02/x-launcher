@@ -143,6 +143,7 @@
     "button-a": "#00c950",
     "button-b": "#fb2c36",
     "button-ink": "#000000",
-    "dashboard-card": "#155dfc"
+    "dashboard-card": "#155dfc",
+    "danger": "#e7000b"
   }
 }
