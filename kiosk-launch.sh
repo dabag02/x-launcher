@@ -32,6 +32,32 @@ xl_browser_url() {
 }
 
 WAIT_TIMEOUT=30
+
+# --- v3.2.6-dev.3 — log degli avvii e dei rientri: ~/.local/share/x-launcher/kiosk-reentry.log.
+# Una sezione per ogni esecuzione dello script, con l'ambiente che conta (chi lo ha lanciato, DISPLAY,
+# variabili di Steam/gamescope) e ogni decisione del rientro. Serve soprattutto per la card "X-Launcher"
+# dentro Big Picture, che riesegue lo script dentro gamescope: lo stdout li' lo vede solo Steam.
+# Righe in inglese (log di debug). Il file si accorcia da solo oltre ~512 KB.
+XL_RLOG="${XDG_DATA_HOME:-$HOME/.local/share}/x-launcher/kiosk-reentry.log"
+rlog() {
+  mkdir -p "$(dirname "$XL_RLOG")" 2>/dev/null || return 0
+  printf '[%s] [pid %s] %s\n' "$(date '+%F %T')" "$$" "$*" >> "$XL_RLOG" 2>/dev/null || true
+}
+xl_rlog_start() {
+  if [ -f "$XL_RLOG" ] && [ "$(stat -c %s "$XL_RLOG" 2>/dev/null || echo 0)" -gt 524288 ]; then
+    tail -n 2000 "$XL_RLOG" > "$XL_RLOG.tmp" 2>/dev/null && mv -f "$XL_RLOG.tmp" "$XL_RLOG"
+  fi
+  local parent_cmd
+  parent_cmd="$(tr '\0' ' ' < "/proc/$PPID/cmdline" 2>/dev/null | cut -c1-200)"
+  rlog "===== kiosk-launch.sh start: $0 $*"
+  rlog "parent: pid=$PPID cmd=${parent_cmd:-?}"
+  rlog "env: USER=${USER:-} HOME=${HOME:-} DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+  rlog "env: SteamAppId=${SteamAppId:-} SteamGameId=${SteamGameId:-} SteamClientLaunch=${SteamClientLaunch:-} GAMESCOPE_WAYLAND_DISPLAY=${GAMESCOPE_WAYLAND_DISPLAY:-} STEAM_COMPAT_DATA_PATH=${STEAM_COMPAT_DATA_PATH:-}"
+  rlog "env: LD_PRELOAD=${LD_PRELOAD:-} LD_LIBRARY_PATH=$(printf '%s' "${LD_LIBRARY_PATH:-}" | cut -c1-200)"
+  rlog "env: PATH=${PATH:-}"
+  rlog "tools: curl=$(command -v curl || echo MISSING) wmctrl=$(command -v wmctrl || echo missing) token=$([ -r "$XL_TOKEN_FILE" ] && echo readable || echo NOT-readable)"
+}
+xl_rlog_start "$@"
 # v2.2.17-dev.1 — BUG REALE segnalato dall'utente: install.sh crea un
 # symlink in /usr/local/bin/x-launcher → questo script in /opt/x-launcher/.
 # `dirname "$0"` non segue i symlink: lanciando col comando `x-launcher`
@@ -146,8 +172,62 @@ fi
 # sprecato. `wmctrl -a` per mostrare la finestra è lo stesso, identico
 # comando già usato da show_window() in tray.py — non una nuova
 # assunzione, lo stesso meccanismo già collaudato per ogni gioco.
+# --- v3.2.6-dev.2 — rientro nella sessione Openbox con gli spazi. La card "X-Launcher" dentro Big
+# Picture riesegue questo script DENTRO gamescope (DISPLAY dell'Xwayland interna, niente EWMH):
+# il controllo con wmctrl qui sotto fallirebbe e partirebbe una seconda Dashboard nello spazio di
+# Steam. Se il gestore degli spazi risponde e conosce gia' la finestra della Dashboard, si chiede
+# solo di tornare allo spazio 0 (Steam resta nello spazio 3, dove viene congelato).
+rlog "options: local_server=$X_LAUNCHER_LOCAL_SERVER spaces_mode=$X_LAUNCHER_SPACES_MODE url=$LAUNCHER_URL"
+# v3.2.6-dev.6 — il rientro prova tutti i demoni possibili: lanciato da Steam lo script non riceve
+# argomenti, ma la sessione di sviluppo usa il server locale (porta 3001) e xdash (3000) puo' essere
+# spento. Ripiego: il socket del gestore degli spazi, comandato direttamente (spaces-ctl).
+XL_IN_STEAM="false"
+[ -n "${SteamAppId:-}${SteamGameId:-}${GAMESCOPE_WAYLAND_DISPLAY:-}" ] && XL_IN_STEAM="true"
+if [ "$X_LAUNCHER_LOCAL_SERVER" = "true" ]; then
+  XL_REENTRY_URLS="$LAUNCHER_URL"
+else
+  XL_REENTRY_URLS="http://localhost:3000 http://localhost:${LOCAL_SERVER_PORT}"
+fi
+for XL_URL in $XL_REENTRY_URLS; do
+  XL_STATUS_RC=0
+  curl -sf --max-time 3 "${XL_URL}/api/status" &>/dev/null || XL_STATUS_RC=$?
+  rlog "re-entry check: GET ${XL_URL}/api/status -> curl rc=$XL_STATUS_RC"
+  [ "$XL_STATUS_RC" = 0 ] || continue
+  SPACES_JSON="$(xl_curl -s --max-time 3 "${XL_URL}/api/spaces" 2>>"$XL_RLOG")"
+  rlog "re-entry check: GET ${XL_URL}/api/spaces -> $(printf '%s' "$SPACES_JSON" | cut -c1-300)"
+  if printf '%s' "$SPACES_JSON" | grep -q '"active":true' \
+     && printf '%s' "$SPACES_JSON" | grep -q '"kind":"dashboard","window":[0-9]'; then
+    echo "[KIOSK] Gestore degli spazi attivo e Dashboard gia' aperta: rientro (es. dalla card X-Launcher in Big Picture), torno allo spazio 0."
+    XL_POST="$(xl_curl -s --max-time 5 -w ' http=%{http_code}' -X POST "${XL_URL}/api/spaces/dashboard" 2>>"$XL_RLOG")"
+    rlog "re-entry: POST ${XL_URL}/api/spaces/dashboard -> $(printf '%s' "$XL_POST" | cut -c1-300)"
+    rlog "exit 0 (re-entry via spaces manager, ${XL_URL})"
+    exit 0
+  fi
+  rlog "re-entry check: ${XL_URL}: spaces manager not active or Dashboard window unknown"
+done
+XL_SPACES_SOCK="/run/user/$(id -u)/x-launcher-spaces.sock"
+[ -d "/run/user/$(id -u)" ] || XL_SPACES_SOCK="$HOME/.cache/x-launcher/spaces.sock"
+if [ "$XL_IN_STEAM" = "true" ]; then
+  if [ -S "$XL_SPACES_SOCK" ] && [ -x "$PROJECT_DIR/openbox/spaces-ctl" ]; then
+    XL_CTL="$("$PROJECT_DIR/openbox/spaces-ctl" dashboard 2>&1 | cut -c1-300)"
+    rlog "re-entry: no daemon answered, spaces-ctl dashboard -> $XL_CTL"
+    rlog "exit 0 (re-entry via spaces socket)"
+    exit 0
+  fi
+  # Dentro gamescope (sessione Openbox) senza demone ne' gestore degli spazi raggiungibili: NON si avvia
+  # una seconda Dashboard dentro lo spazio di Steam. Fuori da gamescope (Steam su XFCE) si prosegue verso
+  # il rientro classico con wmctrl qui sotto.
+  if [ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}" ]; then
+    rlog "exit 1: launched from Steam inside gamescope but no daemon and no spaces socket ($XL_SPACES_SOCK) — not starting a second Dashboard"
+    echo "[KIOSK] Lanciato da Steam dentro gamescope ma nessun demone ne' gestore degli spazi raggiungibile: esco senza aprire un'altra Dashboard." >&2
+    exit 1
+  fi
+  rlog "launched from Steam outside gamescope: trying the XFCE re-entry (wmctrl)"
+fi
+
 if [ "$X_LAUNCHER_LOCAL_SERVER" != "true" ] && curl -sf "${LAUNCHER_URL}/api/status" &>/dev/null && command -v wmctrl &>/dev/null && wmctrl -l 2>/dev/null | grep -q "X-Launcher HTPC"; then
   echo "[KIOSK] Daemon e finestra già attivi — rientro da Steam Big Picture, nessun nuovo avvio."
+  rlog "re-entry via wmctrl (XFCE path): steam-bigpicture-closed + wmctrl -a, exit 0"
   xl_curl -s -X POST "${LAUNCHER_URL}/api/system/steam-bigpicture-closed" &>/dev/null
   wmctrl -a "X-Launcher HTPC" 2>/dev/null
   exit 0
@@ -263,6 +343,30 @@ if [ -x "$TRAY_VENV/bin/python3" ] && [ -f "$PROJECT_DIR/tray.py" ]; then
 else
   echo "[KIOSK] Systray non configurato (venv .venv-tray assente) — skip."
 fi
+
+# --- v3.2.6-dev.4 — Steam in background nella sessione Openbox (spento di default). Con
+# X_LAUNCHER_STEAM_PRESTART=1 (es. in ~/.config/openbox/environment) il demone apre Steam Big Picture
+# dentro gamescope nello spazio 3, senza passarci; spaces.py lo congela appena Big Picture e' pronta.
+# Si aspetta che il gestore degli spazi (appena avviato da tray.py) risponda, in background: l'avvio
+# della Dashboard non rallenta.
+case "${X_LAUNCHER_STEAM_PRESTART:-0}" in
+  1|true|on|yes)
+    if [ "$X_LAUNCHER_SPACES_MODE" = "true" ] && command -v steam &>/dev/null; then
+      (
+        for _ in $(seq 1 30); do
+          xl_curl -s --max-time 2 "${LAUNCHER_URL}/api/spaces" 2>/dev/null | grep -q '"active":true' && break
+          sleep 1
+        done
+        sleep 2
+        R="$(xl_curl -s --max-time 5 -X POST "${LAUNCHER_URL}/api/steam/prestart" 2>&1)"
+        rlog "steam prestart requested: $R"
+      ) &
+      echo "[KIOSK] Steam in background (X_LAUNCHER_STEAM_PRESTART=1): richiesto al demone appena il gestore degli spazi risponde."
+    else
+      rlog "steam prestart skipped (spaces_mode=$X_LAUNCHER_SPACES_MODE, steam=$(command -v steam || echo missing))"
+    fi
+    ;;
+esac
 
 # --- v0.99.90 — Cursore mouse: unclutter (X11), non JavaScript.
 # Il meccanismo lato browser (App.tsx, timer di inattività mouse) resta
@@ -604,9 +708,13 @@ else
   # v2.2.19-dev.7 — kind:"desktop" azzera lo stato "sessione Kiosk attiva"
   # nel daemon quando si torna qui da gamescope, così il pulsante
   # "Modalità Gamescope" nel menu torna correttamente a "Disattivo".
+  # v3.2.6-dev.3 — "spaces":true nella sessione Openbox: il demone non lancera' mai Steam fuori da
+  # gamescope, anche se il gestore degli spazi non e' ancora partito (vedi steamSession.ts).
+  XL_SPACES_JSON="false"; [ "$X_LAUNCHER_SPACES_MODE" = "true" ] && XL_SPACES_JSON="true"
+  rlog "normal start: signalling DISPLAY=${DISPLAY:-:0} kind=desktop spaces=$XL_SPACES_JSON"
   xl_curl -sf -X POST "${LAUNCHER_URL}/api/system/active-display" \
     -H "Content-Type: application/json" \
-    -d "{\"display\":\"${DISPLAY:-:0}\",\"kind\":\"desktop\"}" &>/dev/null \
+    -d "{\"display\":\"${DISPLAY:-:0}\",\"kind\":\"desktop\",\"spaces\":${XL_SPACES_JSON}}" &>/dev/null \
     || echo "[KIOSK] ATTENZIONE: segnalazione DISPLAY al daemon fallita (curl)."
 
   # v3.0.2-dev.3 — codice monouso per il cookie di sessione del browser (il token non va nella riga di comando).

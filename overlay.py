@@ -1015,6 +1015,8 @@ class Renderer:
 def _entry_colors(title, kind):
     if kind == "dashboard":
         return DASH_CARD, ACCENT_INK        # iniziali bianche sul blu, come la "X" del logo
+    if kind == "steam" and title == "Steam":
+        return (23, 29, 37), (102, 192, 244)   # v3.2.6-dev.2 — spazio 3 con solo Big Picture: blu scuro di Steam
     h = sum(ord(c) * (i + 3) for i, c in enumerate(title)) % 5
     pal = [((36, 72, 71), (214, 239, 233)), ((74, 58, 36), (243, 220, 180)), ((58, 44, 84), (226, 214, 248)),
            ((80, 44, 52), (248, 214, 220)), ((40, 62, 92), (212, 228, 248))]

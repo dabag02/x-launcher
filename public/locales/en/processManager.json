@@ -1,10 +1,14 @@
 {
   "title": "Process Manager",
-  "subtitle": "Games and shared launchers currently running",
+  "subtitle": "Running games, shared launchers, Steam and the Dashboard",
   "emptyTitle": "No active processes",
   "emptyDesc": "Launch a game or a shared launcher and it will show up here",
   "kindGame": "Game",
   "kindSharedLauncher": "Shared launcher",
   "confirmKill": "Confirm with A",
-  "runningSince": "Running since"
+  "runningSince": "Running since",
+  "kindSteam": "Steam (space 3)",
+  "kindDashboard": "Dashboard",
+  "protected": "Protected",
+  "protectedHint": "The Dashboard cannot be terminated from here"
 }

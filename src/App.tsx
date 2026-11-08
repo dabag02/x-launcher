@@ -4,6 +4,7 @@ import { ScalingContainer } from './components/ScalingContainer';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Gamepad2, 
+  Lock,
   Settings, 
   Search, 
   User, 
@@ -819,7 +820,7 @@ function MainApp() {
     detail?: string;
   } | null>(null);
   const splashEventSourceRef = useRef<EventSource | null>(null);
-  const [processManagerList, setProcessManagerList] = useState<Array<{ unit: string; kind: 'game' | 'shared-launcher'; id: string; title: string; startedAt: number }>>([]);
+  const [processManagerList, setProcessManagerList] = useState<Array<{ unit: string; kind: 'game' | 'shared-launcher' | 'steam' | 'dashboard'; id: string; title: string; startedAt: number; killable?: boolean }>>([]);
   const [pendingKillUnit, setPendingKillUnit] = useState<string | null>(null);
   // v1.5.20-dev.12 — Fase A.4: file manager nativo controller-navigabile,
   // sostituisce zenity/kdialog quando inputDevice === 'controller' (quei
@@ -903,7 +904,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v3.2.5-Mars');
+  const [appVersion, setAppVersion] = useState('v3.2.12-Mars');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -1262,7 +1263,8 @@ function MainApp() {
           ? {
               active: true,
               current: Number(j.current) || 0,
-              gameSpaces: Array.isArray(j.spaces) ? j.spaces.filter((s: { kind?: string }) => s?.kind === 'game').length : 0,
+              // v3.2.6-dev.2 — anche lo spazio di Steam (3) conta: un gioco Steam gira li'
+              gameSpaces: Array.isArray(j.spaces) ? j.spaces.filter((s: { kind?: string }) => s?.kind === 'game' || s?.kind === 'steam').length : 0,
             }
           : { active: false, current: 0, gameSpaces: 0 };
         const prev = spacesInfoRef.current;
@@ -1705,7 +1707,7 @@ function MainApp() {
   const loadProcessManagerList = useCallback(() => {
     fetch('/api/process-manager/list')
       .then(r => r.json())
-      .then((data: Array<{ unit: string; kind: 'game' | 'shared-launcher'; id: string; title: string; startedAt: number }>) => {
+      .then((data: Array<{ unit: string; kind: 'game' | 'shared-launcher' | 'steam' | 'dashboard'; id: string; title: string; startedAt: number; killable?: boolean }>) => {
         setProcessManagerList(Array.isArray(data) ? data : []);
       })
       .catch(() => setProcessManagerList([]));
@@ -4841,6 +4843,9 @@ Vuoi provare ad avviarlo comunque?`);
           due overlay non si aprono mai insieme. */}
       <AnimatePresence>
         {showProcessManager && (() => {
+          // v3.2.6-dev.2 — la Dashboard compare nell'elenco ma non e' terminabile: niente pulsante e
+          // fuori dalla catena del focus (che collega solo le voci con il cestino).
+          const pmKillable = processManagerList.filter(p => p.killable !== false);
           const formatElapsed = (startedAt: number): string => {
             const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
             const h = Math.floor(totalSeconds / 3600);
@@ -4875,7 +4880,7 @@ Vuoi provare ad avviarlo comunque?`);
 
                 <div className="flex items-center gap-2">
                   {/* Ricarica — stesso ruolo di avatar-reload */}
-                  <Focusable group="process-manager" id="pm-reload" neighbors={{ down: processManagerList.length > 0 ? `pm-kill-${processManagerList[0].unit}` : undefined }} onEnter={loadProcessManagerList}>
+                  <Focusable group="process-manager" id="pm-reload" neighbors={{ down: pmKillable.length > 0 ? `pm-kill-${pmKillable[0].unit}` : undefined }} onEnter={loadProcessManagerList}>
                     {(isFocused) => (
                       <button
                         className={cn(
@@ -4891,7 +4896,7 @@ Vuoi provare ad avviarlo comunque?`);
                     )}
                   </Focusable>
                   {/* Chiudi */}
-                  <Focusable group="process-manager" id="pm-close" fallbackPriority={-1} neighbors={{ down: processManagerList.length > 0 ? `pm-kill-${processManagerList[0].unit}` : undefined }} onEnter={() => { setShowProcessManager(false); setActiveGroup('quick-menu'); setFocusedId('opt-process-manager'); play('back'); }}>
+                  <Focusable group="process-manager" id="pm-close" fallbackPriority={-1} neighbors={{ down: pmKillable.length > 0 ? `pm-kill-${pmKillable[0].unit}` : undefined }} onEnter={() => { setShowProcessManager(false); setActiveGroup('quick-menu'); setFocusedId('opt-process-manager'); play('back'); }}>
                     {(isFocused) => (
                       <button
                         className={cn(
@@ -4917,10 +4922,16 @@ Vuoi provare ad avviarlo comunque?`);
                 </div>
               ) : (
                 <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-2">
-                  {processManagerList.map((proc, idx) => {
-                    const upId = idx === 0 ? 'pm-close' : `pm-kill-${processManagerList[idx - 1].unit}`;
-                    const downId = idx === processManagerList.length - 1 ? undefined : `pm-kill-${processManagerList[idx + 1].unit}`;
+                  {processManagerList.map((proc) => {
+                    const killable = proc.killable !== false;
+                    const kIdx = pmKillable.findIndex(p => p.unit === proc.unit);
+                    const upId = kIdx <= 0 ? 'pm-close' : `pm-kill-${pmKillable[kIdx - 1].unit}`;
+                    const downId = kIdx < 0 || kIdx === pmKillable.length - 1 ? undefined : `pm-kill-${pmKillable[kIdx + 1].unit}`;
                     const isPending = pendingKillUnit === proc.unit;
+                    const kindLabel = proc.kind === 'game' ? t('processManager:kindGame')
+                      : proc.kind === 'steam' ? t('processManager:kindSteam')
+                      : proc.kind === 'dashboard' ? t('processManager:kindDashboard')
+                      : t('processManager:kindSharedLauncher');
                     return (
                       <div
                         key={proc.unit}
@@ -4934,16 +4945,30 @@ Vuoi provare ad avviarlo comunque?`);
                             "w-11 h-11 rounded-xl border flex items-center justify-center shrink-0",
                             "border-xl-border bg-xl-box"
                           )}>
-                            {proc.kind === 'game' ? <Gamepad2 size={18} className="opacity-60" /> : <Package size={18} className="opacity-60" />}
+                            {proc.kind === 'game' || proc.kind === 'steam' ? <Gamepad2 size={18} className="opacity-60" />
+                              : proc.kind === 'dashboard' ? <Monitor size={18} className="opacity-60" />
+                              : <Package size={18} className="opacity-60" />}
                           </div>
                           <div className="min-w-0">
                             <p className="font-bold truncate">{proc.title}</p>
                             <p className={cn("text-[10px] font-mono uppercase tracking-widest mt-0.5", "text-xl-fg-40")}>
-                              {proc.kind === 'game' ? t('processManager:kindGame') : t('processManager:kindSharedLauncher')} · {t('processManager:runningSince')} {formatElapsed(proc.startedAt)}
+                              {kindLabel} · {t('processManager:runningSince')} {formatElapsed(proc.startedAt)}
                             </p>
                           </div>
                         </div>
 
+                        {!killable ? (
+                          <div
+                            className={cn(
+                              "flex items-center gap-2 px-4 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest shrink-0",
+                              "border-xl-border text-xl-fg-40"
+                            )}
+                            title={t('processManager:protectedHint') as string}
+                          >
+                            <Lock size={13} />
+                            <span>{t('processManager:protected')}</span>
+                          </div>
+                        ) : (
                         <Focusable
                           group="process-manager"
                           id={`pm-kill-${proc.unit}`}
@@ -4972,6 +4997,7 @@ Vuoi provare ad avviarlo comunque?`);
                             </div>
                           )}
                         </Focusable>
+                        )}
                       </div>
                     );
                   })}

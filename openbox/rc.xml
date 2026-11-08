@@ -6,7 +6,8 @@
   niente menu, niente decorazioni, nessuna scorciatoia di tastiera/mouse —
   che si limita a tenere Dashboard e giochi come finestre distinte, con
   EWMH funzionante (wmctrl/xdotool) e desktop virtuali da usare come
-  "spazi": 1 = Dashboard, 2-4 = giochi (il daemon li assegnera' in Fase 2).
+  "spazi": 1 = Dashboard, 2-3 = giochi, 4 = Steam Big Picture (v3.2.6-dev.1;
+  li assegna il daemon, spaces.py).
 
   Installazione (symlink: la modifica nel progetto vale subito):
     ln -sf "<PROGETTO>/openbox/rc.xml" ~/.config/openbox/rc.xml
@@ -63,7 +64,8 @@
     <font place="InactiveOnScreenDisplay"><name>sans</name><size>9</size><weight>Bold</weight><slant>Normal</slant></font>
   </theme>
 
-  <!-- Spazi: desktop virtuali. 1 = Dashboard, 2-4 = giochi. Nessun popup di
+  <!-- Spazi: desktop virtuali. 1 = Dashboard, 2-3 = giochi (max 2), 4 = riservato a
+       Steam Big Picture (v3.2.6-dev.1). Nessun popup di
        cambio desktop (popupTime 0): l'indicatore lo mostrera' la Dashboard. -->
   <desktops>
     <number>4</number>
@@ -72,7 +74,7 @@
       <name>Dashboard</name>
       <name>Gioco 1</name>
       <name>Gioco 2</name>
-      <name>Gioco 3</name>
+      <name>Steam</name>
     </names>
     <popupTime>0</popupTime>
   </desktops>

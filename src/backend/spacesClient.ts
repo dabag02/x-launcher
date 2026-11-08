@@ -10,6 +10,7 @@
 // lanciare eccezioni: chi chiama ricade sul comportamento precedente.
 
 import net from 'net';
+import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -24,7 +25,7 @@ export function spacesSocketPath(): string {
 
 export interface SpaceEntry {
   space: number;
-  kind: 'dashboard' | 'game';
+  kind: 'dashboard' | 'game' | 'steam';
   scope?: string;
   window: number | null;
   title?: string;
@@ -78,4 +79,29 @@ export function sendToSpaces(
 /** True se il gestore degli spazi e' in esecuzione e risponde. */
 export async function isSpacesActive(): Promise<boolean> {
   return (await sendToSpaces({ cmd: 'state' })) !== null;
+}
+
+/**
+ * v3.2.6-dev.3 — come isSpacesActive, ma con piu' pazienza: fino a `waitMs` ms, una richiesta al secondo
+ * con risposta attesa fino a 1,5 s (il gestore puo' essere appena partito o occupato a congelare).
+ */
+export async function waitSpacesActive(waitMs: number): Promise<boolean> {
+  const t0 = Date.now();
+  for (;;) {
+    if ((await sendToSpaces({ cmd: 'state' }, 1500)) !== null) return true;
+    if (Date.now() - t0 >= waitMs) return false;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
+/**
+ * v3.2.6-dev.3 — scongela uno scope prima di chiuderlo. Passa dal gestore degli spazi (che cosi'
+ * aggiorna anche il proprio stato); se non risponde, `systemctl --user thaw` diretto. Mai un errore.
+ */
+export async function thawScope(unit: string): Promise<void> {
+  if (!/^xlauncher-[A-Za-z0-9_.@-]{1,200}$/.test(unit)) return;
+  if ((await sendToSpaces({ cmd: 'thaw', scope: unit }, 3000)) !== null) return;
+  await new Promise<void>(resolve => {
+    execFile('systemctl', ['--user', 'thaw', `${unit}.scope`], { timeout: 10_000 }, () => resolve());
+  });
 }

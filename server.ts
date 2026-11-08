@@ -29,7 +29,8 @@ import { spawn, execSync, execFileSync } from 'child_process';
 import { subscribeLaunchPhase, getLastLaunchPhase } from './src/backend/launchPhaseTracker';
 import * as processManager from './src/backend/processManager';
 import * as windowFocus from './src/backend/windowFocus';
-import { sendToSpaces, isSpacesActive } from './src/backend/spacesClient';
+import { sendToSpaces, isSpacesActive, thawScope } from './src/backend/spacesClient';
+import { ensureSteamSession, shutdownSteamSession, prestartSteamSession } from './src/backend/steamSession';
 import { setActiveDisplay, getActiveSessionInfo } from './src/backend/activeDisplay';
 import { readAppConfig, writeAppConfig, nextGamescopeResolution } from './src/backend/appConfig';
 import { DATA_DIR } from './src/backend/paths';
@@ -597,15 +598,15 @@ async function startServer() {
   // quando diventa quella attiva, riportando il proprio DISPLAY reale.
   // Vedi activeDisplay.ts per la diagnosi completa.
   app.post("/api/system/active-display", (req, res) => {
-    const { display, waylandDisplay, kind, resolution } = req.body ?? {};
+    const { display, waylandDisplay, kind, resolution, spaces } = req.body ?? {};
     // v3.0.2-dev.5 (audit punto 9) — DISPLAY/WAYLAND_DISPLAY diventano l'ambiente di tutti i giochi lanciati
     // dopo: si accettano solo ":N[.M]" e "<nome>-N". Valori non validi non vengono applicati.
-    if (!setActiveDisplay(display, waylandDisplay, kind, resolution)) {
+    if (!setActiveDisplay(display, waylandDisplay, kind, resolution, spaces)) {
       writeLog('warning', `[ACTIVE-DISPLAY] Valori rifiutati (non validi): DISPLAY=${JSON.stringify(display)?.slice(0, 40)} WAYLAND_DISPLAY=${JSON.stringify(waylandDisplay)?.slice(0, 40)} kind=${JSON.stringify(kind)?.slice(0, 20)}`);
       res.status(400).json({ success: false, message: 'Valori non validi.' });
       return;
     }
-    writeLog('system', `[ACTIVE-DISPLAY] Sessione attiva segnalata: kind=${kind ?? 'desktop'} DISPLAY=${display ?? '(non impostato)'} WAYLAND_DISPLAY=${waylandDisplay ?? '(non impostato)'}${resolution ? ` risoluzione=${resolution}` : ''}`);
+    writeLog('system', `[ACTIVE-DISPLAY] Sessione attiva segnalata: kind=${kind ?? 'desktop'} DISPLAY=${display ?? '(non impostato)'} WAYLAND_DISPLAY=${waylandDisplay ?? '(non impostato)'}${resolution ? ` risoluzione=${resolution}` : ''}${spaces === true ? ' spazi=si' : ''}`);
     res.json({ success: true });
   });
 
@@ -945,6 +946,18 @@ async function startServer() {
   // invariato. `splashWindow.ts` (apriva quella finestra) è stato
   // rimosso, nessun altro chiamante rimasto.
 
+  // POST /api/steam/prestart — v3.2.6-dev.4. Chiamato da kiosk-launch.sh nella sessione Openbox solo con
+  // X_LAUNCHER_STEAM_PRESTART=1: apre Steam (Big Picture in gamescope) in background nello spazio 3, dove
+  // spaces.py lo congela appena pronto. Risponde subito; l'esito va nel log.
+  app.post("/api/steam/prestart", (_req, res) => {
+    // Nessun controllo su isSpacesSessionDeclared(): kiosk-launch.sh la segnala poco dopo. Basta il
+    // gestore degli spazi (esiste solo nella sessione Openbox), atteso da prestartSteamSession().
+    res.json({ success: true });
+    prestartSteamSession()
+      .then(r => writeLog(r.started ? 'system' : 'info', `[STEAM-SESSION] prestart: ${r.message}`))
+      .catch(err => writeLog('error', `[STEAM-SESSION] prestart failed: ${err}`));
+  });
+
   // Step 2 — Apri Steam Big Picture (switcha fuori dalla dashboard)
   app.post("/api/steam/bigpicture", (req, res) => {
     const { openSteamBigPicture } = require('./src/backend/runners/implementations');
@@ -1057,11 +1070,15 @@ async function startServer() {
   // vedi il commento su reconcileOnStartup — per evitare un giro di
   // dipendenze circolare con gameManager/sharedLauncherManager).
   app.get("/api/process-manager/list", (_req, res) => {
-    const active = processManager.listActive().map(info => ({
+    // v3.2.6-dev.2 — in coda la Dashboard (sessione Openbox), mostrata ma non terminabile.
+    const active = [...processManager.listActive(), ...processManager.listDashboardScopes()].map(info => ({
       ...info,
       title: info.kind === 'game'
         ? (db.getGameById(info.id)?.title ?? info.title)
-        : (getThirdPartyLauncherDefinition(info.id)?.displayName ?? info.title),
+        : info.kind === 'shared-launcher'
+          ? (getThirdPartyLauncherDefinition(info.id)?.displayName ?? info.title)
+          : info.title,
+      killable: info.kind !== 'dashboard',
     }));
     res.json(active);
   });
@@ -1074,14 +1091,24 @@ async function startServer() {
   // uccidere lo scope del gioco uccide comunque l'intero albero, stesso
   // principio già verificato in dev.50.
   app.post("/api/process-manager/:unit/kill", async (req, res) => {
+    // v3.2.6-dev.2 — la Dashboard non si termina da qui (si chiuderebbe da sola sotto i piedi dell'utente).
+    if (processManager.isDashboardUnit(String(req.params.unit))) {
+      res.status(403).json({ success: false, message: 'La Dashboard non si può terminare dal Gestore dei processi.' });
+      return;
+    }
     const info = processManager.getScopeInfo(req.params.unit);
     if (!info) {
       res.json({ success: false, message: 'Processo non più attivo.' });
       return;
     }
+    // v3.2.6-dev.3 — uno scope congelato dal gestore degli spazi non risponde a una chiusura ordinata
+    // (steam -shutdown, wineserver -k): prima si scongela.
+    await thawScope(info.unit);
     const result = info.kind === 'shared-launcher'
       ? await closeSharedLauncher(info.id)
-      : processManager.killScope(info.unit);
+      : info.kind === 'steam'
+        ? await shutdownSteamSession(info.unit)       // v3.2.6-dev.2 — chiusura ordinata di Steam (poi gamescope esce da solo)
+        : processManager.killScope(info.unit);
     res.json(result);
   });
 
@@ -1915,8 +1942,20 @@ async function startServer() {
   // modalità. Nessun controllo preliminare di binaryExists('steam') qui:
   // se il binario non esiste, spawn fallisce e l'errore viene loggato,
   // comportamento già sufficiente — non serve bloccare la richiesta prima.
-  app.post('/api/system/steam-bigpicture', (_req, res) => {
+  app.post('/api/system/steam-bigpicture', async (_req, res) => {
     writeLog('system', '[SYSTEM] Switch to Steam Big Picture requested.');
+    // v3.2.6-dev.2 — sessione Openbox con gli spazi: Big Picture si apre dentro gamescope, nello
+    // spazio 3 (steamSession.ts). Niente notifyBigPictureLaunched(): la Dashboard la ferma il
+    // congelamento degli spazi, non il blocco in pagina (che senza un rientro esplicito resterebbe
+    // acceso). Fuori da quella sessione tutto come prima, qui sotto.
+    const session = await ensureSteamSession();
+    if (session.handled) {
+      if (!session.success) {
+        notificationEngine.emit({ type: 'launch-error', gameId: 'steam-bigpicture-launcher', gameTitle: 'Steam Big Picture', error: session.message });
+      }
+      res.json({ success: session.success, message: session.message });
+      return;
+    }
     // v2.0.41-dev.7 — richiesta utente: X-Launcher deve minimizzarsi al
     // lancio di Big Picture, esattamente come per un gioco reale. Riusa
     // il meccanismo già esistente e funzionante (tray.py fa polling su

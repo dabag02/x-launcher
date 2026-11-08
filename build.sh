@@ -76,7 +76,9 @@ compile_tray() {
   fi
 
   echo "[BUILD] Installazione/aggiornamento dipendenze tray (pystray, pillow, python-xlib)..."
-  if ! "$DIR/.venv-tray/bin/pip" install --quiet --upgrade pystray pillow python-xlib; then
+  # v3.2.12-Mars — pip via "python3 -m pip": lo script bin/pip ha nel shebang il percorso assoluto del venv,
+  # fragile se la cartella del progetto contiene spazi o caratteri speciali.
+  if ! "$DIR/.venv-tray/bin/python3" -m pip install --quiet --upgrade pystray pillow python-xlib; then
     echo "[BUILD] ⚠ Installazione dipendenze tray fallita (verifica connessione di rete) — tray non aggiornata, ma il resto della dashboard non è impattato."
     return 0
   fi

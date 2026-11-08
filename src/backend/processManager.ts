@@ -40,7 +40,9 @@ import { execFileSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { writeLog } from './logger';
 
-export type ScopeKind = 'game' | 'shared-launcher';
+// v3.2.6-dev.2 — 'steam' = sessione Steam dentro gamescope (steamSession.ts), 'dashboard' = browser della
+// Dashboard avviato da kiosk-launch.sh (mai lanciato dal demone, solo mostrato nel Gestore, non terminabile).
+export type ScopeKind = 'game' | 'shared-launcher' | 'steam' | 'dashboard';
 
 export interface ScopeInfo {
   unit: string;          // nome completo dell'unit, es. xlauncher-game-foo123-1755000000000
@@ -297,15 +299,46 @@ export function reconcileOnStartup(): void {
     );
     const lines = out.split('\n').map(l => l.trim()).filter(Boolean);
     for (const line of lines) {
-      const unitMatch = line.match(/^(xlauncher-(game|shared-launcher)-(.+?)-(\d+))\.scope\s+(\S+)/);
+      const unitMatch = line.match(/^(xlauncher-(game|shared-launcher|steam)-(.+?)-(\d+))\.scope\s+(\S+)/);
       if (!unitMatch) continue;
       const [, unit, kind, id, , activeState] = unitMatch;
       if (activeState !== 'active') continue;
       if (registry.has(unit)) continue;
-      register({ unit, kind: kind as ScopeKind, id, title: id, supervisorPid: 0 });
+      register({ unit, kind: kind as ScopeKind, id, title: kind === 'steam' ? 'Steam Big Picture' : id, supervisorPid: 0 });
       writeLog('system', `[PROCESS-MANAGER] Scope superstite ricollegato dopo riavvio del daemon: ${unit}`);
     }
   } catch (err) {
     writeLog('warning', `[PROCESS-MANAGER] Ricognizione scope all'avvio fallita (non bloccante): ${err}`);
   }
+}
+
+/**
+ * v3.2.6-dev.2 — scope della Dashboard (xlauncher-dashboard-<secondi>, creato da kiosk-launch.sh nella
+ * sessione Openbox). Non passa dal registro: lo crea lo script, non il demone. Solo per il Gestore dei
+ * processi, che lo mostra senza la possibilita' di terminarlo.
+ */
+export function listDashboardScopes(): ScopeInfo[] {
+  try {
+    const out = execFileSync(
+      'systemctl', ['--user', 'list-units', '--type=scope', '--state=active', '--no-legend', '--plain', 'xlauncher-dashboard-*'],
+      { stdio: 'pipe', encoding: 'utf-8' }
+    );
+    const found: ScopeInfo[] = [];
+    for (const line of out.split('\n')) {
+      const m = line.trim().match(/^(xlauncher-dashboard-(\d{1,13}))\.scope\s/);
+      if (!m) continue;
+      const n = parseInt(m[2], 10);
+      found.push({
+        unit: m[1], kind: 'dashboard', id: 'dashboard', title: 'X-Launcher Dashboard',
+        startedAt: n < 1e11 ? n * 1000 : n, supervisorPid: 0,     // nome in secondi (kiosk-launch.sh: date +%s)
+      });
+    }
+    return found;
+  } catch {
+    return [];
+  }
+}
+
+export function isDashboardUnit(unit: string): boolean {
+  return /^xlauncher-dashboard-/.test(unit);
 }

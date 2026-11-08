@@ -21,11 +21,27 @@ openbox/autostart):
     menu/tooltip/dock) vengono filtrate.
 
   * SPAZI. Spazio 0 = Dashboard = desktop 1 di Openbox (indice 0). Ogni gioco
-    prende uno slot libero (max 3) = desktop 2-4 (indici 1-3). Alla comparsa
-    della finestra di un gioco la sposta sul desktop del suo slot e ci passa.
+    prende uno slot libero (max 2, v3.2.6-dev.1) = desktop 2-3 (indici 1-2). Alla
+    comparsa della finestra di un gioco la sposta sul desktop del suo slot e ci passa.
     Alla chiusura (dopo una breve tolleranza) libera lo slot e torna allo spazio
-    precedente (o alla Dashboard). Il quarto gioco non ha slot: resta dov'e'
-    (la regola vera sul quarto lancio e' della Fase 4).
+    precedente (o alla Dashboard). Il terzo gioco non ha slot: resta dov'e'
+    (la regola vera sul lancio in piu' e' ancora in sospeso).
+    Lo spazio 3 (desktop 4) e' RISERVATO a Steam Big Picture (dentro gamescope, ciclo
+    v3.2.6): non viene mai assegnato ai giochi.
+
+  * STEAM (v3.2.6-dev.2). Il backend (src/backend/steamSession.ts) avvia
+    `gamescope -e -- steam -gamepadui` nello scope xlauncher-steam-session-<ms>. La finestra di
+    gamescope (classe gamescope/gamescope, _NET_WM_PID = gamescope) e' riconosciuta dallo scope
+    (kind "steam"), spostata nello spazio 3 e congelata come un gioco quando non e' lo spazio
+    corrente: Steam, Big Picture e il gioco Steam in corso (tutti dentro gamescope) si fermano
+    insieme. Il titolo della finestra segue l'app in primo piano dentro gamescope.
+
+  * DASHBOARD IN DUE SCOPE (v3.2.6-dev.1). kiosk-launch.sh avvia il browser nello
+    scope xlauncher-dashboard-<ts>, ma Chromium (visto con la 156) puo' spostare il
+    proprio processo principale in uno scope suo, app-org.chromium.Chromium-<pid>:
+    nel nostro restano solo i processi figli (zygote, GPU, renderer). La Dashboard e'
+    quindi un GRUPPO: lo scope del PID della finestra (se ha quella forma esatta) piu'
+    lo scope xlauncher-dashboard-* dei suoi figli. Si congelano e scongelano insieme.
 
   * DIAGNOSTICA (dev.6). Ogni finestra che compare viene registrata nel log con
     classe, titolo, PID, scope, tipo, dimensioni e classificazione (anche se
@@ -111,7 +127,8 @@ try:
 except Exception:  # noqa
     _xres_ext = None
 
-NUM_SLOTS = 3
+NUM_SLOTS = 2                 # v3.2.6-dev.1 — giochi negli spazi 1-2 (prima 3)
+STEAM_SPACE = 3               # v3.2.6-dev.1 — spazio (desktop 4) riservato a Steam Big Picture
 # Tolleranza prima di liberare lo slot di un gioco rimasto senza finestre. Nei primi
 # LAUNCH_WINDOW_S secondi dalla prima finestra del gioco la tolleranza e' piu' lunga
 # (LAUNCH_GRACE_S): alcune applicazioni (es. RetroArch al caricamento del core)
@@ -134,9 +151,20 @@ DASHBOARD_TITLE = "X-Launcher HTPC"
 HOTKEY_DEBOUNCE_S = 0.25
 PAD_RESCAN_S = 3.0
 
-SCOPE_RX = re.compile(r"(xlauncher-(?:game|shared-launcher|dashboard)-[^/]+?)\.scope")
+SCOPE_RX = re.compile(r"(xlauncher-(?:game|shared-launcher|dashboard|steam)-[^/]+?)\.scope")
+# v3.2.6-dev.2 — sessione Steam in gamescope (src/backend/steamSession.ts)
+STEAM_SCOPE_PREFIX = "xlauncher-steam-"
+STEAM_APPID_ARG_RX = re.compile(r"^AppId=(\d{1,10})$")
+# v3.2.6-dev.4 — Steam avviato in background a inizio sessione (X_LAUNCHER_STEAM_PRESTART=1): scope
+# xlauncher-steam-prestart-<ms>. Nessun passaggio allo spazio 3 alla comparsa; congelato (fuori dallo
+# spazio 3) appena il titolo dice che Big Picture e' pronta, o al piu' tardi dopo PRESTART_FREEZE_MAX_S.
+STEAM_PRESTART_MARK = "-prestart-"
+BIG_PICTURE_RX = re.compile(r"big picture", re.I)
+PRESTART_FREEZE_MAX_S = 120.0
 # v3.2.1-dev.1 — scope della Dashboard (kiosk-launch.sh avvia il browser in "xlauncher-dashboard-<ts>")
 DASHBOARD_SCOPE_PREFIX = "xlauncher-dashboard-"
+# v3.2.6-dev.1 — scope che Chromium crea da solo per il proprio processo principale (vedi docstring)
+CHROMIUM_APP_SCOPE_RX = re.compile(r"(app-org\.chromium\.Chromium-\d{1,10})\.scope")
 STEAM_CLASS_RX = re.compile(r"^steam_app_(\d+)$")
 NOISE_NAME_RX = re.compile(r"Default IME|MSCTFIME|GDI\+ Window|DDE Server")
 IGNORED_TYPES = {
@@ -187,11 +215,14 @@ def socket_path():
 
 
 _SCOPE_RE = re.compile(r"^xlauncher-[A-Za-z0-9_.@-]{1,200}$")
+_CHROMIUM_APP_SCOPE_RE = re.compile(r"^app-org\.chromium\.Chromium-\d{1,10}$")
 
 
 def valid_scope(sc):
-    """Nome di scope accettato dal freezer ('xlauncher-...'): niente spazi, '/' o '--' iniziali."""
-    return isinstance(sc, str) and _SCOPE_RE.fullmatch(sc) is not None
+    """Nome di scope accettato dal freezer: 'xlauncher-...' (niente spazi, '/' o '--' iniziali) oppure,
+    unica eccezione (v3.2.6-dev.1), lo scope del browser della Dashboard 'app-org.chromium.Chromium-<n>'."""
+    return isinstance(sc, str) and (_SCOPE_RE.fullmatch(sc) is not None
+                                    or _CHROMIUM_APP_SCOPE_RE.fullmatch(sc) is not None)
 
 
 # --------------------------------------------------------------------------- X helpers
@@ -253,24 +284,83 @@ def _xres_pid(d, wid):
     return None
 
 
-def scope_of_pid(pid):
-    if not pid:
-        return None
+def _cgroup_text(pid):
+    """Contenuto di /proc/<pid>/cgroup (o, nei test, la riga 'pid scope' di XL_SPACES_TEST_SCOPES
+    trasformata in un percorso finto '<scope>.scope')."""
     tf = os.environ.get("XL_SPACES_TEST_SCOPES")
     if tf:
         try:
             for line in open(tf):
                 p = line.split()
                 if len(p) >= 2 and p[0] == str(pid):
-                    return p[1]
+                    return "0::/test/%s.scope\n" % p[1]
         except Exception:
             pass
     try:
-        cg = open("/proc/%d/cgroup" % int(pid)).read()
+        return open("/proc/%d/cgroup" % int(pid)).read()
     except Exception:
+        return ""
+
+
+def scope_of_pid(pid):
+    if not pid:
         return None
-    m = SCOPE_RX.search(cg)
+    m = SCOPE_RX.search(_cgroup_text(pid))
     return m.group(1) if m else None
+
+
+def chromium_app_scope_of_pid(pid):
+    """v3.2.6-dev.1 — scope 'app-org.chromium.Chromium-<n>' del processo, se ci sta (vedi docstring)."""
+    if not pid:
+        return None
+    m = CHROMIUM_APP_SCOPE_RX.search(_cgroup_text(pid))
+    return m.group(1) if m else None
+
+
+def _child_pids(pid):
+    """Figli diretti di un processo: /proc/<pid>/task/*/children, con ripiego sulla scansione di /proc."""
+    kids = []
+    try:
+        for tid in os.listdir("/proc/%d/task" % pid):
+            try:
+                kids += [int(x) for x in open("/proc/%d/task/%s/children" % (pid, tid)).read().split()]
+            except (OSError, ValueError):
+                pass
+    except OSError:
+        pass
+    if kids:
+        return kids
+    for name in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if not name.isdigit():
+            continue
+        try:
+            st = open("/proc/%s/stat" % name).read()
+            if int(st.rsplit(")", 1)[1].split()[1]) == pid:
+                kids.append(int(name))
+        except (OSError, ValueError, IndexError):
+            pass
+    return kids
+
+
+def dashboard_child_scope(pid):
+    """Scope xlauncher-dashboard-* in cui sono rimasti i figli del browser (zygote, GPU...), o None."""
+    tf = os.environ.get("XL_SPACES_TEST_CHILDREN")          # test: righe "pid figlio1 figlio2 ..."
+    kids = []
+    if tf:
+        try:
+            for line in open(tf):
+                p = line.split()
+                if p and p[0] == str(pid):
+                    kids = [int(x) for x in p[1:]]
+        except (OSError, ValueError):
+            pass
+    else:
+        kids = _child_pids(int(pid))
+    for k in kids:
+        sc = scope_of_pid(k)
+        if sc and sc.startswith(DASHBOARD_SCOPE_PREFIX):
+            return sc
+    return None
 
 
 class XActions:
@@ -309,10 +399,78 @@ class XActions:
             c = _cards(self.d, self.root, "_NET_CURRENT_DESKTOP")
         return c[0] if c else None
 
+    def window_name(self, wid):
+        """Titolo attuale di una finestra (v3.2.6-dev.2: quello di gamescope segue l'app in primo piano)."""
+        if not wid:
+            return ""
+        with self.lock:
+            try:
+                w = self.d.create_resource_object("window", wid)
+                return _text(self.d, w, "_NET_WM_NAME") or _text(self.d, w, "WM_NAME") or ""
+            except Exception:
+                return ""
+
 
 def covers_dir():
     return os.environ.get("X_LAUNCHER_COVERS_DIR") or os.path.join(
         os.path.expanduser("~"), ".local", "share", "x-launcher", "covers")
+
+
+def cover_key_title(key):
+    """Title written by the backend (coverCache.ts) in <covers>/<key>.json, or None."""
+    if not key or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", key):
+        return None
+    try:
+        with open(os.path.join(covers_dir(), "%s.json" % key), "r", encoding="utf-8") as fh:
+            t = json.load(fh).get("title")
+        return t.strip() if isinstance(t, str) and t.strip() else None
+    except Exception:
+        return None
+
+
+def cover_key_files(key):
+    """(cover, hero) cached for a cover key (coverCache.ts: sanitized game id), None where missing."""
+    if not key or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", key):
+        return None, None
+    out = []
+    for kind in ("cover", "hero"):
+        p = os.path.join(covers_dir(), "%s.%s" % (key, kind))
+        out.append(p if os.path.isfile(p) else None)
+    return out[0], out[1]
+
+
+def scope_procs_of_pid(pid):
+    """PIDs of the whole cgroup (scope) the process is in, read from cgroup v2."""
+    path = None
+    for line in _cgroup_text(pid).splitlines():
+        if line.startswith("0::"):
+            path = line[3:].strip()
+    if not path or path == "/" or ".." in path or ".scope" not in path:
+        return []                            # solo dentro uno scope: mai l'intero albero dei cgroup
+    pids = []
+    for root, _dirs, files in os.walk("/sys/fs/cgroup" + path):
+        if "cgroup.procs" in files:
+            try:
+                pids += [int(x) for x in open(os.path.join(root, "cgroup.procs")).read().split()]
+            except (OSError, ValueError):
+                pass
+    return pids
+
+
+def steam_running_appid(pid):
+    """AppId of the Steam game running in the same scope as `pid` (reaper SteamLaunch AppId=N), or None."""
+    for p in scope_procs_of_pid(pid):
+        try:
+            args = open("/proc/%d/cmdline" % p, "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if b"SteamLaunch" not in args:
+            continue
+        for a in args:
+            m = STEAM_APPID_ARG_RX.match(a.decode("utf-8", "replace"))
+            if m:
+                return m.group(1)
+    return None
 
 
 def game_db_title(scope):
@@ -386,13 +544,29 @@ class Freezer:
         self.op_lock = threading.Lock()
         self.errors = 0
         self.dashboard_enabled = freeze_dashboard_from_env()
+        # v3.2.6-dev.1 — gruppi: uno scope "principale" che sta per piu' scope reali, congelati e
+        # scongelati insieme (la Dashboard: scope del browser + scope dei suoi figli). Ordine dei membri
+        # = ordine di congelamento; lo scongelamento va al contrario.
+        self.groups = {}
+
+    def set_group(self, primary, members):
+        members = [m for m in members if m]
+        with self.state_lock:
+            if len(members) > 1:
+                self.groups[primary] = list(members)
+            else:
+                self.groups.pop(primary, None)
+
+    def members(self, scope):
+        with self.state_lock:
+            return list(self.groups.get(scope, [scope]))
 
     def freezable(self, scope):
         if not scope:
             return False
-        if scope.startswith(DASHBOARD_SCOPE_PREFIX):
+        if scope.startswith(DASHBOARD_SCOPE_PREFIX) or _CHROMIUM_APP_SCOPE_RE.fullmatch(scope):
             return self.dashboard_enabled
-        return scope.startswith("xlauncher-game-")
+        return scope.startswith("xlauncher-game-") or scope.startswith(STEAM_SCOPE_PREFIX)
 
     def excluded(self, scope):
         for pat in read_nofreeze():
@@ -401,6 +575,16 @@ class Freezer:
         return False
 
     def _systemctl(self, verb, scope):
+        """freeze/thaw di uno scope o, se e' il principale di un gruppo, di tutti i suoi membri."""
+        members = self.members(scope)
+        if verb == "thaw":
+            members = list(reversed(members))
+        ok = True
+        for m in members:
+            ok = self._systemctl_one(verb, m) and ok
+        return ok
+
+    def _systemctl_one(self, verb, scope):
         if not valid_scope(scope):
             log("freezer: scope rifiutato: %r" % (scope,))
             return False
@@ -440,6 +624,8 @@ class Freezer:
         if was:
             with self.op_lock:
                 self._systemctl("thaw", scope)
+        with self.state_lock:
+            self.groups.pop(scope, None)
 
     def freeze_now(self, scope, still_wanted=None):
         """Congela subito (overlay aperto sul gioco corrente). still_wanted: callback che
@@ -498,7 +684,8 @@ class Freezer:
         """All'avvio: scongela gli scope dei giochi rimasti congelati da una sessione precedente."""
         try:
             r = subprocess.run([SYSTEMCTL, "--user", "list-units", "--all", "--no-legend", "--plain",
-                                "xlauncher-game-*.scope", "xlauncher-dashboard-*.scope"],
+                                "xlauncher-game-*.scope", "xlauncher-dashboard-*.scope", "xlauncher-steam-*.scope",
+                                "app-org.chromium.Chromium-*.scope"],
                                capture_output=True, text=True, timeout=10)
         except Exception as e:  # noqa
             log("freezer: list-units fallito: %s" % e)
@@ -508,6 +695,8 @@ class Freezer:
             if not parts or not parts[0].endswith(".scope"):
                 continue
             scope = parts[0][:-len(".scope")]
+            if not valid_scope(scope):
+                continue
             try:
                 g = subprocess.run([SYSTEMCTL, "--user", "show", "-p", "FreezerState", "--value",
                                     scope + ".scope"], capture_output=True, text=True, timeout=10)
@@ -515,7 +704,7 @@ class Freezer:
                 continue
             if g.stdout.strip() in ("frozen", "freezing"):
                 log("freezer: %s era rimasto congelato: scongelo" % scope)
-                self._systemctl("thaw", scope)
+                self._systemctl_one("thaw", scope)
 
     def set_enabled(self, on):
         self.enabled = bool(on)
@@ -525,7 +714,7 @@ class Freezer:
     def snapshot(self):
         with self.state_lock:
             return {"enabled": self.enabled, "frozen": sorted(self.frozen), "errors": self.errors,
-                    "excluded": read_nofreeze()}
+                    "excluded": read_nofreeze(), "groups": {k: list(v) for k, v in self.groups.items()}}
 
 
 # --------------------------------------------------------------------------- gestore
@@ -542,7 +731,11 @@ class SpacesManager:
         self.scope_t0 = {}                   # scope -> istante della prima finestra
         self.timers = {}                     # scope -> threading.Timer
         self.dashboard_wid = None
-        self.dashboard_scope = None          # scope "xlauncher-dashboard-*" del browser, se avviato da kiosk-launch.sh
+        self.dashboard_scope = None          # scope principale del gruppo della Dashboard (vedi _apply), o None
+        self.steam_wid = None                # v3.2.6-dev.2 — finestra di gamescope (Steam), spazio STEAM_SPACE
+        self.steam_scope = None
+        self.steam_timer = None
+        self.steam_settle = None             # v3.2.6-dev.4 — prestart: istante della finestra, finche' non congelato
         self.cur_space = 0
         self.prev_space = 0
         self.target_space = 0                # spazio verso cui si sta andando (decide i congelamenti)
@@ -582,6 +775,8 @@ class SpacesManager:
         if "chrom" in klass.lower() and (inst == "localhost" or name == DASHBOARD_TITLE
                                          or "x-launcher" in name.lower()):
             kind = "dashboard"
+        elif scope and scope.startswith(STEAM_SCOPE_PREFIX):
+            kind = "steam"
         elif scope and scope.startswith("xlauncher-game-"):
             kind = "game"
         elif scope and scope.startswith("xlauncher-shared-launcher-"):
@@ -624,14 +819,47 @@ class SpacesManager:
     def _apply(self, info, initial):
         wid, kind = info["wid"], info["kind"]
         if kind == "dashboard":
+            # v3.2.6-dev.1 — gruppo della Dashboard: scope del processo della finestra (nostro, o quello che
+            # Chromium si crea da solo) + scope xlauncher-dashboard-* rimasto ai suoi figli.
             sc = info.get("scope")
+            pid = info.get("pid")
+            own = sc if (sc and sc.startswith(DASHBOARD_SCOPE_PREFIX)) else None
+            app = chromium_app_scope_of_pid(pid) if not own else None
+            ours = own or (dashboard_child_scope(pid) if pid else None)
+            members = [m for m in (app, ours) if m]          # prima il browser (eventi/input), poi i figli
+            primary = ours or app
+            self.freezer.set_group(primary, members)
             with self.lock:
                 self.dashboard_wid = wid
-                self.dashboard_scope = sc if (sc and sc.startswith(DASHBOARD_SCOPE_PREFIX)) else None
-                dsc = self.dashboard_scope
-            log("Dashboard: finestra 0x%x (%s) scope=%s%s" % (
-                wid, info["class"], dsc or "-",
-                "" if dsc else "  [nessuno scope xlauncher-dashboard: la Dashboard non si congela, resta il blocco in pagina]"))
+                self.dashboard_scope = primary
+            log("Dashboard: window 0x%x (%s) pid=%s freeze group=%s%s" % (
+                wid, info["class"], pid, ",".join(members) or "-",
+                "" if members else "  [no scope found: the Dashboard is not frozen, the in-page lock stays]"))
+            if app and not ours:
+                log("Dashboard: WARNING browser in %s but no xlauncher-dashboard scope among its children "
+                    "(only the main process will be frozen)" % app)
+            return
+        if kind == "steam":
+            if info["noise"]:
+                return
+            with self.lock:
+                first = self.steam_wid is None
+                self.steam_wid = wid
+                self.steam_scope = info["scope"]
+                t = self.steam_timer
+                self.steam_timer = None
+            if t:
+                t.cancel()
+            prestart = STEAM_PRESTART_MARK in (info["scope"] or "")
+            log("Steam: window 0x%x '%s' (%dx%d) scope=%s -> space %d (desktop %d)%s"
+                % (wid, info["name"], info["w"], info["h"], info["scope"], STEAM_SPACE, STEAM_SPACE + 1,
+                   " [prestart: stays in background, frozen once Big Picture is ready]" if prestart else ""))
+            self.xa.move_window(wid, STEAM_SPACE)
+            if first and prestart:
+                with self.lock:
+                    self.steam_settle = time.time()
+            elif first and not initial:
+                self.switch_space(STEAM_SPACE, activate=wid, reason="Steam")
             return
         if kind == "launcher":
             log("launcher %s: finestra 0x%x '%s' — nessuno slot" % (info["scope"], wid, info["name"]))
@@ -641,7 +869,8 @@ class SpacesManager:
         scope = info["scope"]
         slot = self.assign_slot(scope)
         if slot is None:
-            log("gioco %s: nessuno slot libero (max %d) — finestra 0x%x lasciata dov'e'" % (scope, NUM_SLOTS, wid))
+            log("gioco %s: nessuno slot libero (max %d, spazio %d riservato a Steam) — finestra 0x%x lasciata dov'e'"
+                % (scope, NUM_SLOTS, STEAM_SPACE, wid))
             return
         with self.lock:
             first = not self.scope_wins.get(scope)     # il gioco non aveva finestre: questa e' la "prima"
@@ -671,6 +900,19 @@ class SpacesManager:
             log("Dashboard: finestra 0x%x chiusa" % wid)
             if gone_scope:
                 self.freezer.release(gone_scope)     # fuori dal lock: evita lo stallo con _freeze_now
+            return
+        if info["kind"] == "steam":
+            with self.lock:
+                if self.steam_wid != wid:
+                    return
+                self.steam_wid = None
+                tm = threading.Timer(RELEASE_GRACE_S, self.release_steam)
+                tm.daemon = True
+                old, self.steam_timer = self.steam_timer, tm
+            if old:
+                old.cancel()
+            log("Steam: window 0x%x closed, releasing space %d in %.0f s" % (wid, STEAM_SPACE, RELEASE_GRACE_S))
+            tm.start()
             return
         if info["kind"] != "game" or info["noise"]:
             return
@@ -728,11 +970,33 @@ class SpacesManager:
         if was_current:
             self.switch_space(target, reason="gioco chiuso")
 
+    def release_steam(self):
+        """La finestra di gamescope non e' ricomparsa: Steam e' chiuso, lo spazio 3 si libera."""
+        with self.lock:
+            if self.steam_wid is not None:
+                return                       # ricomparsa nel frattempo
+            scope, self.steam_scope = self.steam_scope, None
+            self.steam_timer = None
+            self.steam_settle = None
+            was_current = self.cur_space == STEAM_SPACE
+            target = self.prev_space if (self.prev_space == 0 or self.prev_space in self.slots) else 0
+        if scope:
+            self.freezer.release(scope)
+        log("Steam: space %d released (%s)" % (STEAM_SPACE, scope or "-"))
+        if was_current:
+            self.switch_space(target, reason="Steam chiuso")
+
+    def steam_present(self):
+        with self.lock:
+            return self.steam_wid is not None
+
     # ----- spazi
     def space_window(self, space):
         with self.lock:
             if space == 0:
                 return self.dashboard_wid
+            if space == STEAM_SPACE:
+                return self.steam_wid
             scope = self.slots.get(space)
             wins = self.scope_wins.get(scope) or set()
             best, best_area = None, -1
@@ -744,7 +1008,7 @@ class SpacesManager:
 
     def switch_space(self, space, activate=None, reason="richiesta", thaw_delay=0.0):
         with self.lock:
-            valid = space == 0 or space in self.slots
+            valid = space == 0 or space in self.slots or (space == STEAM_SPACE and self.steam_wid is not None)
         if not valid:
             log("switch %s ignorato: spazio non occupato" % space)
             return False
@@ -765,17 +1029,23 @@ class SpacesManager:
     def scope_for_space(self, space):
         """Scope da congelare/scongelare per uno spazio: il gioco dello slot, o (spazio 0) la Dashboard."""
         with self.lock:
+            if space == STEAM_SPACE:
+                return self.steam_scope
             return self.dashboard_scope if space == 0 else self.slots.get(space)
 
     def _should_freeze(self, scope):
         with self.lock:
             if scope and scope == self.dashboard_scope:
                 return self.target_space != 0
+            if scope and scope == self.steam_scope:
+                return self.target_space != STEAM_SPACE
             return scope in self.scope_slot and scope != self.slots.get(self.target_space)
 
     def _freeze_others(self, space):
         with self.lock:
             others = [sc for sl, sc in self.slots.items() if sl != space]
+            if self.steam_scope and space != STEAM_SPACE:
+                others.append(self.steam_scope)
             dash = self.dashboard_scope if space != 0 else None
         for sc in others:
             self.freezer.schedule_freeze(sc)
@@ -795,7 +1065,7 @@ class SpacesManager:
 
     def occupied(self):
         with self.lock:
-            return [0] + sorted(self.slots)
+            return [0] + sorted(self.slots) + ([STEAM_SPACE] if self.steam_wid is not None else [])
 
     def cycle(self, delta):
         sp = self.occupied()
@@ -857,12 +1127,29 @@ class SpacesManager:
         for sp in self.state()["spaces"]:
             if sp["kind"] == "dashboard":
                 out.append({"space": 0, "title": "X-Launcher", "kind": "dashboard"})
+            elif sp["kind"] == "steam":
+                out.append(self.steam_entry(sp))
             else:
                 cover, hero = game_cover_files(sp.get("scope"))
                 out.append({"space": sp["space"], "kind": "game",
                             "title": game_db_title(sp.get("scope")) or sp.get("title") or ("Game %d" % sp["space"]),
                             "cover": cover, "hero": hero})
         return out
+
+    def steam_entry(self, sp):
+        """Riquadro dello spazio 3: il gioco Steam in corso (titolo e copertine dalla cache della
+        Dashboard, chiave steam-<AppId>) oppure "Steam" quando c'e' solo Big Picture."""
+        with self.lock:
+            info = self.clients.get(sp.get("window")) or {}
+        appid = steam_running_appid(info.get("pid")) if info.get("pid") else None
+        name = (sp.get("title") or "").strip()
+        bp = not name or name.lower() in ("gamescope", "steam") or "big picture" in name.lower()
+        if appid:
+            key = "steam-%s" % appid
+            cover, hero = cover_key_files(key)
+            title = cover_key_title(key) or (name if not bp else "Steam")
+            return {"space": STEAM_SPACE, "kind": "steam", "title": title, "cover": cover, "hero": hero}
+        return {"space": STEAM_SPACE, "kind": "steam", "title": "Steam" if bp else name}
 
     def overlay_current_space(self):
         with self.lock:
@@ -871,7 +1158,7 @@ class SpacesManager:
     def overlay_opened(self):
         """Overlay appena mostrato: congela il gioco corrente e prende il pad in esclusiva."""
         with self.lock:
-            scope = self.slots.get(self.target_space)
+            scope = self.steam_scope if self.target_space == STEAM_SPACE else self.slots.get(self.target_space)
         if scope:
             threading.Thread(target=self.freezer.freeze_now, args=(scope, self.overlay_is_open), daemon=True).start()
         if self.pad_listener:
@@ -880,7 +1167,7 @@ class SpacesManager:
     def overlay_cancelled(self):
         """Overlay chiuso senza cambiare spazio: il gioco corrente riprende."""
         with self.lock:
-            scope = self.slots.get(self.target_space)
+            scope = self.steam_scope if self.target_space == STEAM_SPACE else self.slots.get(self.target_space)
         if scope:
             self.freezer.thaw_sync(scope)
 
@@ -916,6 +1203,11 @@ class SpacesManager:
                                "window": self.space_window(s),
                                "title": next((self.clients[w]["name"] for w in self.scope_wins.get(scope, [])
                                               if w in self.clients), "")})
+            steam_wid, steam_scope = self.steam_wid, self.steam_scope
+        if steam_wid is not None:
+            spaces.append({"space": STEAM_SPACE, "kind": "steam", "scope": steam_scope, "window": steam_wid,
+                           "title": self.xa.window_name(steam_wid)})
+        with self.lock:
             return {"ok": True, "current": self.cur_space, "previous": self.prev_space, "spaces": spaces,
                     "freeze": self.freezer.snapshot(), "overlay": self.overlay_status()}
 
@@ -1012,8 +1304,32 @@ class SpacesManager:
             if changed:
                 self._align_freeze(c[0])
 
+    def _prestart_tick(self, now):
+        """v3.2.6-dev.4 — Steam in background: congela lo scope appena Big Picture e' pronta (titolo),
+        se nel frattempo l'utente non e' andato nello spazio 3."""
+        with self.lock:
+            t0, wid, scope, target = self.steam_settle, self.steam_wid, self.steam_scope, self.target_space
+        if t0 is None:
+            return
+        if wid is None or scope is None or target == STEAM_SPACE:
+            with self.lock:
+                self.steam_settle = None     # chiuso, o l'utente ci e' andato: da qui vale la regola normale
+            return
+        title = self.xa.window_name(wid)
+        late = now - t0 >= PRESTART_FREEZE_MAX_S
+        if BIG_PICTURE_RX.search(title or "") or late:
+            with self.lock:
+                self.steam_settle = None
+            log("Steam prestart: %s after %.0f s (title %r): freezing %s"
+                % ("Big Picture ready" if not late else "timeout", now - t0, title, scope))
+            self.freezer.schedule_freeze(scope)
+
     def _tick(self):
         now = time.time()
+        try:
+            self._prestart_tick(now)
+        except Exception as e:  # noqa
+            log("Steam prestart: check failed (%r)" % (e,))
         if now - self._last_sync > 5.0:
             self.sync_clients()
         if now - self._last_retry > 1.0:
@@ -1181,6 +1497,7 @@ class PadListener(threading.Thread):
         self.rep_next = 0.0
         self.ov_logged = 0
         self._ioctl = fcntl.ioctl           # sostituibile nei test
+        self.grab_lock = threading.RLock()  # v3.2.6-dev.2 — presa/rilascio da piu' thread (pad, overlay)
 
     def _reset(self):
         self.sel = self.l1 = self.r1 = False
@@ -1290,12 +1607,13 @@ class PadListener(threading.Thread):
         """Chiamato da spaces.py all'apertura (on=True) e alla chiusura dell'overlay."""
         if os.environ.get("X_LAUNCHER_OVERLAY_GRAB", "1").strip() == "0":
             return
-        if on:
-            self.grab_wanted, self.release_since = True, None
-            self.grab_failed = False        # one attempt per opening (no retry loop on errors)
-        else:
-            self.grab_wanted, self.release_since = False, time.time()
-        self._grab_tick()
+        with self.grab_lock:
+            if on:
+                self.grab_wanted, self.release_since = True, None
+                self.grab_failed = False    # one attempt per opening (no retry loop on errors)
+            else:
+                self.grab_wanted, self.release_since = False, time.time()
+            self._grab_tick_locked()
 
     def _all_up(self):
         return not self.pressed and self.hat == 0
@@ -1313,6 +1631,10 @@ class PadListener(threading.Thread):
         log("overlay: pad %s%s" % ("grabbed" if on else "released", (" (failed: %s)" % failed) if failed else ""))
 
     def _grab_tick(self):
+        with self.grab_lock:
+            self._grab_tick_locked()
+
+    def _grab_tick_locked(self):
         # presa solo a tasti tutti rilasciati: il gioco ha visto pressioni E rilasci (niente tasto
         # "incollato"); rilascio solo a tasti rilasciati (o dopo GRAB_RELEASE_MAX_S)
         if self.grab_wanted and not self.grabbed and not self.grab_failed and self.fds and self._all_up():

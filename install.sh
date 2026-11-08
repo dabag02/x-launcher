@@ -88,6 +88,11 @@
 #  Cosi' si prova la copia di sviluppo (autostart passa da solo --local-server) senza
 #  perdere l'installazione di sistema. E' il contrario di --relink-openbox, che riporta
 #  i link a /opt; per tornare alla stabile: sudo ./install.sh --relink-openbox
+#  v3.2.12-Mars — --devel accetta cartelle con spazi e caratteri speciali nel nome (prima
+#  rifiutate): l'installer crea il collegamento a nome fisso /opt/x-launcher-devel -> cartella
+#  di sviluppo e fa puntare li' sessioni, comandi e symlink (il nome fisso non ha bisogno di
+#  essere codificato nelle righe Exec= dei .desktop ne' nei sed). Gli script risolvono il
+#  percorso reale con readlink -f e lo usano sempre tra virgolette.
 #  La cifratura dei segreti (secret.key, backup-passphrase.enc) e' creata dal demone al
 #  primo avvio con permessi 0600: l'installer non la tocca e non deve farlo.
 #  (dalla cartella della versione stabile).
@@ -107,6 +112,8 @@ set -e
 
 INSTALL_DIR="/opt/x-launcher"
 BIN_LINK="/usr/local/bin/x-launcher"
+# v3.2.12-Mars — collegamento a nome fisso verso la cartella di sviluppo (--devel)
+DEVEL_ALIAS="/opt/x-launcher-devel"
 # v2.2.19-dev.1 — sessione Kiosk (Wayland/gamescope), vedi nota sopra.
 # v2.2.19-dev.15 — unica sessione standalone installata: la vecchia
 # X11 (xsessions/) non viene più installata né rimossa da qui.
@@ -154,12 +161,13 @@ if [ "$DEVEL" = 1 ]; then
     echo "[INSTALL] --devel va lanciato dalla cartella di sviluppo, non da ${INSTALL_DIR}."
     exit 2
   fi
-  # il percorso finisce nei file .desktop (Exec=): niente spazi o caratteri speciali
-  if ! printf '%s' "$PROJECT_DIR" | grep -Eq '^[A-Za-z0-9_./+-]+$'; then
-    echo "[INSTALL] --devel: il percorso ${PROJECT_DIR} contiene spazi o caratteri speciali. Sposta il pacchetto in una cartella con un percorso semplice."
+  if [ ! -f "$PROJECT_DIR/kiosk-launch.sh" ]; then
+    echo "[INSTALL] --devel: in ${PROJECT_DIR} manca kiosk-launch.sh — non sembra una cartella di X-Launcher."
     exit 2
   fi
-  LINK_DIR="$PROJECT_DIR"
+  # v3.2.12-Mars — si punta al collegamento a nome fisso, creato piu' sotto (dopo il controllo di sudo):
+  # il percorso reale, anche con spazi o simboli (&, ', parentesi...), non finisce mai in un Exec= o in un sed.
+  LINK_DIR="$DEVEL_ALIAS"
 fi
 
 # -------------------------------------------------------------
@@ -326,6 +334,7 @@ if [ "$UNINSTALL" = 1 ]; then
   echo "[INSTALL] Rimozione di X-Launcher da /opt..."
   cleanup_openbox_session
   rm -rf "$INSTALL_DIR"
+  [ -L "$DEVEL_ALIAS" ] && rm -f "$DEVEL_ALIAS"
   rm -f "$BIN_LINK"
   rm -f "$SPACES_CTL_LINK"
   rm -f "$KIOSK_SESSION_FILE"
@@ -333,6 +342,17 @@ if [ "$UNINSTALL" = 1 ]; then
   update-desktop-database /usr/share/applications 2>/dev/null || true
   echo "[INSTALL] Rimosso. Le impostazioni utente in ~/.local/share/x-launcher NON sono state toccate (sono per-utente, non riguardano l'installazione globale)."
   exit 0
+fi
+
+# v3.2.12-Mars — --devel: collegamento a nome fisso verso la cartella di sviluppo (vedi intestazione).
+# Un collegamento gia' presente viene solo ripuntato; un file o una cartella vera con quel nome no.
+if [ "$DEVEL" = 1 ]; then
+  if [ -e "$DEVEL_ALIAS" ] && [ ! -L "$DEVEL_ALIAS" ]; then
+    echo "[INSTALL] --devel: ${DEVEL_ALIAS} esiste e non è un collegamento — non lo tocco. Rimuovilo a mano e riprova."
+    exit 2
+  fi
+  ln -sfn "$PROJECT_DIR" "$DEVEL_ALIAS"
+  echo "[INSTALL] --devel: ${DEVEL_ALIAS} → ${PROJECT_DIR}"
 fi
 
 if [ ! -d "$PROJECT_DIR/dist" ]; then
@@ -457,7 +477,7 @@ fi
 echo ""
 echo "[INSTALL] Completato."
 if [ "$DEVEL" = 1 ]; then
-  echo "[INSTALL] MODALITA' SVILUPPO (--devel): installato in ${INSTALL_DIR}, ma symlink, comandi e sessioni puntano a ${LINK_DIR}."
+  echo "[INSTALL] MODALITA' SVILUPPO (--devel): installato in ${INSTALL_DIR}, ma symlink, comandi e sessioni puntano a ${LINK_DIR} (→ ${PROJECT_DIR})."
   echo "[INSTALL]   Dopo ogni ./build.sh compile basta riavviare la sessione: non serve reinstallare. Per tornare alla stabile:"
   echo "[INSTALL]   dalla cartella della versione stabile: sudo ./install.sh --relink-openbox"
 fi

@@ -43,6 +43,10 @@ let activeWaylandDisplay: string | undefined;
 export type SessionKind = 'desktop' | 'kiosk';
 let activeSessionKind: SessionKind = 'desktop';
 let activeGamescopeResolution: string | undefined;
+// v3.2.6-dev.3 — la sessione attiva ha dichiarato la modalita' spazi (kiosk-launch.sh --spaces-mode,
+// sessione Openbox). Serve a steamSession.ts: se il gestore degli spazi non risponde (non ancora
+// partito, riavvio), Steam NON va lanciato fuori da gamescope come su XFCE.
+let activeSpacesSession = false;
 
 /** DISPLAY X11 valido (":0", ":1.0"). Un valore come "host:0" punterebbe i giochi a un altro server X. */
 export function isValidX11Display(v: unknown): v is string { return typeof v === 'string' && /^:\d{1,3}(\.\d{1,2})?$/.test(v.trim()); }
@@ -54,19 +58,26 @@ const VALID_RESOLUTIONS = new Set(['HD', 'FullHD', 'QHD', '4K']);
  * v3.0.2-dev.5 (audit punto 9) — i valori sono validati: display/waylandDisplay diventano il DISPLAY di TUTTI i
  * processi grafici lanciati dopo. Un valore non valido NON viene applicato. Ritorna false se qualcosa e' stato rifiutato.
  */
-export function setActiveDisplay(display?: string, waylandDisplay?: string, kind?: SessionKind, resolution?: string): boolean {
+export function setActiveDisplay(display?: string, waylandDisplay?: string, kind?: SessionKind, resolution?: string, spaces?: boolean): boolean {
   const d = display && display.trim() !== '' ? display.trim() : undefined;
   const w = waylandDisplay && waylandDisplay.trim() !== '' ? waylandDisplay.trim() : undefined;
   if ((d !== undefined && !isValidX11Display(d)) || (w !== undefined && !isValidWaylandDisplay(w))) return false;
   if (kind !== undefined && kind !== 'kiosk' && kind !== 'desktop') return false;
   if (resolution !== undefined && resolution !== '' && !VALID_RESOLUTIONS.has(resolution)) return false;
+  if (spaces !== undefined && typeof spaces !== 'boolean') return false;
   activeDisplay = d;
   activeWaylandDisplay = w;
   if (kind === 'kiosk' || kind === 'desktop') {
     activeSessionKind = kind;
   }
   activeGamescopeResolution = kind === 'kiosk' && resolution ? resolution : undefined;
+  activeSpacesSession = kind !== 'kiosk' && spaces === true;
   return true;
+}
+
+/** v3.2.6-dev.3 — true se l'ultima sessione segnalata e' quella Openbox con gli spazi. */
+export function isSpacesSessionDeclared(): boolean {
+  return activeSpacesSession;
 }
 
 /** Stato per il pulsante "Modalità Gamescope" — non per lo spawn dei giochi (vedi getActiveDisplayEnv per quello). */

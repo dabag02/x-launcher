@@ -11,7 +11,7 @@
 
 import { BaseRunner, RunnerConfig } from './base';
 import { Game } from '../../types';
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, execFileSync } from 'child_process';
 import { existsSync, readdirSync, mkdirSync, openSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
@@ -20,6 +20,7 @@ import { DATA_DIR } from '../paths';
 import * as processManager from '../processManager';
 import { getActiveDisplayEnv } from '../activeDisplay';
 import type { ScopeKind } from '../processManager';
+import { ensureSteamSession } from '../steamSession';
 
 // ---------------------------------------------------------------------------
 // Utility helpers
@@ -1057,13 +1058,33 @@ export class SteamNativeRunner extends BaseRunner {
     if (!game.steamAppId) {
       return { success: false, message: `Nessun Steam App ID per ${game.title}` };
     }
-    writeLog('launch', `[STEAM] Launching via URI: steam://rungameid/${game.steamAppId}`);
-    const { pid } = spawnDetached('steam', [`steam://rungameid/${game.steamAppId}`]);
+    const uri = `steam://rungameid/${game.steamAppId}`;
+    // v3.2.6-dev.2 — sessione Openbox con gli spazi: il gioco parte dentro la sessione Steam in
+    // gamescope (spazio 3), che viene aperta se serve (vedi steamSession.ts). Altrove come prima.
+    const session = await ensureSteamSession(uri);
+    if (session.handled) {
+      if (!session.success) return { success: false, message: session.message };
+      writeLog('launch', `[STEAM] ${game.title} (AppID ${game.steamAppId}) via the Steam session ${session.unit ?? '?'}`);
+      return { success: true, pid: session.pid, message: `Steam: avvio ${game.title} (AppID ${game.steamAppId}) — ${session.message}` };
+    }
+    writeLog('launch', `[STEAM] Launching via URI: ${uri}`);
+    const { pid } = spawnDetached('steam', [uri]);
     return { success: true, pid, message: `Steam: avvio ${game.title} (AppID ${game.steamAppId})` };
   }
 
   async isAvailable() { return binaryExists('steam'); }
-  async version()     { return getBinaryVersion('steam', '--version'); }
+  // v3.2.6-dev.5 — MAI eseguire `steam --version`: Steam non ha quell'opzione. Con Steam chiuso il
+  // comando avvia il client desktop completo (fuori da gamescope, sopra la Dashboard) e, essendo
+  // getBinaryVersion un execSync, la catena di lancio restava ferma finche' quel client non veniva
+  // chiuso (visto su hardware: bootstrap_log "Steam Client launched with: ... '--version'").
+  // Versione dal pacchetto (Arch), senza avviare nulla.
+  async version() {
+    try {
+      return execFileSync('pacman', ['-Q', 'steam'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim() || 'steam';
+    } catch {
+      return 'steam (versione gestita dal client)';
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
