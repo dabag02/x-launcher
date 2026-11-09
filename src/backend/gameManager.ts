@@ -1524,10 +1524,16 @@ class GameManager {
     // Stesso principio in senso opposto: se questo stesso gioco risulta
     // già in esecuzione (PID ancora vivo), un secondo lancio spawnerebbe
     // un secondo processo wine/proton sulla stessa prefix in parallelo.
+    // v3.2.13-dev.2 — controllo su TUTTI i giochi aperti, non solo sull'ultimo lanciato: con due giochi
+    // negli spazi, rilanciare il primo sfuggiva al controllo e partiva una seconda istanza sulla stessa
+    // prefix. Lo scope del gioco (processManager) e' la fonte affidabile; l'ultimo lancio resta come
+    // ripiego per i lanci non avvolti in uno scope. Nessuna azione automatica: solo una notifica
+    // (server.ts, tipo 'launch-already-running'), il giocatore decide cosa fare.
     const runningCheck = this.isLastLaunchedGameRunning();
-    if (runningCheck.running && runningCheck.gameId === id) {
-      this.addLog(`[LAUNCH] Bloccato — ${game.title} risulta già in esecuzione (PID attivo).`, 'error');
-      return { success: false, message: `${game.title} è già in esecuzione` };
+    const activeScope = processManager.findActiveScope('game', id);
+    if (activeScope || (runningCheck.running && runningCheck.gameId === id)) {
+      this.addLog(`[LAUNCH] Bloccato — ${game.title} risulta già in esecuzione (${activeScope ? `scope ${activeScope.unit}` : 'PID attivo'}).`, 'warning');
+      return { success: false, alreadyRunning: true, message: `${game.title} è già in esecuzione` };
     }
 
     // Blocca il lancio se il plugin dello store è disabilitato e il gioco non è DRM-free.

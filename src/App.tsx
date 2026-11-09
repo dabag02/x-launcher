@@ -904,7 +904,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v3.2.12-Mars');
+  const [appVersion, setAppVersion] = useState('v3.2.16-Mars');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -2917,11 +2917,18 @@ Vuoi provare ad avviarlo comunque?`);
       openSplashEventSource(id, game.title);
     }
     try {
-      await fetch('/api/launch', {
+      const launchRes = await fetch('/api/launch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id })
       });
+      // v3.2.13-dev.1/dev.2 — lancio rifiutato dal backend (limite di 2 giochi negli spazi, oppure gioco
+      // gia' aperto): la notifica la manda il backend; qui si chiude la splash e non si congela nulla.
+      const launchJson = await launchRes.json().catch(() => null);
+      if (launchJson?.limited || launchJson?.alreadyRunning) {
+        closeSplash();
+        return;
+      }
       // Congela l'input gamepad mentre il gioco è in esecuzione.
       // Polling ogni 3s su /api/system/game-running per sapere quando il
       // processo termina.

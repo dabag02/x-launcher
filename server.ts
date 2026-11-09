@@ -31,6 +31,7 @@ import * as processManager from './src/backend/processManager';
 import * as windowFocus from './src/backend/windowFocus';
 import { sendToSpaces, isSpacesActive, thawScope } from './src/backend/spacesClient';
 import { ensureSteamSession, shutdownSteamSession, prestartSteamSession } from './src/backend/steamSession';
+import { GAME_SPACES_MAX, gameSpacesLimitReached } from './src/backend/gameSpacesLimit';
 import { setActiveDisplay, getActiveSessionInfo } from './src/backend/activeDisplay';
 import { readAppConfig, writeAppConfig, nextGamescopeResolution } from './src/backend/appConfig';
 import { DATA_DIR } from './src/backend/paths';
@@ -1129,7 +1130,24 @@ async function startServer() {
       res.status(400).json({ success: false, message: 'Richiesta di lancio non valida.' });
       return;
     }
+    // v3.2.13-dev.1 — regola dei 2 giochi (sessione Openbox con gli spazi): un terzo gioco non parte e
+    // l'utente riceve una notifica (IT/EN). Esclusi i giochi Steam (runner Steam Native: vanno nello
+    // spazio 3 con Steam) e Steam Big Picture (rotta a parte). Fuori da quella sessione nessun limite.
+    const limitGame = gameManager.getGames().find((g: any) => g.id === id);
+    if (limitGame && limitGame.runner !== 'Steam Native' && await gameSpacesLimitReached(id)) {
+      writeLog('launch', `[SPACES] Launch of ${id} refused: ${GAME_SPACES_MAX} games already open (spaces 1-${GAME_SPACES_MAX})`);
+      notificationEngine.emit({ type: 'launch-limit', gameId: id, gameTitle: limitGame.title ?? id, max: GAME_SPACES_MAX });
+      res.json({ success: false, limited: true, message: `Limite di ${GAME_SPACES_MAX} giochi contemporanei raggiunto.` });
+      return;
+    }
     const result = await gameManager.launchGame(id, launchArgsOverride);
+    // v3.2.13-dev.2 — gioco gia' aperto: solo un avviso (IT/EN), nessun errore e nessuna azione automatica.
+    if (!result.success && (result as { alreadyRunning?: boolean }).alreadyRunning) {
+      const game = gameManager.getGames().find((g: any) => g.id === id);
+      notificationEngine.emit({ type: 'launch-already-running', gameId: id, gameTitle: game?.title ?? id });
+      res.json(result);
+      return;
+    }
     if (!result.success) {
       const game = gameManager.getGames().find((g: any) => g.id === id);
       const gameTitle = game?.title ?? id;

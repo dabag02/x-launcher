@@ -74,6 +74,10 @@ export type EngineEvent =
   | { type: 'known-fixes-result'; gameId: string; gameTitle: string; found: boolean; verbs?: string[] }
   | { type: 'launch-error';       gameId: string; gameTitle: string; error: string }
   | { type: 'launch-blocked';     gameId: string; gameTitle: string; reason: string }
+  // v3.2.13-dev.1 — terzo gioco rifiutato nella sessione Openbox (massimo 2 giochi negli spazi 1-2)
+  | { type: 'launch-limit';       gameId: string; gameTitle: string; max: number }
+  // v3.2.13-dev.2 — rilancio di un gioco gia' aperto: solo un avviso, nessuna azione automatica
+  | { type: 'launch-already-running'; gameId: string; gameTitle: string }
   | { type: 'auth-error';         store: string; message?: string }
   | { type: 'auth-ok';            store: string }
   | { type: 'runner-installed';   runnerId: string }
@@ -550,6 +554,28 @@ class NotificationEngine {
           game_id: event.gameId, game_title: event.gameTitle,
           source: 'system', created_at: this.now(),
           primary_action: JSON.stringify({ label: lang === 'en' ? 'Plugin Settings' : 'Impostazioni Plugin', handler: 'open_section', params: { section: 'plugins' } }),
+        };
+
+      case 'launch-already-running':
+        return {
+          id: this.mkId(), type: 'warning', status: 'pending',
+          title: lang === 'en' ? `Already running — ${event.gameTitle}` : `Già in esecuzione — ${event.gameTitle}`,
+          body: lang === 'en'
+            ? `${event.gameTitle} is already open, so it was not launched a second time. You can go back to it, or close it from the game itself or from the Process Manager.`
+            : `${event.gameTitle} è già aperto, quindi non è stato avviato una seconda volta. Puoi tornarci, oppure chiuderlo dal gioco stesso o dal Gestore dei processi.`,
+          game_id: event.gameId, game_title: event.gameTitle,
+          source: 'system', created_at: this.now(),
+        };
+
+      case 'launch-limit':
+        return {
+          id: this.mkId(), type: 'warning', status: 'pending',
+          title: lang === 'en' ? `Launch not possible — ${event.gameTitle}` : `Avvio non possibile — ${event.gameTitle}`,
+          body: lang === 'en'
+            ? `You can run at most ${event.max} games at the same time. Close one of the open games and try again. Steam games and Steam Big Picture open in their own space and don't count.`
+            : `Puoi tenere aperti al massimo ${event.max} giochi contemporaneamente. Chiudi uno dei giochi aperti e riprova. I giochi Steam e Steam Big Picture si aprono nel loro spazio e non rientrano nel conteggio.`,
+          game_id: event.gameId, game_title: event.gameTitle,
+          source: 'system', created_at: this.now(),
         };
 
       case 'auth-error':
