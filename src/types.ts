@@ -1,6 +1,6 @@
 export type StoreType = 'Steam' | 'Epic Games' | 'GOG Galaxy' | 'Ubisoft' | 'EA App' | 'Amazon Games' | 'Battle.net' | 'Rockstar Games Launcher' | 'Classic Console' | 'Plugin';
 
-export type RunnerType = 'Proton 8.0-4' | 'Proton-GE-8.25' | 'Wine-Lutris' | 'Native' | 'Proton Experimental' | 'DOSBox' | 'RetroArch' | 'ScummVM' | 'Steam Native';
+export type RunnerType = 'Proton 8.0-4' | 'Proton-GE-8.25' | 'Wine-Lutris' | 'Native' | 'Proton Experimental' | 'DOSBox' | 'RetroArch' | 'ScummVM' | 'Steam Native' | 'Web Stream';
 
 export type ViewState = 'library' | 'quick-menu' | 'settings' | 'game-detail';
 

@@ -56,6 +56,8 @@ openbox/autostart):
         Select + D-pad destra  -> spazio successivo (ciclico)
         Select + D-pad sinistra -> spazio precedente (ciclico)
         Select + L1 + R1        -> Dashboard (spazio 0)
+        Share (breve)           -> screenshot del gioco (v3.2.29-dev.5); durante una clip la ferma
+        Share (tenuto 1 s)      -> avvia/ferma la clip del gioco (v3.2.29-dev.6)
     Codici verificati su hardware reale (Xbox Wireless Controller): BTN_SELECT
     (314), BTN_TL/BTN_TR (310/311), D-pad come ABS_HAT0X (-1/0/+1); supporta
     anche D-pad come BTN_DPAD_LEFT/RIGHT (546/547). Riconosce il pad per nome,
@@ -83,6 +85,28 @@ Uso:
         X_LAUNCHER_SPACES_FREEZE=0            disattiva il congelamento
         ~/.config/x-launcher/spaces-nofreeze.conf   scope/prefissi da NON congelare
         spaces.py ctl freeze [on|off|status]  controllo a runtime
+
+  * MANTIENI MASSIMIZZATO (v3.2.29-dev.2). Un gioco lanciato con `--keep-maximized` negli argomenti
+    (il demone lo annota in ~/.local/share/x-launcher/window-rules.json) che si riduce a icona mentre il
+    suo spazio e' quello corrente viene riattivato dopo KEEP_MAX_DELAY_S, come fa il cambio di spazio
+    dall'overlay; al massimo 3 volte in 10 s, poi pausa di 60 s.
+
+  * CLIP (v3.2.29-dev.6). Share tenuto premuto (o Rec nell'overlay): gpu-screen-recorder della sola finestra
+    del gioco, H.264 60 fps + audio di sistema, in /tmp/x-launcher-<uid>/clips (0700, tmpfs: cancellate allo
+    spegnimento), al massimo 3 (prune_clips). Classe Recorder + SpacesManager._rec_sync(): avvio solo a spazio
+    davanti, fermo, senza overlay e scongelato; pausa/ripresa con SIGUSR2 quando cambiano queste condizioni;
+    arresto con Share, Rec, CLIP_MAX_S (120 s effettivi), chiusura del gioco o uscita di spaces.py. A clip
+    chiusa: .json accanto all'MP4, POST /api/media/clip al demone, «Registrazione conclusa».
+
+  * SCREENSHOT (v3.2.29-dev.3; tasto Share da dev.5). Share premuto brevemente negli spazi dei giochi
+    (1..NUM_SLOTS; non la Dashboard, non Steam): cattura della sola finestra del gioco in PNG
+    (gpu-screen-recorder, ripiego `import`) in /run/user/<uid>/x-launcher-media, poi POST
+    /api/media/screenshot al demone (conversione in JPEG, archivio in
+    ~/.local/share/x-launcher/multimedia/<gioco>/Screenshot, notifica). Share e' KEY_F12 dal device
+    "Keyboard" del controller (xpadneo, stesso Uniq del pad) o KEY_RECORD dal pad (xpad); tenuto per
+    X_LAUNCHER_SHARE_HOLD_S (1 s) avvia/ferma le clip (vedi CLIP). Select + D-pad su/giu' sono di nuovo liberi per
+    i giochi. Dopo lo scatto, «Screenshot acquisito» con l'icona per 3 s in alto a destra (v3.2.29-dev.4,
+    overlay.Osd: finestra override-redirect, mai il focus, nascosta prima di ogni scatto).
 
   * OVERLAY (dev.1 del ciclo 2.7.2). Con X_LAUNCHER_SPACES_OVERLAY=1 (kiosk-launch.sh
     --spaces-overlay) Select + D-pad destra/sinistra non cambia piu' spazio direttamente:
@@ -113,6 +137,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 
 try:
     from Xlib import X, display, protocol
@@ -138,6 +164,48 @@ LAUNCH_GRACE_S = float(os.environ.get("XL_SPACES_LAUNCH_GRACE_S", "20.0"))
 LAUNCH_WINDOW_S = float(os.environ.get("XL_SPACES_LAUNCH_WINDOW_S", "45.0"))
 FREEZE_DELAY_S = float(os.environ.get("XL_SPACES_FREEZE_DELAY_S", "0.4"))
 THAW_SETTLE_S = float(os.environ.get("XL_SPACES_THAW_SETTLE_S", "0.25"))
+# v3.2.29-dev.2 — `--keep-maximized` (window-rules.json, scritto dal demone a ogni lancio): una finestra di
+# gioco ridotta a icona mentre il suo spazio e' quello corrente viene riattivata (stessa chiamata del cambio
+# di spazio dall'overlay, che la riporta a schermo intero). Al massimo KEEP_MAX_RESTORES volte ogni
+# KEEP_MAX_WINDOW_S secondi, poi pausa di KEEP_MAX_PAUSE_S: un gioco che continua a iconificarsi non entra
+# in un ciclo infinito con il gestore.
+KEEP_MAX_DELAY_S = float(os.environ.get("XL_SPACES_KEEP_MAX_DELAY_S", "0.5"))
+KEEP_MAX_RESTORES = 3
+KEEP_MAX_WINDOW_S = 10.0
+KEEP_MAX_PAUSE_S = 60.0
+# v3.2.29-dev.3 — screenshot (tasto Share da v3.2.29-dev.5, prima Select + D-pad su) degli spazi dei giochi 1..NUM_SLOTS (Steam ha i suoi):
+# cattura della sola finestra del gioco in PNG nella cartella di appoggio (in RAM, privata), poi il demone
+# la converte in JPEG, la archivia in ~/.local/share/x-launcher/multimedia/<gioco>/Screenshot e notifica.
+SCREENSHOT_MIN_INTERVAL_S = 1.0
+# v3.2.29-dev.5 — tasto Share del controller (al posto di Select + D-pad, che i giochi intercettano):
+# xpadneo lo manda come KEY_F12 da un device "tastiera" a parte, stesso Uniq del pad (verificato
+# sull'HTPC: "Xbox Wireless Controller Keyboard"); xpad (cavo) come KEY_RECORD dal pad stesso.
+# Premuto e rilasciato prima di SHARE_HOLD_S = screenshot; tenuto SHARE_HOLD_S = clip (step 2b).
+# v3.2.29-dev.6 — clip (Share tenuto premuto o pulsante Rec dell'overlay): solo la finestra del gioco, alla
+# risoluzione corrente, H.264 NVENC + audio di sistema; al massimo CLIP_MAX_S secondi di registrazione
+# effettiva (le pause non contano); temporanee in /tmp/x-launcher-<uid>/clips (tmpfs: sparisce allo
+# spegnimento), al massimo CLIP_KEEP: la quarta cancella la piu' vecchia. Pausa (SIGUSR2, verificata
+# sull'HTPC il 14/11/2026) quando lo spazio non e' piu' quello davanti o si apre l'overlay; ripresa
+# allo scongelamento.
+try:
+    CLIP_MAX_S = max(5.0, min(600.0, float(os.environ.get("X_LAUNCHER_CLIP_MAX_S", "120"))))
+except ValueError:
+    CLIP_MAX_S = 120.0
+CLIP_KEEP = 3
+# v3.2.29-dev.9 — il pallino REC non resta a schermo per tutta la registrazione: una finestra sopra un gioco a
+# schermo intero toglie al driver NVIDIA (X11, senza compositor) lo scambio diretto dei buffer e il gioco
+# mostra tearing (verificato dall'utente: registrando da SSH senza sovrimpressione nessun artefatto).
+# Regola dell'utente: 3 s all'avvio, poi 3 s ogni 30 s di registrazione, e «Registrazione conclusa» alla fine.
+REC_OSD_SHOW_S = 3.0
+REC_OSD_EVERY_S = 30.0
+CLIP_STOP_TIMEOUT_S = 15.0
+KEY_F12, KEY_RECORD = 88, 167
+SHARE_KEYS = (KEY_F12, KEY_RECORD)
+try:
+    SHARE_HOLD_S = max(0.4, min(3.0, float(os.environ.get("X_LAUNCHER_SHARE_HOLD_S", "1.0"))))
+except ValueError:
+    SHARE_HOLD_S = 1.0
+SCREENSHOT_TIMEOUT_S = 15
 # v3.2.1-dev.1 — la Dashboard si congela piu' tardi dei giochi: la pagina deve fare in tempo a ricevere
 # "gioco pronto" e a chiudere la splash prima di fermarsi.
 try:
@@ -216,13 +284,19 @@ def socket_path():
 
 _SCOPE_RE = re.compile(r"^xlauncher-[A-Za-z0-9_.@-]{1,200}$")
 _CHROMIUM_APP_SCOPE_RE = re.compile(r"^app-org\.chromium\.Chromium-\d{1,10}$")
+# v3.2.17-dev.11 — Steam col runtime steamrt64 (steam-launch-wrapper) mette il gioco (reaper + eseguibile) in
+# uno scope systemd suo, app-steam-app<AppId>-<pid>.scope, fuori dalla sessione xlauncher-steam-session-*
+# (verificato sull'HTPC con Limbo: app-steam-app48000-84728.scope; nella sessione restano solo i wrapper).
+STEAM_APP_SCOPE_RX = re.compile(r"(app-steam-app(\d{1,10})-\d{1,10})\.scope")
+_STEAM_APP_SCOPE_RE = re.compile(r"^app-steam-app\d{1,10}-\d{1,10}$")
 
 
 def valid_scope(sc):
     """Nome di scope accettato dal freezer: 'xlauncher-...' (niente spazi, '/' o '--' iniziali) oppure,
     unica eccezione (v3.2.6-dev.1), lo scope del browser della Dashboard 'app-org.chromium.Chromium-<n>'."""
     return isinstance(sc, str) and (_SCOPE_RE.fullmatch(sc) is not None
-                                    or _CHROMIUM_APP_SCOPE_RE.fullmatch(sc) is not None)
+                                    or _CHROMIUM_APP_SCOPE_RE.fullmatch(sc) is not None
+                                    or _STEAM_APP_SCOPE_RE.fullmatch(sc) is not None)   # v3.2.17-dev.11
 
 
 # --------------------------------------------------------------------------- X helpers
@@ -344,6 +418,12 @@ def _child_pids(pid):
 
 def dashboard_child_scope(pid):
     """Scope xlauncher-dashboard-* in cui sono rimasti i figli del browser (zygote, GPU...), o None."""
+    return child_scope_with_prefix(pid, DASHBOARD_SCOPE_PREFIX)
+
+
+def child_scope_with_prefix(pid, prefix):
+    """v3.2.17-dev.8 — generalizzazione di dashboard_child_scope (stesso codice): primo scope con il
+    prefisso indicato fra quelli dei figli diretti del processo, o None."""
     tf = os.environ.get("XL_SPACES_TEST_CHILDREN")          # test: righe "pid figlio1 figlio2 ..."
     kids = []
     if tf:
@@ -358,9 +438,49 @@ def dashboard_child_scope(pid):
         kids = _child_pids(int(pid))
     for k in kids:
         sc = scope_of_pid(k)
-        if sc and sc.startswith(DASHBOARD_SCOPE_PREFIX):
+        if sc and sc.startswith(prefix):
             return sc
     return None
+
+
+# v3.2.17-dev.10 — demone e token per il pulsante di chiusura dell'overlay (stessi di tray.py, che ospita
+# spaces.py nella sessione Openbox: X_LAUNCHER_URL gli arriva da kiosk-launch.sh, 3001 con --local-server).
+DAEMON_URL = os.environ.get("X_LAUNCHER_URL", "http://localhost:3000").rstrip("/")
+API_TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".local", "share", "x-launcher", "api-token")
+
+
+def daemon_kill_unit(unit, timeout=20):
+    """POST /api/process-manager/<unit>/kill al demone. (ok, messaggio)."""
+    headers = {"Content-Type": "application/json"}
+    try:
+        with open(API_TOKEN_FILE, "r", encoding="utf-8") as f:
+            tok = f.read().strip()
+        if tok:
+            headers["X-XLauncher-Token"] = tok
+    except OSError:
+        pass
+    url = "%s/api/process-manager/%s/kill" % (DAEMON_URL, urllib.parse.quote(unit, safe=""))
+    try:
+        req = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+        return bool(body.get("success")), str(body.get("message") or "")
+    except Exception as e:  # noqa
+        return False, "%s: %s" % (type(e).__name__, e)
+
+
+def web_app_scopes(pid):
+    """v3.2.17-dev.8 — finestra di una web app lanciata come gioco (runner 'Web Stream', es. Amazon
+    Luna): un secondo Chromium con profilo proprio, avviato dal demone nello scope
+    xlauncher-game-<id>-<ts>. Come per la Dashboard, Chromium sposta il proprio processo principale
+    (quello della finestra) in uno scope suo, app-org.chromium.Chromium-<n> (verificato sull'HTPC con
+    Luna), mentre i figli (zygote, GPU, renderer) restano nel nostro. Rimanda (scope del gioco,
+    scope del browser) oppure (None, None) se la finestra non e' di questo tipo."""
+    app = chromium_app_scope_of_pid(pid)
+    if not app:
+        return None, None
+    game = child_scope_with_prefix(pid, "xlauncher-game-")
+    return (game, app) if game else (None, None)
 
 
 class XActions:
@@ -416,6 +536,154 @@ def covers_dir():
         os.path.expanduser("~"), ".local", "share", "x-launcher", "covers")
 
 
+# --------------------------------------------------------------------------- sfondo degli spazi
+# v3.2.29-dev.17 — sfondo del desktop dello spazio di un gioco: l'immagine ad alta risoluzione
+# scaricata dal demone (src/backend/spaceBackground.ts) in <covers>/<id>.bg, a schermo intero e
+# nitida, come sfondo della finestra radice mentre lo spazio corrente e' quello del gioco (1-2).
+# Dashboard (0) e Steam (3) restano neri: li' una finestra a tutto schermo copre sempre il desktop.
+# X_LAUNCHER_SPACE_BG=0 in ~/.config/openbox/environment lo disattiva.
+SPACE_BG_CACHE = 3            # immagini gia' pronte tenute nel server X (circa 15 MB l'una a 1440p)
+
+
+def space_bg_enabled_from_env():
+    return os.environ.get("X_LAUNCHER_SPACE_BG", "1").strip().lower() not in ("0", "off", "no", "false")
+
+
+def game_bg_file(scope):
+    """<covers>/<id>.bg dello scope di un gioco, se esiste."""
+    m = re.match(r"^xlauncher-game-(.+)-(\d+)(?:\.scope)?$", scope or "")
+    if not m:
+        return None
+    p = os.path.join(covers_dir(), "%s.bg" % m.group(1))
+    return p if os.path.isfile(p) else None
+
+
+class SpaceBackground(threading.Thread):
+    """Sfondo della finestra radice. Thread e connessione X propri (Xlib non e' thread-safe): le
+    richieste arrivano con request(percorso|"") e vengono applicate in ordine, l'ultima vince.
+    Immagine ridimensionata a riempire lo schermo (ritaglio centrale, lanczos) con Pillow, caricata
+    una volta in un pixmap e tenuta pronta (SPACE_BG_CACHE): tornare su uno spazio e' immediato.
+    Imposta anche _XROOTPMAP_ID/ESETROOT_PMAP_ID, come gli strumenti per lo sfondo."""
+
+    def __init__(self):
+        threading.Thread.__init__(self, daemon=True)
+        self.cond = threading.Condition()
+        self.want = ""
+        self.applied = None           # (percorso, mtime) applicato
+        self.cache = []               # [(percorso, mtime, pixmap)], dal piu' recente
+        self.bad = {}                 # percorso -> mtime di un file che non si apre (niente tentativi a vuoto)
+        self.d = None
+        self.disabled = False
+
+    def request(self, path):
+        path = path or ""
+        with self.cond:
+            if path != self.want:
+                self.want = path
+                self.cond.notify()
+
+    def _key(self, path):
+        if not path:
+            return ("", 0)
+        try:
+            return (path, os.stat(path).st_mtime)
+        except OSError:
+            return ("", 0)
+
+    def run(self):
+        try:
+            self.d = display.Display()
+        except Exception as e:  # noqa
+            log("space background: no X connection (%r) -> disabled" % (e,))
+            self.disabled = True
+            return
+        while True:
+            with self.cond:
+                while self._key(self.want) == self.applied:
+                    self.cond.wait(2.0)       # anche un file sostituito (nuovo mtime) viene riapplicato
+                path = self.want
+            key = self._key(path)
+            try:
+                self._apply(key)
+            except Exception as e:  # noqa
+                log("space background: %s not applied (%r)" % (key[0] or "black", e))
+            self.applied = key
+
+    def _apply(self, key):
+        path, mtime = key
+        sc = self.d.screen()
+        root = sc.root
+        pix = None
+        if path and self.bad.get(path) != mtime:
+            for i, (p, m, px) in enumerate(self.cache):
+                if p == path and m == mtime:
+                    pix = px
+                    self.cache.insert(0, self.cache.pop(i))
+                    break
+            if pix is None:
+                t0 = time.time()
+                pix = self._render(path)
+                if pix is None:
+                    self.bad[path] = mtime
+                else:
+                    self.cache.insert(0, (path, mtime, pix))
+                    for _p, _m, old in self.cache[SPACE_BG_CACHE:]:
+                        try:
+                            old.free()
+                        except Exception:  # noqa
+                            pass
+                    del self.cache[SPACE_BG_CACHE:]
+                    log("space background: %s ready in %.0f ms" % (os.path.basename(path), (time.time() - t0) * 1000))
+        if pix is None:
+            root.change_attributes(background_pixel=sc.black_pixel)
+            for name in ("_XROOTPMAP_ID", "ESETROOT_PMAP_ID"):
+                root.delete_property(self.d.intern_atom(name))
+        else:
+            root.change_attributes(background_pixmap=pix)
+            pixmap_atom = self.d.intern_atom("PIXMAP")
+            for name in ("_XROOTPMAP_ID", "ESETROOT_PMAP_ID"):
+                root.change_property(self.d.intern_atom(name), pixmap_atom, 32, [pix.id])
+        root.clear_area(0, 0, 0, 0, False)
+        self.d.flush()
+        log("space background: %s" % (os.path.basename(path) if pix is not None else "black"))
+
+    def _render(self, path):
+        try:
+            from PIL import Image, ImageOps
+        except Exception as e:  # noqa
+            if not self.disabled:
+                log("space background: Pillow not available (%r) -> spaces stay black" % (e,))
+            self.disabled = True
+            return None
+        sc = self.d.screen()
+        info = self.d.display.info
+        fmt = next((f for f in info.pixmap_formats if f.depth == sc.root_depth), None)
+        if fmt is None or fmt.bits_per_pixel != 32:
+            log("space background: unsupported X pixel format (depth %s)" % sc.root_depth)
+            return None
+        w, h = sc.width_in_pixels, sc.height_in_pixels
+        try:
+            img = Image.open(path)
+            img.draft("RGB", (w, h))              # JPEG: decodifica gia' ridotta se e' molto piu' grande
+            img = ImageOps.fit(img.convert("RGB"), (w, h), Image.LANCZOS, centering=(0.5, 0.5))
+        except Exception as e:  # noqa
+            log("space background: %s unreadable (%r)" % (os.path.basename(path), e))
+            return None
+        root = sc.root
+        pix = root.create_pixmap(w, h, sc.root_depth)
+        gc = pix.create_gc()
+        data = img.tobytes("raw", "BGRX" if info.image_byte_order == 0 else "XRGB")
+        stride = w * 4
+        rows = max(1, max(4096, info.max_request_length * 4 - 256) // stride)
+        y = 0
+        while y < h:
+            n = min(rows, h - y)
+            pix.put_image(gc, 0, y, w, n, X.ZPixmap, sc.root_depth, 0, data[y * stride:(y + n) * stride])
+            y += n
+        gc.free()
+        return pix
+
+
 def cover_key_title(key):
     """Title written by the backend (coverCache.ts) in <covers>/<key>.json, or None."""
     if not key or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", key):
@@ -457,8 +725,72 @@ def scope_procs_of_pid(pid):
     return pids
 
 
+def _all_pids():
+    """PIDs di /proc (nei test: quelli di XL_SPACES_TEST_SCOPES)."""
+    tf = os.environ.get("XL_SPACES_TEST_SCOPES")
+    if tf:
+        try:
+            return [int(l.split()[0]) for l in open(tf) if l.split()]
+        except Exception:
+            return []
+    try:
+        return [int(n) for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        return []
+
+
+def _ppid(pid):
+    """Processo padre (nei test: righe "pid ppid" di XL_SPACES_TEST_PARENTS)."""
+    tf = os.environ.get("XL_SPACES_TEST_PARENTS")
+    if tf:
+        try:
+            for line in open(tf):
+                p = line.split()
+                if len(p) >= 2 and p[0] == str(pid):
+                    return int(p[1])
+        except Exception:
+            pass
+        return 0
+    try:
+        return int(open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()[1])
+    except Exception:
+        return 0
+
+
+def steam_app_scopes(steam_scope):
+    """v3.2.17-dev.11 — scope app-steam-app<id>-<pid> dei giochi avviati DA QUESTA sessione Steam: quelli
+    con un processo il cui padre (o un antenato vicino) sta nello scope della sessione. Il controllo
+    dell'antenato evita di prendere giochi di un altro Steam (es. una sessione desktop)."""
+    out = []
+    if not steam_scope:
+        return out
+    for pid in _all_pids():
+        m = STEAM_APP_SCOPE_RX.search(_cgroup_text(pid))
+        if not m or m.group(1) in out:
+            continue
+        p = pid
+        for _ in range(8):
+            p = _ppid(p)
+            if p <= 1:
+                break
+            sc = scope_of_pid(p)
+            if sc == steam_scope:
+                out.append(m.group(1))
+                break
+            if sc:                                   # antenato in un altro scope nostro: non e' di questa sessione
+                break
+    return out
+
+
 def steam_running_appid(pid):
-    """AppId of the Steam game running in the same scope as `pid` (reaper SteamLaunch AppId=N), or None."""
+    """AppId of the Steam game running in the same scope as `pid` (reaper SteamLaunch AppId=N), or None.
+    v3.2.17-dev.11 — with the steamrt64 runtime the game has its own app-steam-app<AppId>-<pid> scope:
+    the AppId then comes from that scope's name."""
+    sc = scope_of_pid(pid)
+    for app_scope in steam_app_scopes(sc) if sc else []:
+        m = re.match(r"^app-steam-app(\d{1,10})-", app_scope)
+        if m:
+            return m.group(1)
     for p in scope_procs_of_pid(pid):
         try:
             args = open("/proc/%d/cmdline" % p, "rb").read().split(b"\0")
@@ -501,6 +833,350 @@ def game_cover_files(scope):
         p = os.path.join(base, "%s.%s" % (key, kind))
         out.append(p if os.path.isfile(p) else None)
     return out[0], out[1]
+
+
+def window_rules_path():
+    return os.environ.get("X_LAUNCHER_WINDOW_RULES") or os.path.join(
+        os.path.expanduser("~"), ".local", "share", "x-launcher", "window-rules.json")
+
+
+_rules_cache = {"mtime": None, "keep": frozenset()}
+
+
+def keep_maximized(scope):
+    """v3.2.29-dev.2 — True se il gioco dello scope (xlauncher-game-<id>-<ts>) e' stato lanciato con
+    `--keep-maximized`. Il file viene riletto solo quando cambia (mtime)."""
+    m = re.match(r"^xlauncher-game-(.+)-(\d+)(?:\.scope)?$", scope or "")
+    if not m:
+        return False
+    path = window_rules_path()
+    try:
+        mt = os.stat(path).st_mtime_ns
+    except OSError:
+        _rules_cache["mtime"], _rules_cache["keep"] = None, frozenset()
+        return False
+    if mt != _rules_cache["mtime"]:
+        keep = frozenset()
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                km = (json.load(fh) or {}).get("keepMaximized") or {}
+            if isinstance(km, dict):
+                keep = frozenset(k for k, v in km.items() if v is True)
+        except Exception as e:  # noqa
+            log("window-rules: lettura fallita (%r)" % (e,))
+        _rules_cache["mtime"], _rules_cache["keep"] = mt, keep
+    return m.group(1) in _rules_cache["keep"]
+
+
+def window_iconic(d, w):
+    """Finestra ridotta a icona: _NET_WM_STATE_HIDDEN (EWMH, Openbox) o WM_STATE = IconicState (3, ICCCM)."""
+    if "_NET_WM_STATE_HIDDEN" in _atoms(d, w, "_NET_WM_STATE"):
+        return True
+    st = _cards(d, w, "WM_STATE")
+    return bool(st) and st[0] == 3
+
+
+def media_staging_dir():
+    """v3.2.29-dev.3 — cartella di appoggio degli screenshot appena catturati (stesso calcolo del demone,
+    src/backend/mediaLibrary.ts): /run/user/<uid>/x-launcher-media, altrimenti ~/.cache/x-launcher/media-staging.
+    Creata 0700; rifiutata se non e' una cartella nostra (mai seguire un link messo da altri)."""
+    run_dir = "/run/user/%d" % os.getuid()
+    base = os.path.join(run_dir, "x-launcher-media") if os.path.isdir(run_dir) else \
+        os.path.join(os.path.expanduser("~"), ".cache", "x-launcher", "media-staging")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    st = os.lstat(base)
+    import stat as _stat
+    if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise OSError("cartella di appoggio non valida: %s" % base)
+    if st.st_mode & 0o077:
+        os.chmod(base, 0o700)
+    return base
+
+
+def clips_dir():
+    """v3.2.29-dev.6 — clip temporanee: /tmp/x-launcher-<uid>/clips (stesso calcolo del demone,
+    mediaLibrary.ts). /tmp e' condivisa: le due cartelle devono essere nostre, vere cartelle (mai link)
+    e senza permessi per gli altri, altrimenti niente clip."""
+    import stat as _stat
+    base = os.environ.get("X_LAUNCHER_CLIPS_DIR") or os.path.join("/tmp", "x-launcher-%d" % os.getuid(), "clips")
+    for d in (os.path.dirname(base), base):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            pass
+        st = os.lstat(d)
+        if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise OSError("cartella delle clip non valida (non e' una nostra cartella): %s" % d)
+        if st.st_mode & 0o077:
+            os.chmod(d, 0o700)
+    return base
+
+
+def _rec_child_signals():
+    # il registratore deve poter ricevere SIGINT (stop) e SIGUSR2 (pausa) anche se il tray li ignora
+    for sig in (signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2, signal.SIGTERM):
+        signal.signal(sig, signal.SIG_DFL)
+
+
+class Recorder:
+    """v3.2.29-dev.6 — una clip alla volta, gestita da SpacesManager._rec_sync() (thread del ciclo X e
+    agganci di spazi e overlay). Stati: inattivo / in attesa (parte allo scongelamento) / in registrazione /
+    in pausa / in chiusura."""
+
+    def __init__(self, mgr):
+        self.mgr = mgr
+        self.lock = threading.RLock()
+        self.pending = None          # (spazio, scope) da avviare appena lo spazio e' davanti e scongelato
+        self.proc = None
+        self.info = None             # dict della clip in corso
+        self.paused = False
+        self.active_s = 0.0          # secondi registrati prima dell'ultima ripresa
+        self.seg_t0 = None           # inizio del tratto in corso (None in pausa)
+        self.stopping = False
+
+    def busy(self):
+        with self.lock:
+            return bool(self.pending or self.proc or self.stopping)
+
+    def recording_space(self):
+        with self.lock:
+            if self.info:
+                return self.info["space"]
+            return self.pending[0] if self.pending else None
+
+    def elapsed(self):
+        with self.lock:
+            return self.active_s + ((time.time() - self.seg_t0) if self.seg_t0 else 0.0)
+
+    def status(self):
+        with self.lock:
+            if not (self.proc or self.pending):
+                return None
+            return {"space": self.recording_space(), "elapsed": int(self.elapsed()), "paused": self.paused,
+                    "pending": bool(self.pending and not self.proc)}
+
+    def start(self, space, scope, wid):
+        m = re.match(r"^xlauncher-game-(.+)-(\d+)(?:\.scope)?$", scope or "")
+        if not m:
+            return False
+        try:
+            folder = clips_dir()
+        except Exception as e:  # noqa
+            log("clip: %s" % e)
+            return False
+        if not shutil_which("gpu-screen-recorder"):
+            log("clip: gpu-screen-recorder non installato")
+            return False
+        t0 = time.time()
+        name = "clip-%d-%s" % (int(t0 * 1000), os.urandom(3).hex())
+        path = os.path.join(folder, name + ".mp4")
+        cmd = ["gpu-screen-recorder", "-w", "0x%x" % wid, "-c", "mp4", "-k", "h264", "-f", "60",
+               "-a", "default_output", "-o", path]
+        errlog = open(os.path.join(folder, name + ".log"), "wb")
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=errlog, stderr=errlog,
+                                    preexec_fn=_rec_child_signals)
+        except Exception as e:  # noqa
+            errlog.close()
+            log("clip: avvio non riuscito (%r)" % (e,))
+            return False
+        errlog.close()
+        with self.lock:
+            self.proc, self.paused, self.active_s, self.seg_t0, self.pending = proc, False, 0.0, t0, None
+            self.info = {"space": space, "scope": scope, "key": m.group(1), "wid": wid, "name": name,
+                         "path": path, "startedAt": int(t0 * 1000),
+                         "title": game_db_title(scope) or self.mgr.xa.window_name(wid) or m.group(1)}
+        log("clip: registrazione avviata (%s, finestra 0x%x, pid %d) -> %s" % (scope, wid, proc.pid, path))
+        return True
+
+    def _signal(self, sig):
+        with self.lock:
+            p = self.proc
+        if p and p.poll() is None:
+            try:
+                p.send_signal(sig)
+                return True
+            except Exception as e:  # noqa
+                log("clip: segnale %s non inviato (%r)" % (sig, e))
+        return False
+
+    def pause(self):
+        with self.lock:
+            if not self.proc or self.paused:
+                return False
+            if self._signal(signal.SIGUSR2):
+                self.active_s += time.time() - (self.seg_t0 or time.time())
+                self.seg_t0, self.paused = None, True
+                log("clip: in pausa (%.0f s registrati)" % self.active_s)
+                return True
+        return False
+
+    def resume(self):
+        with self.lock:
+            if not self.proc or not self.paused:
+                return False
+            if self._signal(signal.SIGUSR2):
+                self.seg_t0, self.paused = time.time(), False
+                log("clip: ripresa")
+                return True
+        return False
+
+    def stop(self, reason, done=None):
+        """Chiude la clip (SIGINT, il file MP4 viene completato) e la archivia in un thread."""
+        with self.lock:
+            if self.pending and not self.proc:
+                log("clip: richiesta annullata (%s)" % reason)
+                self.pending = None
+                return False
+            if not self.proc or self.stopping:
+                return False
+            self.stopping = True
+            proc, info = self.proc, dict(self.info)
+            info["duration"] = round(self.elapsed(), 1)
+            self.seg_t0 = None
+        log("clip: arresto (%s, %.0f s)" % (reason, info["duration"]))
+        threading.Thread(target=self._finish, args=(proc, info, reason, done), daemon=True).start()
+        return True
+
+    def _finish(self, proc, info, reason, done):
+        try:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(CLIP_STOP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                log("clip: il registratore non si chiude, lo termino")
+                proc.kill()
+                proc.wait(5)
+            ok = os.path.isfile(info["path"]) and os.path.getsize(info["path"]) > 0
+            logf = os.path.join(os.path.dirname(info["path"]), info["name"] + ".log")
+            if not ok:
+                tail = ""
+                try:
+                    with open(logf, "rb") as fh:
+                        tail = fh.read()[-400:].decode("utf-8", "replace").strip()
+                except OSError:
+                    pass
+                log("clip: nessun file valido (rc=%s) %s" % (proc.returncode, tail))
+            else:
+                meta = {k: info[k] for k in ("key", "scope", "title", "startedAt", "duration")}
+                meta.update({"file": os.path.basename(info["path"]), "reason": reason,
+                             "size": os.path.getsize(info["path"])})
+                try:
+                    with self.mgr.xa.lock:
+                        g = self.mgr.xa.d.create_resource_object("window", info["wid"]).get_geometry()
+                    meta["width"], meta["height"] = g.width, g.height
+                except Exception:
+                    pass
+                tmp = os.path.join(os.path.dirname(info["path"]), info["name"] + ".json.tmp")
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(meta, fh)
+                os.replace(tmp, os.path.join(os.path.dirname(info["path"]), info["name"] + ".json"))
+                log("clip: salvata nella cache temporanea %s (%.0f s, %d KB)"
+                    % (info["path"], info["duration"], meta["size"] // 1024))
+            try:
+                os.unlink(logf)
+            except OSError:
+                pass
+            prune_clips(CLIP_KEEP)
+            if ok:
+                okd, body = daemon_post("/api/media/clip", {"key": info["key"], "file": os.path.basename(info["path"])})
+                if not okd:
+                    log("clip: notifica al demone non riuscita (%s)" % body.get("message"))
+        except Exception as e:  # noqa
+            log("clip: errore in chiusura (%r)" % (e,))
+            ok = False
+        finally:
+            with self.lock:
+                self.proc, self.info, self.paused, self.stopping = None, None, False, False
+                self.active_s, self.seg_t0 = 0.0, None
+            if done:
+                done(ok)
+
+    def check_exit(self):
+        """Il registratore e' uscito da solo (finestra del gioco chiusa, errore)?"""
+        with self.lock:
+            p = self.proc
+            if not p or self.stopping:
+                return False
+        if p.poll() is not None:
+            self.stop("registratore uscito da solo (rc=%s)" % p.returncode)
+            return True
+        return False
+
+
+def prune_clips(keep):
+    """Tiene solo le `keep` clip temporanee piu' recenti (con i loro .json): la quarta cancella la piu' vecchia."""
+    try:
+        folder = clips_dir()
+        clips = sorted((f for f in os.listdir(folder) if re.fullmatch(r"clip-\d+-[0-9a-f]+\.mp4", f)),
+                       key=lambda f: int(f.split("-")[1]))
+    except Exception as e:  # noqa
+        log("clip: pulizia non riuscita (%r)" % (e,))
+        return
+    for f in clips[:-keep] if keep > 0 else clips:
+        base = f[:-4]
+        for ext in (".mp4", ".json"):
+            try:
+                os.unlink(os.path.join(folder, base + ext))
+            except OSError:
+                pass
+        log("clip: cache piena (max %d), cancellata la piu' vecchia %s" % (keep, f))
+
+
+def capture_window_png(wid, out_path):
+    """Screenshot della sola finestra `wid` in PNG: gpu-screen-recorder (provato sull'HTPC il 14/11/2026:
+    finestra 2560x1440 in ~400 ms), con ripiego su `import` di ImageMagick. (ok, metodo, ms, errore)."""
+    attempts = []
+    if shutil_which("gpu-screen-recorder"):
+        attempts.append(("gpu-screen-recorder", ["gpu-screen-recorder", "-w", "0x%x" % wid, "-o", out_path]))
+    if shutil_which("import"):
+        attempts.append(("import", ["import", "-silent", "-window", "0x%x" % wid, out_path]))
+    if not attempts:
+        return False, None, 0, "ne' gpu-screen-recorder ne' import (ImageMagick) installati"
+    err = ""
+    for name, cmd in attempts:
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               timeout=SCREENSHOT_TIMEOUT_S)
+            ms = int((time.time() - t0) * 1000)
+            if r.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                return True, name, ms, ""
+            err = "%s rc=%s %s" % (name, r.returncode, (r.stderr or b"").decode("utf-8", "replace").strip()[-300:])
+        except Exception as e:  # noqa
+            err = "%s: %r" % (name, e)
+        log("screenshot: %s non riuscito (%s)%s" % (name, err, ", provo il ripiego" if name != attempts[-1][0] else ""))
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+    return False, None, 0, err
+
+
+def shutil_which(cmd):
+    import shutil
+    return shutil.which(cmd)
+
+
+def daemon_post(path, payload, timeout=30):
+    """POST JSON al demone col token (come daemon_kill_unit). (ok, corpo della risposta o messaggio)."""
+    headers = {"Content-Type": "application/json"}
+    try:
+        with open(API_TOKEN_FILE, "r", encoding="utf-8") as f:
+            tok = f.read().strip()
+        if tok:
+            headers["X-XLauncher-Token"] = tok
+    except OSError:
+        pass
+    try:
+        req = urllib.request.Request(DAEMON_URL + path, data=json.dumps(payload).encode("utf-8"),
+                                     headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+        return bool(body.get("success")), body
+    except Exception as e:  # noqa
+        return False, {"message": "%s: %s" % (type(e).__name__, e)}
 
 
 def overlay_enabled_from_env():
@@ -548,6 +1224,7 @@ class Freezer:
         # scongelati insieme (la Dashboard: scope del browser + scope dei suoi figli). Ordine dei membri
         # = ordine di congelamento; lo scongelamento va al contrario.
         self.groups = {}
+        self.frozen_members = {}     # v3.2.17-dev.11 — principale -> membri effettivamente congelati
 
     def set_group(self, primary, members):
         members = [m for m in members if m]
@@ -559,7 +1236,14 @@ class Freezer:
 
     def members(self, scope):
         with self.state_lock:
-            return list(self.groups.get(scope, [scope]))
+            base = list(self.groups.get(scope, [scope]))
+        if scope and scope.startswith(STEAM_SCOPE_PREFIX):
+            # v3.2.17-dev.11 — gioco Steam in uno scope suo (steamrt64): congelato insieme alla sessione,
+            # prima il gioco poi Steam (lo scongelamento va al contrario). Calcolato al momento: il gioco
+            # parte e finisce mentre la sessione resta.
+            extra = [a for a in steam_app_scopes(scope) if a not in base]
+            base = extra + base
+        return base
 
     def freezable(self, scope):
         if not scope:
@@ -577,6 +1261,14 @@ class Freezer:
     def _systemctl(self, verb, scope):
         """freeze/thaw di uno scope o, se e' il principale di un gruppo, di tutti i suoi membri."""
         members = self.members(scope)
+        # v3.2.17-dev.11 — si scongela esattamente cio' che si era congelato (piu' i membri attuali):
+        # i membri dinamici (gioco Steam in uno scope suo) potrebbero non essere piu' trovati dopo
+        with self.state_lock:
+            if verb == "freeze":
+                self.frozen_members[scope] = list(members)
+            else:
+                stored = self.frozen_members.pop(scope, [])
+                members = stored + [m for m in members if m not in stored]
         if verb == "thaw":
             members = list(reversed(members))
         ok = True
@@ -596,7 +1288,13 @@ class Freezer:
             self.errors += 1
             return False
         if r.returncode != 0:
-            log("freezer: %s %s -> codice %d %s" % (verb, scope, r.returncode, (r.stderr or "").strip()[:200]))
+            err = (r.stderr or "").strip()
+            if "not found" in err or "not loaded" in err:
+                # v3.2.17-dev.11 — scope gia' chiuso (es. congelamento programmato appena dopo la chiusura di
+                # Steam dall'overlay): niente da fare, non e' un errore del freezer
+                log("freezer: %s %s: scope no longer exists, skipped" % (verb, scope))
+                return False
+            log("freezer: %s %s -> codice %d %s" % (verb, scope, r.returncode, err[:200]))
             self.errors += 1
             return False
         return True
@@ -685,7 +1383,7 @@ class Freezer:
         try:
             r = subprocess.run([SYSTEMCTL, "--user", "list-units", "--all", "--no-legend", "--plain",
                                 "xlauncher-game-*.scope", "xlauncher-dashboard-*.scope", "xlauncher-steam-*.scope",
-                                "app-org.chromium.Chromium-*.scope"],
+                                "app-org.chromium.Chromium-*.scope", "app-steam-app*.scope"],
                                capture_output=True, text=True, timeout=10)
         except Exception as e:  # noqa
             log("freezer: list-units fallito: %s" % e)
@@ -747,6 +1445,18 @@ class SpacesManager:
         self.bt_pad_in_use = bt_pad_in_use
         self._last_sync = 0.0
         self._last_retry = 0.0
+        self.km_seen = {}                    # v3.2.29-dev.2 — wid -> istante in cui e' stata vista iconificata
+        self.km_hist = {}                    # scope -> istanti delle ultime riattivazioni
+        self.km_pause = {}                   # scope -> fino a quando non riattivare (troppe iconificazioni)
+        self.last_shot = 0.0                 # v3.2.29-dev.3 — ultimo screenshot (anti-ripetizione)
+        self._osd = None                     # v3.2.29-dev.4 — sovrimpressione (overlay.Osd), creata al primo uso
+        self.recorder = Recorder(self)       # v3.2.29-dev.6 — clip
+        self.space_bg = None                 # v3.2.29-dev.17 — sfondo del desktop degli spazi (SpaceBackground)
+        if HAVE_XLIB and space_bg_enabled_from_env():
+            self.space_bg = SpaceBackground()
+            self.space_bg.start()
+        self._rec_osd_next = None           # v3.2.29-dev.9 — secondi di registrazione del prossimo pallino REC
+        self._osd_tried = False
 
     # ----- classificazione
     def describe(self, wid):
@@ -786,10 +1496,18 @@ class SpacesManager:
             if m:
                 kind = "game"
                 scope = "steam-%s" % m.group(1)
+        app_scope = None
+        if kind == "other" and (pid or xpid):
+            # v3.2.17-dev.8 — web app lanciata come gioco (vedi web_app_scopes): e' un gioco a tutti
+            # gli effetti (slot, overlay, copertina dallo scope), congelata come gruppo browser+figli.
+            gscope, ascope = web_app_scopes(pid or xpid)
+            if gscope:
+                kind, scope, app_scope = "game", gscope, ascope
         noise = (not name or bool(NOISE_NAME_RX.search(name)) or g.width <= 10 or g.height <= 10
                  or any(t in IGNORED_TYPES for t in types))
         return {"wid": wid, "name": name, "class": "%s/%s" % (inst, klass), "pid": pid or xpid,
                 "scope": scope, "kind": kind, "noise": noise, "w": g.width, "h": g.height,
+                "app_scope": app_scope,
                 "types": [t.replace("_NET_WM_WINDOW_TYPE_", "") for t in types],
                 "t": time.time(), "tries": 0}
 
@@ -867,6 +1585,10 @@ class SpacesManager:
         if kind != "game" or info["noise"]:
             return
         scope = info["scope"]
+        if info.get("app_scope"):
+            # v3.2.17-dev.8 — web app: browser (finestra, input) e figli congelati insieme, come la Dashboard
+            self.freezer.set_group(scope, [info["app_scope"], scope])
+            log("web app %s: browser in %s, freeze group=%s,%s" % (scope, info["app_scope"], info["app_scope"], scope))
         slot = self.assign_slot(scope)
         if slot is None:
             log("gioco %s: nessuno slot libero (max %d, spazio %d riservato a Steam) — finestra 0x%x lasciata dov'e'"
@@ -1016,6 +1738,8 @@ class SpacesManager:
         with self.lock:
             self.target_space = space
             scope_to = self.scope_for_space(space)
+        self._rec_sync()                     # v3.2.29-dev.6 — clip in pausa prima che il suo gioco si congeli
+        self._space_bg_sync(space)           # v3.2.29-dev.17 — sfondo pronto prima del cambio di desktop
         # scongela il gioco (o la Dashboard) di destinazione PRIMA di mostrarlo
         if scope_to and not thaw_delay and self.freezer.thaw_sync(scope_to):
             time.sleep(THAW_SETTLE_S)
@@ -1157,6 +1881,7 @@ class SpacesManager:
 
     def overlay_opened(self):
         """Overlay appena mostrato: congela il gioco corrente e prende il pad in esclusiva."""
+        self._rec_sync()                     # v3.2.29-dev.6 — clip in pausa prima del congelamento
         with self.lock:
             scope = self.steam_scope if self.target_space == STEAM_SPACE else self.slots.get(self.target_space)
         if scope:
@@ -1174,9 +1899,31 @@ class SpacesManager:
     def overlay_scope_of(self, space):
         return self.scope_for_space(space)
 
+    def overlay_close_space(self, space):
+        """v3.2.17-dev.10 — pulsante rosso con la X dell'overlay: termina il processo dello spazio (gioco,
+        web app come Amazon Luna, o Steam nello spazio 3) passando dal demone, con la STESSA rotta del Gestore
+        dei processi (/api/process-manager/<unit>/kill): li' ci sono gia' lo scongelamento, la chiusura
+        ordinata di Steam e (per le web app) la chiusura del browser. Mai la Dashboard (spazio 0).
+        Prima si scongela qui l'intero gruppo (una web app ha due scope), poi la richiesta.
+        Ritorna (ok, chiave del messaggio dell'overlay)."""
+        if space == 0:
+            return False, "close_na"
+        scope = self.scope_for_space(space)
+        if not scope or not scope.startswith("xlauncher-") or not valid_scope(scope):
+            log("overlay: space %s has no closable scope (%r)" % (space, scope))
+            return False, "close_na"
+        try:
+            self.freezer.thaw_sync(scope)
+        except Exception as e:  # noqa
+            log("overlay: thaw before close of %s failed: %r" % (scope, e))
+        ok, msg = daemon_kill_unit(scope)
+        log("overlay: close space %s (%s) -> %s%s" % (space, scope, "ok" if ok else "FAILED", (" — " + msg) if msg else ""))
+        return ok, (None if ok else "close_failed")
+
     def overlay_closed(self):
         if self.pad_listener:
             self.pad_listener.overlay_grab(False)
+        self._rec_sync()                     # v3.2.29-dev.6 — avvio/ripresa della clip a gioco scongelato
 
     def overlay_release_later(self, scope, delay):
         """After `delay` seconds: thaw the game now in front (if it is still the target and the
@@ -1191,7 +1938,7 @@ class SpacesManager:
                     wanted = self.scope_for_space(self.target_space) == scope
                 if wanted:
                     self.freezer.thaw_sync(scope)
-            self.overlay_closed()
+            self.overlay_closed()            # (riallinea anche la clip: avvio o ripresa)
         threading.Thread(target=work, name="overlay-release", daemon=True).start()
 
     def state(self):
@@ -1303,6 +2050,17 @@ class SpacesManager:
                     log("desktop corrente: %d (prima %d)" % (self.cur_space, self.prev_space))
             if changed:
                 self._align_freeze(c[0])
+                self._space_bg_sync()        # v3.2.29-dev.17 — anche per un cambio di desktop esterno
+
+    def _space_bg_sync(self, space=None):
+        """v3.2.29-dev.17 — sfondo del desktop per lo spazio corrente (o per quello in arrivo).
+        Ogni giro del ciclo: il file dello sfondo puo' arrivare dopo il lancio (download del demone)."""
+        if not self.space_bg:
+            return
+        with self.lock:
+            sp = self.cur_space if space is None else space
+            scope = self.slots.get(sp) if sp not in (0, STEAM_SPACE) else None
+        self.space_bg.request(game_bg_file(scope) if scope else "")
 
     def _prestart_tick(self, now):
         """v3.2.6-dev.4 — Steam in background: congela lo scope appena Big Picture e' pronta (titolo),
@@ -1324,12 +2082,286 @@ class SpacesManager:
                 % ("Big Picture ready" if not late else "timeout", now - t0, title, scope))
             self.freezer.schedule_freeze(scope)
 
+    def _keep_maximized_tick(self, now):
+        """v3.2.29-dev.2 — riattiva la finestra principale di un gioco con `--keep-maximized` ridotta a icona
+        mentre il suo spazio e' quello corrente (e l'overlay e' chiuso). Solo spazi dei giochi (1..NUM_SLOTS)."""
+        with self.lock:
+            space = self.cur_space
+            if space != self.target_space or not (1 <= space <= NUM_SLOTS):
+                self.km_seen.clear()
+                return
+            scope = self.slots.get(space)
+        if not scope or self.overlay_is_open() or not keep_maximized(scope):
+            self.km_seen.clear()
+            return
+        wid = self.space_window(space)
+        if not wid:
+            return
+        try:
+            iconic = window_iconic(self.de, self.de.create_resource_object("window", wid))
+        except Exception:
+            iconic = False
+        if not iconic:
+            self.km_seen.pop(wid, None)
+            return
+        seen = self.km_seen.setdefault(wid, now)
+        if seen == now:
+            log("keep-maximized: finestra 0x%x di %s ridotta a icona nello spazio corrente %d" % (wid, scope, space))
+        if now - seen < KEEP_MAX_DELAY_S:
+            return
+        if now < self.km_pause.get(scope, 0.0):
+            return
+        hist = [t for t in self.km_hist.get(scope, []) if now - t < KEEP_MAX_WINDOW_S]
+        if len(hist) >= KEEP_MAX_RESTORES:
+            self.km_pause[scope] = now + KEEP_MAX_PAUSE_S
+            self.km_hist[scope] = []
+            log("keep-maximized: %s ridotto a icona %d volte in %.0f s — riattivazione sospesa per %.0f s "
+                "(dall'overlay si puo' sempre tornare al gioco)"
+                % (scope, KEEP_MAX_RESTORES, KEEP_MAX_WINDOW_S, KEEP_MAX_PAUSE_S))
+            return
+        hist.append(now)
+        self.km_hist[scope] = hist
+        self.km_seen.pop(wid, None)
+        self.xa.activate(wid)
+        log("keep-maximized: finestra 0x%x di %s riattivata (%d/%d in %.0f s)"
+            % (wid, scope, len(hist), KEEP_MAX_RESTORES, KEEP_MAX_WINDOW_S))
+
+    # ----- v3.2.29-dev.3 — screenshot (tasto Share, v3.2.29-dev.5)
+    def screenshot(self):
+        """Screenshot della finestra del gioco dello spazio corrente (solo spazi 1..NUM_SLOTS, overlay chiuso,
+        nessun cambio di spazio in corso). La cattura e l'invio al demone girano in un thread: il pad resta libero."""
+        now = time.time()
+        with self.lock:
+            space, target = self.cur_space, self.target_space
+            scope = self.slots.get(space) if 1 <= space <= NUM_SLOTS else None
+        if space != target or not scope:
+            why = ("Steam ha i suoi screenshot" if space == STEAM_SPACE else
+                   "cambio di spazio in corso" if space != target else "non e' lo spazio di un gioco")
+            log("screenshot ignorato: spazio %s (%s)" % (space, why))
+            return False
+        if self.overlay_is_open():
+            return False
+        if now - self.last_shot < SCREENSHOT_MIN_INTERVAL_S:
+            return False
+        wid = self.space_window(space)
+        m = re.match(r"^xlauncher-game-(.+)-(\d+)(?:\.scope)?$", scope)
+        if not wid or not m:
+            log("screenshot ignorato: nessuna finestra o scope non riconosciuto (%s)" % scope)
+            return False
+        self.last_shot = now
+        threading.Thread(target=self._screenshot_work, args=(wid, m.group(1), scope, now), daemon=True).start()
+        return True
+
+    # ----- v3.2.29-dev.6 — tasto Share e clip
+    def share_short(self):
+        """Share premuto brevemente: ferma la clip in corso, altrimenti screenshot."""
+        if self.recorder.busy():
+            self.clip_stop("Share")
+        else:
+            self.screenshot()
+
+    def share_hold(self):
+        """Share tenuto premuto: avvia la clip nello spazio corrente (o la ferma se e' in corso)."""
+        if self.recorder.busy():
+            self.clip_stop("Share")
+            return
+        with self.lock:
+            space = self.cur_space
+        self.clip_request(space, "Share")
+
+    def clip_request(self, space, origin):
+        """Avvio di una clip nello spazio `space` (1..NUM_SLOTS): parte appena lo spazio e' davanti,
+        scongelato e senza overlay (dall'overlay: dopo la chiusura). Una clip alla volta."""
+        with self.lock:
+            scope = self.slots.get(space) if 1 <= space <= NUM_SLOTS else None
+        if not scope:
+            log("clip ignorata (%s): spazio %s %s" % (origin, space, "(Steam ha le sue registrazioni)"
+                                                     if space == STEAM_SPACE else "(non e' lo spazio di un gioco)"))
+            return False
+        if self.recorder.busy():
+            if self.recorder.recording_space() == space:
+                return True
+            self.clip_stop("nuova clip in un altro spazio")
+        with self.recorder.lock:
+            self.recorder.pending = (space, scope)
+        log("clip richiesta (%s) per lo spazio %d (%s)" % (origin, space, scope))
+        self._rec_sync()
+        return True
+
+    def clip_stop(self, origin):
+        with self.lock:
+            space = self.cur_space
+        stopped = self.recorder.stop(origin, done=lambda ok: self._clip_done(ok, space))
+        self._rec_osd(False)
+        return stopped
+
+    def _clip_done(self, ok, space):
+        osd = self.osd()
+        if osd and ok:
+            osd.flash(None, "osd_rec_done")
+
+    def _rec_osd(self, on):
+        """v3.2.29-dev.9 — on=True all'avvio della clip: pallino REC per REC_OSD_SHOW_S, poi di nuovo ogni
+        REC_OSD_EVERY_S secondi di registrazione effettiva (_rec_osd_tick). on=False (pausa, arresto):
+        il messaggio eventualmente a schermo sparisce subito; all'arresto il conteggio si azzera."""
+        osd = self.osd()
+        if on:
+            self._rec_osd_next = REC_OSD_EVERY_S
+            if osd:
+                osd.flash("rec", "osd_rec_hint", REC_OSD_SHOW_S)
+        else:
+            if self._rec_osd_next is not None and osd:
+                osd.hide()
+            if self.recorder.proc is None or self.recorder.stopping:
+                self._rec_osd_next = None
+
+    def _rec_osd_tick(self):
+        """Pallino REC periodico: ogni REC_OSD_EVERY_S secondi di registrazione (le pause non contano)."""
+        if self._rec_osd_next is None:
+            return
+        rec = self.recorder
+        if rec.paused or rec.proc is None or rec.stopping:
+            return
+        if rec.elapsed() >= self._rec_osd_next:
+            self._rec_osd_next += REC_OSD_EVERY_S
+            osd = self.osd()
+            if osd:
+                osd.flash("rec", "osd_rec_hint", REC_OSD_SHOW_S)
+
+    def _rec_space_live(self, space, scope):
+        """Lo spazio della clip e' davanti, fermo (nessun cambio in corso), senza overlay e scongelato?"""
+        with self.lock:
+            ok = self.cur_space == space and self.target_space == space and self.slots.get(space) == scope
+        if not ok or self.overlay_is_open():
+            return False
+        with self.freezer.state_lock:
+            return scope not in self.freezer.frozen
+
+    def _rec_sync(self):
+        """Allinea la clip allo stato degli spazi: avvio in attesa, pausa, ripresa, limite di durata,
+        gioco chiuso. Chiamata dal ciclo principale e dagli agganci di spazi e overlay."""
+        rec = self.recorder
+        if rec.check_exit():
+            self._rec_osd(False)
+            return
+        with rec.lock:
+            pending, info, stopping = rec.pending, rec.info, rec.stopping
+        if stopping:
+            return
+        if pending:
+            space, scope = pending
+            with self.lock:
+                still = self.slots.get(space) == scope
+            if not still:
+                rec.stop("gioco chiuso prima dell'avvio")
+                return
+            if self._rec_space_live(space, scope):
+                wid = self.space_window(space)
+                if wid and rec.start(space, scope, wid):
+                    self._rec_osd(True)
+                else:
+                    with rec.lock:
+                        rec.pending = None
+            return
+        if not info:
+            return
+        with self.lock:
+            still = self.slots.get(info["space"]) == info["scope"]
+        if not still:
+            self.clip_stop("gioco chiuso")
+            return
+        if rec.elapsed() >= CLIP_MAX_S:
+            log("clip: raggiunti %d s" % CLIP_MAX_S)
+            self.clip_stop("durata massima")
+            return
+        live = self._rec_space_live(info["space"], info["scope"])
+        if live and rec.paused:
+            rec.resume()                     # v3.2.29-dev.9 — alla ripresa nessun messaggio: torna al prossimo multiplo di 30 s
+        elif not live and not rec.paused:
+            rec.pause()
+            self._rec_osd(False)
+        elif live:
+            self._rec_osd_tick()
+
+    def clip_status(self):
+        """Per l'overlay: {"space", "elapsed", "paused", "pending"} della clip, o None."""
+        return self.recorder.status()
+
+    def overlay_rec(self, space):
+        """Pulsante Rec dell'overlay: ferma la clip di quello spazio se e' in corso (True, False), altrimenti
+        la richiede (False, ok): partira' dopo la chiusura dell'overlay, a spazio scongelato."""
+        if self.recorder.busy() and self.recorder.recording_space() == space:
+            self.clip_stop("overlay")
+            return True, True
+        return False, self.clip_request(space, "overlay")
+
+    def clip_shutdown(self):
+        """Uscita di spaces.py: la clip in corso viene chiusa (il file MP4 resta valido)."""
+        with self.recorder.lock:
+            p = self.recorder.proc
+        if p and p.poll() is None:
+            try:
+                p.send_signal(signal.SIGINT)
+                p.wait(CLIP_STOP_TIMEOUT_S)
+            except Exception:
+                pass
+
+    def osd(self):
+        """v3.2.29-dev.4 — sovrimpressione in alto a destra (overlay.Osd), indipendente dall'overlay degli
+        spazi: se overlay.py manca o non si carica, screenshot e clip funzionano senza messaggi a schermo."""
+        if not self._osd_tried:
+            self._osd_tried = True
+            try:
+                import overlay as _ov
+                self._osd = _ov.Osd(log)
+                log("osd: %s" % ("ready" if self._osd.available else "NOT available (Pillow/python-xlib)"))
+            except Exception as e:  # noqa
+                self._osd = None
+                log("osd: module not loadable (%r) -> no on-screen messages" % (e,))
+        return self._osd if (self._osd and self._osd.available) else None
+
+    def _screenshot_work(self, wid, key, scope, taken):
+        try:
+            staging = media_staging_dir()
+        except Exception as e:  # noqa
+            log("screenshot: cartella di appoggio non disponibile (%r)" % (e,))
+            return
+        name = "shot-%d-%s.png" % (int(taken * 1000), os.urandom(3).hex())
+        out = os.path.join(staging, name)
+        osd = self.osd()
+        if osd:
+            osd.hide(wait=True)              # un messaggio ancora a schermo non deve finire nello scatto
+        ok, method, ms, err = capture_window_png(wid, out)
+        if not ok:
+            log("screenshot di %s fallito: %s" % (scope, err))
+            return
+        log("screenshot di %s: finestra 0x%x catturata con %s in %d ms" % (scope, wid, method, ms))
+        if osd:
+            osd.flash("screenshot", "osd_screenshot")
+        ok, body = daemon_post("/api/media/screenshot", {"key": key, "file": name, "takenAt": int(taken * 1000)})
+        if ok:
+            log("screenshot salvato: %s" % body.get("path"))
+        else:
+            log("screenshot: il demone non l'ha archiviato (%s) — resta in %s" % (body.get("message"), out))
+
     def _tick(self):
         now = time.time()
         try:
             self._prestart_tick(now)
         except Exception as e:  # noqa
             log("Steam prestart: check failed (%r)" % (e,))
+        try:
+            self._keep_maximized_tick(now)
+        except Exception as e:  # noqa
+            log("keep-maximized: check failed (%r)" % (e,))
+        try:
+            self._rec_sync()
+        except Exception as e:  # noqa
+            log("clip: check failed (%r)" % (e,))
+        try:
+            self._space_bg_sync()
+        except Exception as e:  # noqa
+            log("space background: check failed (%r)" % (e,))
         if now - self._last_sync > 5.0:
             self.sync_clients()
         if now - self._last_retry > 1.0:
@@ -1440,23 +2472,37 @@ class ControlServer(threading.Thread):
 
 
 # --------------------------------------------------------------------------- controller (evdev)
-def list_pads():
-    """Controller riconosciuti dal kernel (hanno un handler jsN): [(nome, /dev/input/eventN)]."""
-    pads = []
+def _input_blocks():
     try:
-        blocks = open("/proc/bus/input/devices").read().strip().split("\n\n")
+        return open(os.environ.get("XL_SPACES_TEST_INPUT_DEVICES", "/proc/bus/input/devices")).read().strip().split("\n\n")
     except Exception:
-        blocks = []
-    for b in blocks:
+        return []
+
+
+def list_pads():
+    """Controller riconosciuti dal kernel (hanno un handler jsN): [(nome, /dev/input/eventN)].
+    v3.2.29-dev.5 — in piu', marcati come ("nome", percorso, "share"), i device "tastiera" dello stesso
+    controller (stesso Uniq, o stesso Phys se l'Uniq manca) che portano il tasto Share (KEY_F12 di
+    xpadneo): letti solo per quel tasto, mai presi in esclusiva."""
+    pads, uniqs, shares = [], set(), []
+    for b in _input_blocks():
         name = re.search(r'N: Name="(.*)"', b)
         hand = re.search(r"H: Handlers=(.*)", b)
         if not hand:
             continue
+        uniq = (re.search(r"U: Uniq=(.*)", b) or [None, ""])[1].strip()
+        phys = (re.search(r"P: Phys=(.*)", b) or [None, ""])[1].strip()
         toks = hand.group(1).split()
+        ev = [t for t in toks if re.fullmatch(r"event\d+", t)]
+        if not ev:
+            continue
+        label = name.group(1) if name else "?"
         if any(re.fullmatch(r"js\d+", t) for t in toks):
-            ev = [t for t in toks if re.fullmatch(r"event\d+", t)]
-            if ev:
-                pads.append((name.group(1) if name else "?", "/dev/input/" + ev[0]))
+            pads.append((label, "/dev/input/" + ev[0]))
+            uniqs.add(uniq or ("phys:" + phys))
+        elif "kbd" in toks and re.search(r"keyboard", label, re.I):
+            shares.append((label, "/dev/input/" + ev[0], uniq or ("phys:" + phys)))
+    pads += [(n, p, "share") for n, p, u in shares if u and u in uniqs]
     test = os.environ.get("XL_SPACES_TEST_PAD")
     if test:
         pads.append(("test-pad", test))
@@ -1482,6 +2528,10 @@ class PadListener(threading.Thread):
         self.fds = {}                       # fd -> (nome, percorso)
         self.sel = self.l1 = self.r1 = False
         self.hat = 0
+        self.hat_y = 0                      # v3.2.29-dev.3 — D-pad verticale (conta per "tasti rilasciati")
+        self.share_fds = set()              # v3.2.29-dev.5 — device letti solo per il tasto Share
+        self.share_down = None              # istante della pressione di Share, se premuto
+        self.share_hold_fired = False
         self.wake_latched = False
         self.last_hotkey = 0.0
         # overlay (dev.1 del ciclo 2.7.2)
@@ -1502,6 +2552,9 @@ class PadListener(threading.Thread):
     def _reset(self):
         self.sel = self.l1 = self.r1 = False
         self.hat = 0
+        self.hat_y = 0
+        self.share_down = None
+        self.share_hold_fired = False
         self.wake_latched = False
         self.pressed.clear()
         self.stick = {ABS_X: 0, ABS_Y: 0}
@@ -1509,13 +2562,15 @@ class PadListener(threading.Thread):
 
     def _rescan(self):
         pads = list_pads()
-        paths = {p for _, p in pads}
+        paths = {e[1] for e in pads}
         for fd, (n, p) in list(self.fds.items()):
             if p not in paths:
                 log("controller scollegato: %s" % n)
                 self._close(fd)
         have = {p for _, p in self.fds.values()}
-        for n, p in pads:
+        for entry in pads:
+            n, p = entry[0], entry[1]
+            share_only = len(entry) > 2 and entry[2] == "share"
             if p in have:
                 continue
             try:
@@ -1524,7 +2579,9 @@ class PadListener(threading.Thread):
                 log("controller %s (%s): impossibile aprire il device: %s" % (n, p, e))
                 continue
             self.fds[fd] = (n, p)
-            log("controller collegato: %s (%s)" % (n, p))
+            if share_only:
+                self.share_fds.add(fd)
+            log("controller collegato: %s (%s)%s" % (n, p, " — solo il tasto Share" if share_only else ""))
 
     def _close(self, fd):
         try:
@@ -1532,6 +2589,7 @@ class PadListener(threading.Thread):
         except OSError:
             pass
         self.fds.pop(fd, None)
+        self.share_fds.discard(fd)
         if not self.fds:
             self.grabbed = False
         self._reset()
@@ -1548,6 +2606,25 @@ class PadListener(threading.Thread):
             self.mgr.overlay_key("right" if direction > 0 else "left")
         elif self.sel:
             self._hotkey(lambda: self.mgr.overlay_or_cycle(direction))
+
+    # ----- v3.2.29-dev.5 — tasto Share: breve = screenshot, tenuto = clip (step 2b)
+    def _share(self, value):
+        now = time.time()
+        if value == 1:
+            if self.share_down is None:
+                self.share_down, self.share_hold_fired = now, False
+        elif value == 0 and self.share_down is not None:
+            held = now - self.share_down
+            fired = self.share_hold_fired
+            self.share_down, self.share_hold_fired = None, False
+            if not fired and held < SHARE_HOLD_S and not self.mgr.overlay_is_open():
+                self.mgr.share_short()
+
+    def _share_tick(self):
+        if self.share_down is not None and not self.share_hold_fired and time.time() - self.share_down >= SHARE_HOLD_S:
+            self.share_hold_fired = True
+            if not self.mgr.overlay_is_open():
+                self.mgr.share_hold()
 
     # ----- overlay: tasti, levetta, presa esclusiva
     def _range(self, fd, code):
@@ -1616,11 +2693,13 @@ class PadListener(threading.Thread):
             self._grab_tick_locked()
 
     def _all_up(self):
-        return not self.pressed and self.hat == 0
+        return not self.pressed and self.hat == 0 and self.hat_y == 0
 
     def _do_grab(self, on):
         failed = None
         for fd in list(self.fds):
+            if fd in self.share_fds:
+                continue                    # v3.2.29-dev.5 — il device "tastiera" del tasto Share mai in esclusiva
             try:
                 self._ioctl(fd, EVIOCGRAB, 1 if on else 0)
             except OSError as e:
@@ -1647,6 +2726,13 @@ class PadListener(threading.Thread):
                 self.release_since = None
 
     def _event(self, t, code, value, fd=None):
+        if fd is not None and fd in self.share_fds:
+            # device "tastiera" del controller: conta solo Share (KEY_F12), tutto il resto e' ignorato
+            if t == EV_KEY and code in SHARE_KEYS and value in (0, 1):
+                self._share(value)
+            return
+        if t == EV_KEY and code == KEY_RECORD and value in (0, 1):
+            self._share(value)             # Share sul pad stesso (driver xpad)
         if t == EV_KEY:
             if value == 1:
                 self.pressed.add(code)
@@ -1670,6 +2756,8 @@ class PadListener(threading.Thread):
                 self.hat = value
                 if value in (-1, 1):
                     self._dpad(value)
+        elif t == EV_ABS and code == ABS_HAT0Y:
+            self.hat_y = value
         if self.mgr.overlay_is_open():
             self._overlay_extra(t, code, value, fd)
         self._grab_tick()
@@ -1687,7 +2775,8 @@ class PadListener(threading.Thread):
             if not self.fds:
                 time.sleep(1.0)
                 continue
-            fast = bool(self.rep_action or self.release_since is not None or (self.grab_wanted and not self.grabbed))
+            fast = bool(self.rep_action or self.release_since is not None or (self.grab_wanted and not self.grabbed)
+                        or self.share_down is not None)
             try:
                 r, _, _ = select.select(list(self.fds), [], [], 0.05 if fast else 0.5)
             except (OSError, ValueError):
@@ -1713,6 +2802,7 @@ class PadListener(threading.Thread):
                         except Exception as e:  # noqa
                             log("errore nella gestione di un evento del pad: %r" % (e,))
             try:
+                self._share_tick()
                 self._repeat_tick()
                 self._grab_tick()
             except Exception as e:  # noqa
@@ -1733,6 +2823,10 @@ def run_forever():
     mgr.init_overlay()
 
     def _cleanup():
+        try:
+            mgr.clip_shutdown()              # v3.2.29-dev.6 — la clip in corso resta un MP4 valido
+        except Exception:
+            pass
         try:
             if mgr.overlay_is_open():
                 mgr.overlay.abort()

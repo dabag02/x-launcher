@@ -107,7 +107,16 @@ export type EngineEvent =
   // `tips` arriva già nella lingua corretta (localizzato dal chiamante,
   // non qui — stesso principio di localizedSolution in knowledgeBase.ts).
   | { type: 'launcher-troubleshooting-tips'; launcherName: string; gameId: string; gameTitle: string; tips: string[] }
-  | { type: 'system';             message: string; level: 'info' | 'warning' | 'error' };
+  | { type: 'system';             message: string; level: 'info' | 'warning' | 'error' }
+  // v3.2.29-dev.3 — screenshot archiviato (mediaLibrary.ts): una sola notifica per gioco, col conteggio
+  | { type: 'media-screenshot';   gameId: string; gameTitle: string; folder: string }
+  // v3.2.29-dev.6 — clip chiusa nella cache temporanea: una notifica per gioco, col numero di clip in attesa
+  | { type: 'media-clip';         gameId: string; gameTitle: string; count: number }
+  // v3.2.29-dev.7 — esito del salvataggio di una clip temporanea dalla sezione Multimedia
+  | { type: 'media-clip-saved';   gameId: string; gameTitle: string; ok: boolean; quality: string; error?: string }
+  // v3.2.29-dev.13 — esito di una condivisione (src/backend/share/registry.ts)
+  | { type: 'share-result'; gameId: string; gameTitle: string; ok: boolean; provider: string; providerName: string;
+      jobId: string; url?: string; code?: string; isPrivate: boolean };
 
 // ---------------------------------------------------------------------------
 // NotificationStore — SQLite
@@ -169,6 +178,12 @@ class NotificationStore {
 
   updateStatus(id: string, status: NotificationStatus): void {
     this.db.prepare(`UPDATE notifications SET status = ? WHERE id = ?`).run(status, id);
+  }
+
+  /** v3.2.29-dev.3 — stato di una notifica (undefined se non esiste). */
+  getStatus(id: string): NotificationStatus | undefined {
+    const row = this.db.prepare(`SELECT status FROM notifications WHERE id = ?`).get(id) as { status: NotificationStatus } | undefined;
+    return row?.status;
   }
 
   getRecent(limit = 100): StoredNotification[] {
@@ -248,7 +263,9 @@ class NotificationEngine {
     this.listeners.forEach(l => l(event));
     const notif = this.eventToNotification(event);
     if (!notif) return;
-    this.push(notif);
+    // v3.2.29-dev.3 — gli screenshot sostituiscono la notifica precedente dello stesso gioco (stesso
+    // titolo, conteggio nel corpo): la dedup a 30 s per titolo la scarterebbe.
+    this.push(notif, event.type !== 'media-screenshot' && event.type !== 'media-clip' && event.type !== 'media-clip-saved' && event.type !== 'share-result');
 
     // v0.99.90 — Step 15d, collegamento finale: se la KB locale non ha
     // trovato nulla per un errore di download/lancio (riconoscibile qui
@@ -390,9 +407,9 @@ class NotificationEngine {
 
   // ── Privato ──────────────────────────────────────────────────────────────
 
-  private push(notif: StoredNotification) {
+  private push(notif: StoredNotification, dedup = true) {
     const fingerprint = `${notif.type}:${notif.title}:${notif.game_id ?? ''}`;
-    if (this.queue.isDuplicate(fingerprint)) return;
+    if (dedup && this.queue.isDuplicate(fingerprint)) return;
 
     // v0.99.38 — FIX CRASH: better-sqlite3 con parametri nominati
     // (@raw_log, @primary_action, ecc.) richiede che la CHIAVE esista
@@ -459,9 +476,111 @@ class NotificationEngine {
     }
   }
 
+  // v3.2.29-dev.3 — notifica degli screenshot ancora aperta per ogni gioco (id e conteggio)
+  private mediaShotBatches = new Map<string, { id: string; count: number }>();
+  // v3.2.29-dev.6 — notifica delle clip temporanee ancora aperta per ogni gioco
+  private mediaClipNotif = new Map<string, string>();
+
   private eventToNotification(event: EngineEvent): StoredNotification | null {
     const lang = readAppConfig().language;
     switch (event.type) {
+
+      case 'share-result': {
+        // Riuscita: «Mostra QR del link» apre il QR del video nella Dashboard (handler show_qr).
+        // Non riuscita: «Riprova» ripete l'invio con gli stessi testi (handler share_retry).
+        const en = lang === 'en';
+        const why: Record<string, [string, string]> = {
+          'quota':          ['Daily upload quota of the Google Cloud project used up: try again tomorrow.', 'Quota giornaliera di caricamenti del progetto Google Cloud esaurita: riprova domani.'],
+          'upload-limit':   ['YouTube upload limit reached for this channel: try again later.', 'Limite di caricamenti del canale raggiunto: riprova più tardi.'],
+          'not-connected':  ['The account is no longer connected: sign in again from Share.', 'L\'account non è più collegato: accedi di nuovo da Condividi.'],
+          'no-channel':     ['The Google account has no YouTube channel.', 'L\'account Google non ha un canale YouTube.'],
+          'network':        ['Connection lost during the upload.', 'Connessione persa durante il caricamento.'],
+          'source-missing': ['The file is no longer available.', 'Il file non è più disponibile.'],
+          'watermark-failed': ['The watermark could not be applied (details in the daemon log).', 'Non è stato possibile applicare la filigrana (dettagli nel log del demone).'],
+        };
+        const reason = event.code ? (why[event.code]?.[en ? 0 : 1] ?? (en ? `Error: ${event.code}.` : `Errore: ${event.code}.`)) : '';
+        return {
+          id: this.mkId(), type: event.ok ? 'success' : 'error', status: 'pending',
+          title: event.ok
+            ? (en ? `Shared on ${event.providerName} — ${event.gameTitle}` : `Condiviso su ${event.providerName} — ${event.gameTitle}`)
+            : (en ? `Sharing failed — ${event.gameTitle}` : `Condivisione non riuscita — ${event.gameTitle}`),
+          body: event.ok
+            ? (event.isPrivate
+                ? (en ? `Uploaded as a private video: ${event.url}` : `Caricato come video privato: ${event.url}`)
+                : (en ? `Published: ${event.url}` : `Pubblicato: ${event.url}`))
+            : `${event.providerName} · ${reason}`,
+          game_id: event.gameId || null, game_title: event.gameTitle || null,
+          primary_action: event.ok
+            ? JSON.stringify({ label: en ? 'Show link QR code' : 'Mostra QR del link', handler: 'show_qr', params: { url: event.url, title: event.gameTitle } })
+            : JSON.stringify({ label: en ? 'Retry' : 'Riprova', handler: 'share_retry', params: { jobId: event.jobId } }),
+          source: 'system', created_at: this.now(),
+        };
+      }
+
+      case 'media-clip-saved':
+        return {
+          id: this.mkId(), type: event.ok ? 'success' : 'error', status: 'pending',
+          title: event.ok
+            ? (lang === 'en' ? `Clip saved — ${event.gameTitle}` : `Clip salvata — ${event.gameTitle}`)
+            : (lang === 'en' ? `Clip not saved — ${event.gameTitle}` : `Clip non salvata — ${event.gameTitle}`),
+          body: event.ok
+            ? (lang === 'en' ? `Saved in the game's Clip folder (${event.quality === 'native' ? 'native resolution' : event.quality}).`
+                             : `Salvata nella cartella Clip del gioco (${event.quality === 'native' ? 'risoluzione nativa' : event.quality}).`)
+            : (event.error || (lang === 'en' ? 'Conversion failed.' : 'Conversione non riuscita.')),
+          game_id: event.gameId, game_title: event.gameTitle,
+          primary_action: JSON.stringify({ label: lang === 'en' ? 'Open Multimedia' : 'Apri Multimedia', handler: 'open_section', params: { section: 'multimedia' } }),
+          source: 'system', created_at: this.now(),
+        };
+
+      case 'media-clip': {
+        // Come gli screenshot: una sola notifica per gioco, sostituita a ogni clip (il conteggio è quello
+        // reale delle clip temporanee del gioco, la cache ne tiene al massimo 3 in tutto).
+        // v3.2.29-dev.7 — conteggio 0 (clip salvate o scartate dalla sezione Multimedia): la notifica sparisce.
+        const prevId = this.mediaClipNotif.get(event.gameId);
+        if (prevId && this.store.getStatus(prevId) === 'pending') this.store.updateStatus(prevId, 'dismissed');
+        if (event.count <= 0) {
+          this.mediaClipNotif.delete(event.gameId);
+          if (prevId) this.broadcast?.('notification-dismissed', { id: prevId });
+          return null;
+        }
+        const id = this.mkId();
+        this.mediaClipNotif.set(event.gameId, id);
+        const n = Math.max(1, event.count);
+        return {
+          id, type: 'success', status: 'pending',
+          title: lang === 'en' ? `Clips to review — ${event.gameTitle}` : `Clip da rivedere — ${event.gameTitle}`,
+          body: lang === 'en'
+            ? `${n === 1 ? '1 temporary clip' : `${n} temporary clips`} waiting. Unsaved clips are deleted at shutdown; the cache keeps at most 3.`
+            : `${n === 1 ? '1 clip temporanea' : `${n} clip temporanee`} in attesa. Le clip non salvate si cancellano allo spegnimento; la cache ne tiene al massimo 3.`,
+          game_id: event.gameId, game_title: event.gameTitle,
+          primary_action: JSON.stringify({ label: lang === 'en' ? 'Open Multimedia' : 'Apri Multimedia', handler: 'open_section', params: { section: 'multimedia' } }),
+          source: 'system', created_at: this.now(),
+        };
+      }
+
+      case 'media-screenshot': {
+        // Una sola notifica per gioco: se la precedente non è stata ancora chiusa dall'utente il
+        // conteggio prosegue e la vecchia viene archiviata (la Dashboard sostituisce già le notifiche
+        // in attesa con lo stesso gioco e lo stesso titolo); chiusa quella, si riparte da 1.
+        const prev = this.mediaShotBatches.get(event.gameId);
+        let count = 1;
+        if (prev && this.store.getStatus(prev.id) === 'pending') {
+          count = prev.count + 1;
+          this.store.updateStatus(prev.id, 'dismissed');
+        }
+        const id = this.mkId();
+        this.mediaShotBatches.set(event.gameId, { id, count });
+        return {
+          id, type: 'success', status: 'pending',
+          title: lang === 'en' ? `New screenshots — ${event.gameTitle}` : `Nuovi screenshot — ${event.gameTitle}`,
+          body: lang === 'en'
+            ? (count === 1 ? '1 new screenshot saved in the Multimedia folder.' : `${count} new screenshots saved in the Multimedia folder.`)
+            : (count === 1 ? '1 nuovo screenshot salvato nella cartella Multimedia.' : `${count} nuovi screenshot salvati nella cartella Multimedia.`),
+          game_id: event.gameId, game_title: event.gameTitle,
+          primary_action: JSON.stringify({ label: lang === 'en' ? 'Open Multimedia' : 'Apri Multimedia', handler: 'open_section', params: { section: 'multimedia' } }),
+          source: 'system', created_at: this.now(),
+        };
+      }
 
       case 'download-completed':
         return {

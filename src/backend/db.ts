@@ -30,6 +30,7 @@ import { writeLog } from './logger';
 import { sanitizeCompatRow } from './restoreSafety';
 import { hardenDataPermissions } from './dataPermissions';
 import { encryptSecret, decryptSecret, isEncryptedSecret } from './secretBox';
+import { estimateInstallDate } from './installDate';
 
 // ---------------------------------------------------------------------------
 // Percorso DB
@@ -367,6 +368,35 @@ if (!existingCols.includes('store_install_unavailable')) {
 if (!existingCols.includes('remaster_enabled')) {
   db.exec("ALTER TABLE games ADD COLUMN remaster_enabled INTEGER NOT NULL DEFAULT 0");
 }
+// v3.2.17-dev.2 — data di installazione davvero tracciata (ordinamento
+// "Installazione" della libreria). Fino a qui installed_at esisteva nello
+// schema ma la valorizzava solo Steam, con il LastUpdated del manifest
+// (data dell'ultimo AGGIORNAMENTO, non dell'installazione), e l'upsert la
+// sovrascriveva a ogni sync: per tutti gli altri store restava NULL e
+// l'ordinamento finiva di fatto alfabetico.
+// installed_at_source dice da dove viene il valore:
+//   'event'      — installazione completata dalla Dashboard (updateGameStatus)
+//   'plugin'     — fornito dal plugin dello store (birthtime della cartella
+//                  di installazione: Steam, Epic)
+//   'filesystem' — stimato dalla birthtime dell'eseguibile/ROM in DB
+//   'first-seen' — nessuna fonte: data della prima sync che l'ha visto installato
+// Alla prima apertura dopo l'aggiornamento i vecchi valori (LastUpdated di
+// Steam) vengono azzerati una volta sola, così la prossima sync li ricalcola
+// tutti con le nuove regole.
+if (!existingCols.includes('installed_at_source')) {
+  db.exec("ALTER TABLE games ADD COLUMN installed_at_source TEXT");
+  db.exec("UPDATE games SET installed_at = NULL");
+}
+// v3.2.29-dev.1 — quando una SYNC segnala un gioco come disinstallato (anche
+// per errore: legendary in timeout, store che risponde a metà), data e fonte
+// di installazione si conservano e qui si annota l'ora della disinstallazione.
+// Se il gioco torna installato entro INSTALL_DATE_RESTORE_WINDOW_MS (vedi
+// upsertGame) riprende la data di prima. Le disinstallazioni fatte dalla
+// Dashboard (updateGameStatus) azzerano tutto subito, come prima.
+// Nessun azzeramento dei dati esistenti: la colonna parte NULL.
+if (!existingCols.includes('uninstalled_at')) {
+  db.exec("ALTER TABLE games ADD COLUMN uninstalled_at TEXT");
+}
 // v1.1.108-dev.1: budget token per-provider (sostituisce l'unico numero
 // globale precedente, vedi appConfig.ts) + tracciamento mese già avvisato
 // alla soglia 80%.
@@ -503,7 +533,10 @@ function rowToGame(row: GameRow): Game {
     genres:         JSON.parse(row.genres     ?? '[]'),
     categories:     JSON.parse(row.categories ?? '[]'),
     rating:         row.rating       ?? undefined,
-    installedAt:    row.installed_at ?? undefined,
+    // v3.2.29-dev.1 — la data resta nel DB anche dopo una disinstallazione
+    // segnalata da una sync (vedi uninstalled_at), ma si espone solo per i
+    // giochi installati: ordinamento e UI restano quelli di prima.
+    installedAt:    row.is_installed === 1 ? (row.installed_at ?? undefined) : undefined,
     releaseDate:    row.release_date ?? undefined,
     status:         row.status as Game['status'],
     trailerUrl:     row.trailer_url  ?? undefined,
@@ -586,7 +619,7 @@ const stmtUpsertGame = db.prepare(`
   INSERT INTO games (
     id, title, store, runner, is_installed, play_time_hours,
     cover_image, preview_image, description, tags, genres, categories,
-    rating, installed_at, release_date, status, trailer_url,
+    rating, installed_at, installed_at_source, release_date, status, trailer_url,
     executable_path, steam_app_id, dosbox_conf, libretro_core, scummvm_id,
     scrape_title,
     system,
@@ -596,7 +629,7 @@ const stmtUpsertGame = db.prepare(`
   ) VALUES (
     @id, @title, @store, @runner, @isInstalled, @playTimeHours,
     @coverImage, @previewImage, @description, @tags, @genres, @categories,
-    @rating, @installedAt, @releaseDate, @status, @trailerUrl,
+    @rating, @installedAt, @installedAtSource, @releaseDate, @status, @trailerUrl,
     @executablePath, @steamAppId, @dosboxConf, @libretroCore, @scummvmId,
     @scrapeTitle,
     @system,
@@ -657,7 +690,31 @@ const stmtUpsertGame = db.prepare(`
     genres           = COALESCE(NULLIF(NULLIF(games.genres, ''), '[]'), excluded.genres),
     categories       = excluded.categories,
     rating           = CASE WHEN games.rating > 0 THEN games.rating ELSE excluded.rating END,
-    installed_at     = excluded.installed_at,
+    -- v3.2.17-dev.2 — la data di installazione si fissa UNA volta, alla
+    -- transizione non installato → installato, e si conserva alle sync
+    -- successive. Il valore nuovo (excluded) è già calcolato in
+    -- upsertGame() lato JS.
+    -- v3.2.29-dev.1 — una sync che segnala il gioco come disinstallato NON
+    -- azzera più data e fonte (poteva essere un errore dello store): si
+    -- conservano e uninstalled_at annota il momento. Al ritorno installato,
+    -- upsertGame() decide se riprenderle (entro la finestra) o ricalcolarle.
+    -- Per un gioco non installato la data resta nel DB ma non viene esposta
+    -- (rowToGame), quindi non entra negli ordinamenti.
+    installed_at     = CASE
+                         WHEN excluded.is_installed = 0 THEN games.installed_at
+                         WHEN games.is_installed = 1 AND games.installed_at IS NOT NULL THEN games.installed_at
+                         ELSE excluded.installed_at
+                       END,
+    installed_at_source = CASE
+                         WHEN excluded.is_installed = 0 THEN games.installed_at_source
+                         WHEN games.is_installed = 1 AND games.installed_at IS NOT NULL THEN games.installed_at_source
+                         ELSE excluded.installed_at_source
+                       END,
+    uninstalled_at   = CASE
+                         WHEN excluded.is_installed = 1 THEN NULL
+                         WHEN games.is_installed = 1 THEN @nowIso
+                         ELSE games.uninstalled_at
+                       END,
     release_date     = excluded.release_date,
     -- v0.99.35 — bug confermato (foto: card Aragami mostra NOT INSTALLED
     -- mentre pannello dettaglio mostra INSTALLED correttamente): il plugin
@@ -708,14 +765,23 @@ const stmtUpsertGame = db.prepare(`
   -- vincere su un valore già presente in DB).
 `);
 
+/**
+ * v3.2.29-dev.1 — finestra entro cui un gioco segnalato come disinstallato da
+ * una sync e poi di nuovo installato riprende la data di installazione di
+ * prima (12 giri della sync periodica di 5 minuti). Oltre, è considerata una
+ * reinstallazione vera e la data si ricalcola.
+ */
+export const INSTALL_DATE_RESTORE_WINDOW_MS = 60 * 60 * 1000;
+
 export function upsertGame(game: Game): void {
+  let before: { is_installed: number; executable_path: string | null; installed_at: string | null; installed_at_source: string | null; uninstalled_at: string | null } | undefined;
   // v1.1.25 — diagnostica: logga SOLO se isInstalled o executablePath
   // cambiano rispetto a quanto già in DB — upsertGame viene chiamata per
   // OGNI gioco ad ogni refreshLibrary(), loggare sempre sarebbe rumore
   // inutile per la stragrande maggioranza dei giochi il cui stato non
   // cambia mai.
   try {
-    const before = db.prepare('SELECT is_installed, executable_path FROM games WHERE id = ?').get(game.id) as { is_installed: number; executable_path: string | null } | undefined;
+    before = db.prepare('SELECT is_installed, executable_path, installed_at, installed_at_source, uninstalled_at FROM games WHERE id = ?').get(game.id) as typeof before;
     if (before) {
       const beforeInstalled = Boolean(before.is_installed);
       const afterInstalled  = Boolean(game.isInstalled);
@@ -724,6 +790,35 @@ export function upsertGame(game: Game): void {
       }
     }
   } catch { /* diagnostica opzionale, non deve mai far fallire la scrittura reale */ }
+
+  // v3.2.17-dev.2 — data di installazione per la transizione → installato
+  // (o per un gioco installato che non l'ha ancora). Se il DB ne ha già
+  // una valida, la CASE dell'upsert la conserva e questo valore è ignorato:
+  // la stima dal filesystem si fa solo quando serve davvero.
+  let installedAt: string | null = null;
+  let installedAtSource: string | null = null;
+  const nowMs = Date.now();
+  if (game.isInstalled) {
+    const uninstalledMs = before?.uninstalled_at ? Date.parse(before.uninstalled_at) : NaN;
+    if (before?.is_installed && before.installed_at) {
+      installedAt = before.installed_at;
+    } else if (before && !before.is_installed && before.installed_at && before.installed_at_source
+               && Number.isFinite(uninstalledMs) && nowMs - uninstalledMs >= 0
+               && nowMs - uninstalledMs <= INSTALL_DATE_RESTORE_WINDOW_MS) {
+      // v3.2.29-dev.1 — disinstallato da una sync e tornato installato entro
+      // la finestra: era un errore dello store, si riprendono data e fonte.
+      installedAt = before.installed_at;
+      installedAtSource = before.installed_at_source;
+      writeLog('system', `[DB] upsertGame "${game.title}": installed again ${Math.round((nowMs - uninstalledMs) / 60000)} min after a sync reported it uninstalled — install date kept (${before.installed_at}, source ${before.installed_at_source}).`);
+    } else if (game.installedAt) {
+      installedAt = game.installedAt;
+      installedAtSource = 'plugin';
+    } else {
+      const est = estimateInstallDate([before?.executable_path, game.executablePath]);
+      if (est) { installedAt = est; installedAtSource = 'filesystem'; }
+      else     { installedAt = new Date().toISOString(); installedAtSource = 'first-seen'; }
+    }
+  }
 
   stmtUpsertGame.run({
     id:                   game.id,
@@ -739,7 +834,8 @@ export function upsertGame(game: Game): void {
     genres:               JSON.stringify(game.genres     ?? []),
     categories:           JSON.stringify(game.categories ?? []),
     rating:               game.rating       ?? null,
-    installedAt:          game.installedAt  ?? null,
+    installedAt,
+    installedAtSource,
     releaseDate:          game.releaseDate  ?? null,
     status:               game.status,
     trailerUrl:           game.trailerUrl       ?? null,
@@ -754,7 +850,17 @@ export function upsertGame(game: Game): void {
     hltbCompletionist:    game.hltbHours?.completionist  ?? null,
     achievementsUnlocked: game.achievements?.unlocked     ?? null,
     achievementsTotal:    game.achievements?.total        ?? null,
+    nowIso:               new Date(nowMs).toISOString(),
   });
+
+  // v3.2.29-dev.1 — il runner non è mai sovrascritto dall'upsert (scelta
+  // dell'utente, vedi sopra), ma per le card Web Stream (Luna, l'unico
+  // plugin che lo restituisce) è l'identità stessa della card: se nel DB è
+  // stato cambiato (PATCH /config prima della dev.1), la sync lo ripristina.
+  if (game.runner === 'Web Stream') {
+    const fixed = db.prepare("UPDATE games SET runner = 'Web Stream' WHERE id = ? AND runner != 'Web Stream'").run(game.id);
+    if (fixed.changes > 0) writeLog('system', `[DB] upsertGame "${game.title}": runner restored to Web Stream.`);
+  }
 }
 
 /** Upsert batch ottimizzato — una singola transazione per N giochi */
@@ -837,6 +943,29 @@ export function updateGameTitle(id: string, title: string): void {
 // play_time_hours per Steam), quindi l'accumulo locale viene
 // semplicemente rimpiazzato al sync successivo per i giochi Steam —
 // nessun rischio di doppio conteggio, persiste solo dove serve davvero.
+// v3.2.17-dev.9 — copertina e hero scritte DIRETTAMENTE, scavalcando la
+// regola dell'upsert che conserva sempre un'immagine già presente (giusta per
+// le sync, sbagliata per un override voluto): usata dal rifetch forzato del
+// "titolo per lo scraping" e dalle card Web Stream (immagini locali o SGDB
+// al posto del segnaposto del plugin). Scrive solo se qualcosa cambia.
+export function setGameImages(id: string, coverImage: string | undefined, previewImage: string | undefined): boolean {
+  const row = db.prepare('SELECT cover_image, preview_image FROM games WHERE id = ?').get(id) as { cover_image: string | null; preview_image: string | null } | undefined;
+  if (!row) return false;
+  const cover   = coverImage   || row.cover_image   || '';
+  const preview = previewImage || row.preview_image || '';
+  if (cover === (row.cover_image ?? '') && preview === (row.preview_image ?? '')) return false;
+  db.prepare('UPDATE games SET cover_image = ?, preview_image = ? WHERE id = ?').run(cover, preview, id);
+  return true;
+}
+
+// v3.2.17-dev.4 — valore assoluto, usato per i giochi Steam dal watcher di
+// localconfig.vdf (gameManager.startSteamPlaytimeWatch): il totale lo conta
+// Steam, non si somma nulla in locale.
+export function setPlayTime(id: string, hours: number): void {
+  if (!(hours >= 0) || !Number.isFinite(hours)) return;
+  db.prepare('UPDATE games SET play_time_hours = ? WHERE id = ?').run(hours, id);
+}
+
 export function addPlayTime(id: string, hours: number): void {
   if (!(hours > 0)) return;
   db.prepare('UPDATE games SET play_time_hours = play_time_hours + ? WHERE id = ?').run(hours, id);
@@ -906,10 +1035,27 @@ export function updateGameStatus(id: string, isInstalled: boolean, status: Game[
   // riscrivere un valore già corretto (utile per distinguere "chi ha
   // causato il problema" da "chi si limita a confermarlo").
   const before = db.prepare('SELECT is_installed, executable_path, title FROM games WHERE id = ?').get(id) as { is_installed: number; executable_path: string | null; title: string } | undefined;
+  // v3.2.17-dev.2 — installazione/disinstallazione completata dalla
+  // Dashboard: è l'unico punto in cui la data è esatta ('event'). Un gioco
+  // già installato con una data valida la conserva (es. riparazione).
   db.prepare(`
-    UPDATE games SET is_installed = ?, status = ?, updated_at = datetime('now')
-    WHERE id = ?
-  `).run(isInstalled ? 1 : 0, status, id);
+    UPDATE games SET
+      is_installed = @inst,
+      status = @status,
+      installed_at = CASE
+                       WHEN @inst = 0 THEN NULL
+                       WHEN is_installed = 1 AND installed_at IS NOT NULL THEN installed_at
+                       ELSE @now
+                     END,
+      installed_at_source = CASE
+                       WHEN @inst = 0 THEN NULL
+                       WHEN is_installed = 1 AND installed_at IS NOT NULL THEN installed_at_source
+                       ELSE 'event'
+                     END,
+      uninstalled_at = NULL,   -- v3.2.29-dev.1 — dalla Dashboard lo stato è certo
+      updated_at = datetime('now')
+    WHERE id = @id
+  `).run({ inst: isInstalled ? 1 : 0, status, now: new Date().toISOString(), id });
   writeLog('system', `[DB] updateGameStatus "${before?.title ?? id}": isInstalled ${before?.is_installed ? 'true' : 'false'}→${isInstalled} | executablePath unchanged="${before?.executable_path ?? '(empty)'}"`);
 }
 

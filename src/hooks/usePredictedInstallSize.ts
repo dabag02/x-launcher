@@ -16,7 +16,8 @@ export function usePredictedInstallSize(selectedGame: Game | null | undefined): 
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!selectedGame || (selectedGame.store !== 'GOG Galaxy' && selectedGame.store !== 'Epic Games' && selectedGame.store !== 'Amazon Games')) {
+    // v3.2.17-dev.10 — niente richiesta per le card Web Stream (Amazon Luna): non si scaricano
+    if (!selectedGame || selectedGame.runner === 'Web Stream' || (selectedGame.store !== 'GOG Galaxy' && selectedGame.store !== 'Epic Games' && selectedGame.store !== 'Amazon Games')) {
       setBytes(null);
       setLoading(false);
       return;

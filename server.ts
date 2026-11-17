@@ -7,6 +7,9 @@ import { compatibilityManager } from './src/backend/compatibilityManager';
 import { downloadManager, resolveDownloadsDir } from './src/backend/downloadManager';
 import { writeLog, LOG_PATH_EXPORT } from './src/backend/logger';
 import { notificationEngine } from './src/backend/notificationEngine';
+import { ingestScreenshot, announceClip, mediaLibrary, resolveSavedMedia, resolveTmpClip, mediaThumb, saveTmpClip, deleteMedia, describeShareSource, markShared } from './src/backend/mediaLibrary';
+import { watermarkText, cleanShareTmp } from './src/backend/share/watermark';
+import { listShareProviders, getShareProvider, startShareLogin, getLoginState, cancelShareLogin, logoutShareProvider, startShareUpload, getShareJob, activeShareJob, cancelShareUpload, retryShareUpload, type ShareUploadHooks } from './src/backend/share/registry';
 import { knowledgeBase } from './src/backend/knowledgeBase';
 import * as db from './src/backend/db';
 import * as attemptTracker from './src/backend/aiProviders/attemptTracker';
@@ -40,6 +43,9 @@ import { requestGuard, buildAllowedHosts, isExposedBind } from './src/backend/re
 import { isValidRunnerId } from './src/backend/runnerSafety';
 import { hardenDataPermissions } from './src/backend/dataPermissions';
 import { parseHttpUrl } from './src/backend/urlSafety';
+import { findWebArtFile } from './src/backend/webArt';
+import { stopWebStreamBrowser } from './src/backend/runners/implementations';
+import { isLocalImageFile } from './src/backend/coverCache';
 import { loadOrCreateToken, authMiddleware, authenticate, NonceStore, TOKEN_FILE_NAME } from './src/backend/authToken';
 import { hasBackupPassphrase, validatePassphrase, setBackupPassphrase, clearBackupPassphrase } from './src/backend/cloudBackup/backupCrypto';
 
@@ -525,7 +531,8 @@ async function startServer() {
   // finestra della dashboard. Nessuna autenticazione: stesso livello
   // di esposizione delle altre route locali del daemon.
   app.get("/api/system/game-running", (_req, res) => {
-    res.json(gameManager.isLastLaunchedGameRunning());
+    // v3.2.17-dev.6 — comprende anche il gioco Steam in corso (processo reaper di Steam)
+    res.json(gameManager.getRunningGameStatus());
   });
 
   // POST /api/system/input-wake — v2.1.10-dev.2, combo controller
@@ -1110,6 +1117,11 @@ async function startServer() {
       : info.kind === 'steam'
         ? await shutdownSteamSession(info.unit)       // v3.2.6-dev.2 — chiusura ordinata di Steam (poi gamescope esce da solo)
         : processManager.killScope(info.unit);
+    // v3.2.17-dev.10 — card Web Stream (Amazon Luna): chiude anche il processo principale del browser,
+    // che sta fuori dallo scope del gioco (vedi stopWebStreamBrowser).
+    if (info.kind === 'game' && result.success && db.getGameById(info.id)?.runner === 'Web Stream') {
+      stopWebStreamBrowser(info.id);
+    }
     res.json(result);
   });
 
@@ -1163,6 +1175,26 @@ async function startServer() {
   // v1.1.68 — cronologia "ultimi giochi lanciati", consumata dal menu
   // contestuale della tray (tray.py) per un lancio rapido col solo mouse.
   // GET, non richiede stato: legge solo, non modifica nulla.
+  // v3.2.17-dev.9 — immagini locali delle card Web Stream (Amazon Luna), da
+  // ~/.local/share/x-launcher/web-art/<id>/cover|hero.(png|jpg|jpeg|webp) —
+  // vedi webArt.ts. Solo quei due nomi in quella cartella, solo file che
+  // sono davvero immagini (stesso controllo della cache delle copertine).
+  app.get("/api/web-art/:id/:kind", (req, res) => {
+    const { id, kind } = req.params;
+    if (!/^[A-Za-z0-9_.-]{1,128}$/.test(id) || id === '.' || id === '..' || (kind !== 'cover' && kind !== 'hero')) {
+      res.status(400).end();
+      return;
+    }
+    const art = findWebArtFile(id, kind);
+    if (!art || !isLocalImageFile(art.file)) {
+      res.status(404).end();
+      return;
+    }
+    const ext = path.extname(art.file).slice(1).toLowerCase();
+    res.type(ext === 'jpg' ? 'jpeg' : ext);
+    res.sendFile(art.file);
+  });
+
   app.get("/api/games/recent", (req, res) => {
     const limit = parseInt(String(req.query.limit ?? '3'), 10) || 3;
     res.json(db.getRecentlyLaunched(limit));
@@ -1328,6 +1360,166 @@ async function startServer() {
   // GET /api/notifications/pending — solo pending+applied
   app.get('/api/notifications/pending', (_req, res) => {
     res.json(notificationEngine.getPending());
+  });
+
+  // v3.2.29-dev.3 — POST /api/media/screenshot — chiamata da spaces.py (Select + D-pad su) dopo aver
+  // catturato la finestra del gioco in PNG nella cartella di appoggio: conversione in JPEG, archivio in
+  // multimedia/<gioco>/Screenshot e notifica. Vedi src/backend/mediaLibrary.ts.
+  app.post('/api/media/screenshot', async (req, res) => {
+    try {
+      const { key, file, takenAt } = req.body ?? {};
+      const result = await ingestScreenshot(key, file, takenAt);
+      if (!result.success) writeLog('warning', `[MEDIA] Screenshot not saved: ${result.message}`);
+      res.status(result.success ? 200 : 400).json(result);
+    } catch (err) {
+      res.status(500).json({ success: false, message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // v3.2.29-dev.6 — POST /api/media/clip — chiamata da spaces.py a clip chiusa (cache temporanea in
+  // /tmp/x-launcher-<uid>/clips): notifica «Clip da rivedere». Vedi src/backend/mediaLibrary.ts.
+  app.post('/api/media/clip', async (req, res) => {
+    try {
+      const { key, file } = req.body ?? {};
+      const result = await announceClip(key, file);
+      if (!result.success) writeLog('warning', `[MEDIA] Clip not announced: ${result.message}`);
+      res.status(result.success ? 200 : 400).json(result);
+    } catch (err) {
+      res.status(500).json({ success: false, message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // v3.2.29-dev.7 — sezione Multimedia (step 2c). File serviti solo se risolti dentro multimedia/ o fra
+  // le clip temporanee elencate (mediaLibrary.ts); sendFile gestisce i Range (avanzamento nei video).
+  // dotfiles: 'allow' perché il percorso passa da ~/.local (con il valore predefinito sarebbe un 404).
+  const notifyMediaUpdated = () => {
+    const data = `data: ${JSON.stringify({ event: 'media-updated', ts: Date.now() })}\n\n`;
+    sseClients.forEach(client => {
+      try { client.write(data); } catch { sseClients.delete(client); }
+    });
+  };
+  const sendMedia = (res: import('express').Response, file: string | null, cache = 'private, max-age=60') => {
+    if (!file) { res.status(404).json({ success: false, message: 'Non trovato.' }); return; }
+    res.sendFile(file, { dotfiles: 'allow', headers: { 'Cache-Control': cache } }, (err) => {
+      if (err && !res.headersSent) res.status(404).end();
+    });
+  };
+  app.get('/api/media/library', (_req, res) => {
+    try { res.json({ success: true, ...mediaLibrary() }); }
+    catch (err) { res.status(500).json({ success: false, message: err instanceof Error ? err.message : String(err) }); }
+  });
+  app.get('/api/media/saved/:folder/:sub/:name', (req, res) => {
+    sendMedia(res, resolveSavedMedia(req.params.folder, req.params.sub, req.params.name));
+  });
+  app.get('/api/media/tmp/:name', (req, res) => {
+    sendMedia(res, resolveTmpClip(req.params.name), 'no-store');
+  });
+  app.get('/api/media/thumb/saved/:folder/:sub/:name', async (req, res) => {
+    const src = resolveSavedMedia(req.params.folder, req.params.sub, req.params.name);
+    sendMedia(res, src ? await mediaThumb(src) : null, 'private, max-age=86400');
+  });
+  app.get('/api/media/thumb/tmp/:name', async (req, res) => {
+    const src = resolveTmpClip(req.params.name);
+    sendMedia(res, src ? await mediaThumb(src) : null, 'no-store');
+  });
+  app.post('/api/media/clip/save', (req, res) => {
+    const { file, quality } = req.body ?? {};
+    const result = saveTmpClip(file, quality, notifyMediaUpdated);
+    if (!result.success) writeLog('warning', `[MEDIA] Clip save refused: ${result.message}`);
+    res.status(result.success ? 200 : 400).json(result);
+  });
+  app.post('/api/media/delete', (req, res) => {
+    const result = deleteMedia(req.body ?? {});
+    if (result.success) notifyMediaUpdated();
+    res.status(result.success ? 200 : 400).json(result);
+  });
+
+  // v3.2.29-dev.11 — condivisione da Multimedia (step 2d.2): servizi in src/backend/share/ (registry.ts).
+  //   GET    /api/share/providers           servizi, configurazione, account collegato (?verify=1 rinnova
+  //                                         il token: un accesso scaduto o revocato risulta scollegato)
+  //   POST   /api/share/:id/login           avvia l'accesso col codice dal telefono → { userCode, verificationUrl… }
+  //   GET    /api/share/:id/login           stato dell'accesso (pending/done/denied/expired/cancelled/error)
+  //   DELETE /api/share/:id/login           annulla l'attesa
+  //   POST   /api/share/:id/logout          scollega l'account (revoca presso il servizio)
+  //   Evento SSE `share-updated` { provider } a ogni accesso concluso e allo scollegamento.
+  const notifyShareUpdated = (provider: string) => {
+    const data = `data: ${JSON.stringify({ event: 'share-updated', provider, ts: Date.now() })}\n\n`;
+    sseClients.forEach(client => {
+      try { client.write(data); } catch { sseClients.delete(client); }
+    });
+  };
+  app.get('/api/share/providers', async (req, res) => {
+    try { res.json({ success: true, providers: await listShareProviders(req.query.verify === '1') }); }
+    catch (err) { res.status(500).json({ success: false, code: 'error', message: err instanceof Error ? err.message : String(err) }); }
+  });
+  app.post('/api/share/:id/login', async (req, res) => {
+    const r = await startShareLogin(req.params.id, notifyShareUpdated);
+    if (r.success) res.json({ success: true, login: r.login });
+    else res.status(r.code === 'unknown-provider' ? 404 : 400).json({ success: false, code: r.code });
+  });
+  app.get('/api/share/:id/login', (req, res) => {
+    if (!getShareProvider(req.params.id)) { res.status(404).json({ success: false, code: 'unknown-provider' }); return; }
+    res.json({ success: true, login: getLoginState(req.params.id) });
+  });
+  app.delete('/api/share/:id/login', (req, res) => {
+    if (!getShareProvider(req.params.id)) { res.status(404).json({ success: false, code: 'unknown-provider' }); return; }
+    res.json({ success: true, cancelled: cancelShareLogin(req.params.id) });
+  });
+  // v3.2.29-dev.13 — invio (step 2d.4): un invio alla volta, avanzamento con l'evento SSE `share-progress`
+  //   { job }, esito con una notifica (riuscito: «Mostra QR del link»; non riuscito: «Riprova»).
+  //   POST   /api/share/:id/upload { source, title, text }   → { job }
+  //   GET    /api/share/jobs/active | /api/share/jobs/:job   stato
+  //   DELETE /api/share/jobs/:job                           annulla
+  //   POST   /api/share/jobs/:job/retry                     ripete un invio non riuscito
+  const shareHooks: ShareUploadHooks = {
+    resolveSource: describeShareSource,
+    watermarkText: () => watermarkText(readAppConfig().language),
+    onProgress: (job) => {
+      const data = `data: ${JSON.stringify({ event: 'share-progress', job, ts: Date.now() })}\n\n`;
+      sseClients.forEach(client => {
+        try { client.write(data); } catch { sseClients.delete(client); }
+      });
+    },
+    onFinish: (job, source) => {
+      const p = getShareProvider(job.provider);
+      // v3.2.29-dev.14 — badge «Condiviso» nella galleria e nel visore
+      if (job.state === 'done') {
+        markShared(source, { provider: job.provider, providerName: job.providerName, url: job.url, at: job.finishedAt ?? Date.now() });
+        notifyMediaUpdated();
+      }
+      notificationEngine.emit({
+        type: 'share-result', gameId: job.gameId, gameTitle: job.gameTitle || job.title, ok: job.state === 'done',
+        provider: job.provider, providerName: job.providerName, jobId: job.id, url: job.url, code: job.code,
+        isPrivate: p?.visibility === 'private',
+      });
+    },
+  };
+  cleanShareTmp();   // v3.2.29-dev.14 — copie con la filigrana rimaste da un invio interrotto da un riavvio
+  app.post('/api/share/:id/upload', async (req, res) => {
+    const r = await startShareUpload(req.params.id, req.body ?? {}, shareHooks);
+    if (r.success) res.json({ success: true, job: r.job });
+    else res.status(r.code === 'unknown-provider' ? 404 : r.code === 'busy' ? 409 : 400).json({ success: false, code: r.code });
+  });
+  app.get('/api/share/jobs/active', (_req, res) => {
+    res.json({ success: true, job: activeShareJob() });
+  });
+  app.get('/api/share/jobs/:job', (req, res) => {
+    const job = getShareJob(req.params.job);
+    if (!job) { res.status(404).json({ success: false, code: 'job-expired' }); return; }
+    res.json({ success: true, job });
+  });
+  app.delete('/api/share/jobs/:job', (req, res) => {
+    res.json({ success: true, cancelled: cancelShareUpload(req.params.job) });
+  });
+  app.post('/api/share/jobs/:job/retry', async (req, res) => {
+    const r = await retryShareUpload(req.params.job, shareHooks);
+    if (r.success) res.json({ success: true, job: r.job });
+    else res.status(r.code === 'busy' ? 409 : 400).json({ success: false, code: r.code });
+  });
+  app.post('/api/share/:id/logout', async (req, res) => {
+    if (!(await logoutShareProvider(req.params.id))) { res.status(404).json({ success: false, code: 'unknown-provider' }); return; }
+    notifyShareUpdated(req.params.id);
+    res.json({ success: true });
   });
 
   // PATCH /api/notifications/:id/status — aggiorna stato da frontend

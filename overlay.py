@@ -20,6 +20,12 @@ Controller (letto da spaces.py, qui arrivano solo azioni gia' interpretate):
     A    conferma lo spazio scelto / attiva il servizio (su - e + regola il volume,
          tenuto premuto si ripete)
     B    annulla e chiude l'overlay (il gioco riprende)
+    giu' dalla carta selezionata: riga dei pulsanti (v3.2.29-dev.6) — X di chiusura al centro, Rec a destra
+         negli spazi dei giochi; sinistra/destra li percorrono tutti; A su Rec avvia la clip (parte a gioco
+         scongelato, dopo la chiusura dell'overlay) o ferma quella in corso. Etichette sotto ai pulsanti.
+
+Sovrimpressione (classe Osd, v3.2.29-dev.4/6): «Screenshot acquisito», pallino REC con «Premi Share per
+interrompere la registrazione», «Registrazione conclusa»; finestra override-redirect in alto a destra.
 
 Quando si apre, il gioco dello spazio corrente viene congelato (cgroup freezer) e il
 pad viene "preso" in esclusiva (EVIOCGRAB) finche' l'overlay e' aperto, cosi' il gioco
@@ -126,6 +132,8 @@ STR = {
         "btpad": "Il controller in uso è Bluetooth: non lo spengo", "failed": "Operazione non riuscita",
         "confirm_off": "Conferma con A", "busy": "In corso…", "turnoff": "Spegni", "turnon": "Accendi",
         "confirm_hint": "Conferma",
+        "close": "Chiudi", "close_confirm": "Conferma chiusura", "closing": "Chiusura in corso…",
+        "close_failed": "Chiusura non riuscita", "close_na": "Questo spazio non si può chiudere da qui",
     },
     "en": {
         "title": "Spaces", "space": "SPACE", "here": "You are here", "open": "A · Open",
@@ -138,6 +146,8 @@ STR = {
         "btpad": "The controller in use is Bluetooth: not turning it off", "failed": "Operation failed",
         "confirm_off": "Confirm with A", "busy": "Working…", "turnoff": "Turn off", "turnon": "Turn on",
         "confirm_hint": "Confirm",
+        "close": "Close", "close_confirm": "Confirm close", "closing": "Closing…",
+        "close_failed": "Could not close", "close_na": "This space can't be closed from here",
     },
 }
 
@@ -811,6 +821,15 @@ class Renderer:
         elif kind == "plus":
             d.line([P(5, 12), P(19, 12)], fill=color, width=lw)
             d.line([P(12, 5), P(12, 19)], fill=color, width=lw)
+        elif kind == "x":                              # v3.2.17-dev.10 — pulsante di chiusura dello spazio
+            d.line([P(6, 6), P(18, 18)], fill=color, width=lw)
+            d.line([P(18, 6), P(6, 18)], fill=color, width=lw)
+
+    def _btn_label(self, d, cx, top, lab, font, color=None):
+        """v3.2.29-dev.6 — etichetta di un pulsante dell'overlay, centrata sotto di esso.
+        v3.2.29-dev.9 — solo testo, senza riquadro (richiesta dell'utente); rosso per conferme e chiusura."""
+        S = self._S
+        self.text_vc(d, cx, top + S(10), lab, S(12), color or TEXT, True, "m")
 
     def arrow(self, d, direction, cx, cy, size, color):
         cx, cy = int(round(cx)), int(round(cy))
@@ -842,6 +861,7 @@ class Renderer:
 
         def S(v):
             return int(round(v * s))
+        self._S = S
         img = Image.new("RGB", (W, H), BG)
         self._img = img
         d = ImageDraw.Draw(img)
@@ -962,6 +982,57 @@ class Renderer:
             ty = art[3] + S(14)
             self.text(d, cx + pad, ty, "%s %d" % (t["space"], e["space"]), S(14), MUTED, True)
             self.text(d, cx + pad, ty + S(22), e["title"], S(30 if is_sel else 24), TEXT, True, maxw=cw - 2 * pad)
+            rec = model.get("rec") or {}
+            on_rec = bool(rec) and rec.get("space") == e["space"]
+            if on_rec and not is_sel:
+                # v3.2.29-dev.6 — carta piccola di uno spazio che sta registrando: «● REC» accanto a «SPAZIO n»
+                lx = cx + pad + self.tsize(d, "%s %d" % (t["space"], e["space"]), self.font(S(14), True))[0] + S(12)
+                rr = S(5)
+                self.ellipse(d, (lx, ty + S(8) - rr, lx + 2 * rr, ty + S(8) + rr), fill=DANGER)
+                self.text(d, lx + 2 * rr + S(5), ty, "REC", S(14), DANGER, True)
+            if e["kind"] != "dashboard" and is_sel:
+                # v3.2.29-dev.6 — riga dei pulsanti in basso nella carta selezionata, centrata: la X rossa
+                # (chiusura, v3.2.17-dev.10) al centro e, negli spazi dei giochi, Rec a destra; le etichette
+                # sotto ai rispettivi pulsanti. Le carte piccole non hanno pulsanti: per raggiungerli la carta
+                # viene selezionata (e si ingrandisce).
+                r = S(20)
+                by = cy + ch - pad // 2 - S(30) - r
+                bx = cx + cw // 2
+                has_rec = e["kind"] == "game"
+                f = self.font(S(12), True)
+                # chiusura
+                focused = zone == "close" and is_sel and model.get("btn", "close") == "close"
+                armed = model.get("pending") == "close:%d" % e["space"]
+                busy_close = e["space"] in (model.get("closing") or [])
+                if focused:
+                    ring = r + S(5)
+                    self.ellipse(d, (bx - ring, by - ring, bx + ring, by + ring), fill=ACCENT)
+                self.ellipse(d, (bx - r, by - r, bx + r, by + r), fill=DANGER if (armed or busy_close) else BTN_B)
+                self.icon(d, "x", bx, by, r, ACCENT_INK, max(2, S(3)))
+                if focused:   # v3.2.29-dev.9 — etichetta solo sotto il pulsante selezionato
+                    lab = t["closing"] if busy_close else (t["close_confirm"] if armed else t["close"])
+                    self._btn_label(d, bx, by + r + S(4), lab, f, DANGER if (armed or busy_close) else None)
+                # Rec
+                if has_rec:
+                    rx = bx + r * 2 + S(30)
+                    rfocused = zone == "close" and is_sel and model.get("btn") == "rec"
+                    if rfocused:
+                        ring = r + S(5)
+                        self.ellipse(d, (rx - ring, by - ring, rx + ring, by + ring), fill=ACCENT)
+                    self.ellipse(d, (rx - r, by - r, rx + r, by + r), fill=PANEL if not on_rec else DANGER)
+                    if on_rec:   # in registrazione: quadrato di stop bianco
+                        q = int(r * 0.38)
+                        self.rrect(d, (rx - q, by - q, rx + q, by + q), max(2, S(2)), fill=ACCENT_INK)
+                    else:        # pallino rosso di Rec su fondo scuro
+                        rr = int(r * 0.48)
+                        self.ellipse(d, (rx - rr, by - rr, rx + rr, by + rr), fill=DANGER)
+                    if rfocused:  # v3.2.29-dev.9 — etichetta solo sotto il pulsante selezionato
+                        if on_rec:
+                            secs = int(rec.get("elapsed") or 0)
+                            lab = "%s · %d:%02d" % (t["rec_paused"] if rec.get("paused") else t["rec_stop"], secs // 60, secs % 60)
+                        else:
+                            lab = t["rec"]
+                        self._btn_label(d, rx, by + r + S(4), lab, f, DANGER if on_rec else None)
             cx += cw + gapc
 
         # ---- toast
@@ -973,6 +1044,16 @@ class Renderer:
         hy = H - S(64)
         if zone == "spaces":
             items = [("lr", t["choose"]), ("A", t["confirm"]), ("B", t["cancel"]), ("u", t["services"])]
+            # v3.2.17-dev.10 — giu': pulsante di chiusura del gioco selezionato
+            if entries and 0 <= sel < len(entries) and entries[sel]["kind"] != "dashboard":
+                items.append(("d", t["close"]))
+        elif zone == "close" and model.get("btn") == "rec":
+            rec = model.get("rec") or {}
+            on_rec = entries and 0 <= sel < len(entries) and rec.get("space") == entries[sel]["space"]
+            items = [("lr", t["move"]), ("A", t["rec_stop"] if on_rec else t["rec"]), ("B", t["cancel"]), ("u", t["spaces"])]
+        elif zone == "close":
+            armed = entries and 0 <= sel < len(entries) and pending == "close:%d" % entries[sel]["space"]
+            items = [("lr", t["move"]), ("A", t["close_confirm"] if armed else t["close"]), ("B", t["cancel"]), ("u", t["spaces"])]
         else:
             cur = ITEMS[svc_i]
             if cur in TOGGLE_ITEMS and cur in (model.get("toggles") or ()):
@@ -1010,6 +1091,249 @@ class Renderer:
             self.text_vc(d, hx + kw + S(10), cy, label, fs, MUTED)
             hx += kw + S(10) + lw + S(32)
         return img
+
+
+# --------------------------------------------------------------------------- sovrimpressione (OSD)
+# v3.2.29-dev.4 — messaggi discreti in alto a destra sopra il gioco: icona 48x48 e testo piccolo
+# (richiesta dell'utente: «Screenshot acquisito» per 3 s; nello step 2b il pallino REC e «Registrazione
+# conclusa»). Stessa tecnica dell'overlay: finestra override-redirect, quindi sopra il gioco a schermo
+# intero senza mai prendere il focus (un gioco come Dead Space 2 si ridurrebbe a icona) e senza input
+# (forma di input vuota, dove l'estensione SHAPE c'e'). Non finisce nelle catture: spaces.py la nasconde
+# prima di uno screenshot e le clip registrano la sola finestra del gioco.
+OSD_ICON_PX = 48              # lato dell'icona in pixel reali (richiesta dell'utente)
+OSD_SHOW_S = 3.0
+OSD_MARGIN_PX = 32
+OSD_PAD_PX = 12
+OSD_RADIUS_PX = 10
+OSD_RAISE_S = 0.5
+# corpo del testo = sottotitoli di Avatar e Gestore dei processi: 10 px monospaziato sulla tela
+# 1920x1080 della Dashboard, scalato all'altezza reale dello schermo (13 px a 1440)
+OSD_TEXT_PX_1080 = 10.0
+OSD_STR = {
+    "it": {"osd_screenshot": "Screenshot acquisito",
+           "osd_rec_hint": "Premi Share per interrompere la registrazione",
+           "osd_rec_done": "Registrazione conclusa",
+           # v3.2.29-dev.6 — pulsante Rec dell'overlay
+           "rec": "Registra", "rec_stop": "Interrompi", "rec_paused": "In pausa", "rec_na": "Registrazione non disponibile"},
+    "en": {"osd_screenshot": "Screenshot captured",
+           "osd_rec_hint": "Press Share to stop recording",
+           "osd_rec_done": "Recording finished",
+           "rec": "Record", "rec_stop": "Stop", "rec_paused": "Paused", "rec_na": "Recording not available"},
+}
+for _l, _d in OSD_STR.items():
+    STR[_l].update(_d)
+
+
+def _find_mono_font_path():
+    """Font monospaziato come `font-mono` della Dashboard (Tailwind -> `monospace` di fontconfig)."""
+    env = os.environ.get("X_LAUNCHER_OSD_FONT")
+    if env and os.path.exists(env):
+        return env
+    try:
+        r = subprocess.run(["fc-match", "-f", "%{file}", "monospace"], capture_output=True, text=True, timeout=2.0)
+        p = (r.stdout or "").strip()
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
+    for p in ("/usr/share/fonts/TTF/DejaVuSansMono.ttf", "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"):
+        if os.path.exists(p):
+            return p
+    return _find_font_path(False)
+
+
+def _osd_icon(kind, side, color):
+    """Icona `kind` (screenshot = fotocamera, rec = pallino rosso) disegnata a 4x e ridotta (antialias)."""
+    K = 4
+    S = side * K
+    im = Image.new("L", (S, S), 0)
+    d = ImageDraw.Draw(im)
+    if kind == "rec":
+        m = int(S * 0.12)
+        d.ellipse((m, m, S - m, S - m), fill=255)
+        return im.resize((side, side), Image.LANCZOS), DANGER
+    # fotocamera: corpo arrotondato, mirino in alto, obiettivo ad anello
+    lw = max(K, int(S * 0.07))
+    body = (int(S * 0.08), int(S * 0.28), int(S * 0.92), int(S * 0.84))
+    d.rounded_rectangle(body, radius=int(S * 0.10), outline=255, width=lw)
+    d.rounded_rectangle((int(S * 0.34), int(S * 0.16), int(S * 0.62), int(S * 0.30)), radius=int(S * 0.04), fill=255)
+    cx, cy, r = S * 0.5, S * 0.56, S * 0.17
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=255, width=lw)
+    d.ellipse((int(S * 0.76), int(S * 0.36), int(S * 0.84), int(S * 0.44)), fill=255)
+    return im.resize((side, side), Image.LANCZOS), color
+
+
+class Osd:
+    """Sovrimpressione in alto a destra, con un thread e una connessione X propri.
+
+    flash(kind, testo, secondi)  mostra icona e testo, poi si nasconde da sola
+    hide(wait=True)              la toglie subito (prima di uno screenshot)
+    """
+
+    def __init__(self, log):
+        self.log = log
+        self.available = HAVE_PIL and HAVE_XLIB
+        self.q = queue.Queue()
+        self._d = None
+        self._win = None
+        self._hide_at = 0.0
+        self._last_raise = 0.0
+        self._font = None
+        self._font_px = None
+        if self.available:
+            threading.Thread(target=self._loop, name="xl-osd", daemon=True).start()
+
+    # ----- API (da qualunque thread)
+    def flash(self, kind, text_key, seconds=OSD_SHOW_S):
+        if self.available:
+            self.q.put(("show", kind, text_key, float(seconds)))
+
+    def show(self, kind, text_key):
+        """v3.2.29-dev.6 — messaggio fisso (pallino REC durante la registrazione) finche' hide()."""
+        if self.available:
+            self.q.put(("show", kind, text_key, float("inf")))
+
+    def hide(self, wait=False):
+        if not self.available:
+            return
+        ev = threading.Event()
+        self.q.put(("hide", ev))
+        if wait:
+            ev.wait(1.0)
+
+    # ----- thread
+    def _loop(self):
+        while True:
+            timeout = None
+            if self._win is not None:
+                timeout = max(0.02, min(OSD_RAISE_S, self._hide_at - time.time()))
+            try:
+                item = self.q.get(timeout=timeout)
+            except queue.Empty:
+                item = None
+            try:
+                if item and item[0] == "show":
+                    self._show(item[1], item[2], item[3])
+                elif item and item[0] == "hide":
+                    self._x_hide()
+                    item[1].set()
+                if self._win is not None:
+                    now = time.time()
+                    if now >= self._hide_at:
+                        self._x_hide()
+                    elif now - self._last_raise >= OSD_RAISE_S:
+                        self._last_raise = now
+                        self._win.configure(stack_mode=X.Above)
+                        self._d.flush()
+            except Exception as e:  # noqa
+                self.log("osd: error %r" % (e,))
+                try:
+                    self._x_hide()
+                except Exception:
+                    pass
+
+    def _show(self, kind, text_key, seconds):
+        if self._d is None:
+            self._d = display.Display()
+        apply_palette(load_palette(_theme_id(), self.log))     # tema e lingua correnti della Dashboard
+        text = load_strings(_lang(), self.log).get(text_key, text_key)
+        x0, y0, mw, mh = SpacesOverlay._monitor_geometry(self, self._d.screen().root)
+        img = self.render(kind, text, mh)
+        self._x_hide()
+        w, h = img.size
+        self._map(img, x0 + mw - OSD_MARGIN_PX - w, y0 + OSD_MARGIN_PX)
+        self._hide_at = time.time() + seconds
+        self._last_raise = time.time()
+
+    def render(self, kind, text, screen_h):
+        """Immagine RGB del riquadro: icona sopra, testo sotto, centrati."""
+        px = max(9, int(round(OSD_TEXT_PX_1080 * screen_h / 1080.0)))
+        if self._font is None or self._font_px != px:
+            p = _find_mono_font_path()
+            try:
+                self._font = ImageFont.truetype(p, px) if p else ImageFont.load_default()
+            except Exception:
+                self._font = ImageFont.load_default()
+            self._font_px = px
+        probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        l, t, r, b = probe.textbbox((0, 0), text, font=self._font)
+        tw, th = r - l, b - t
+        gap = max(6, px // 2)
+        if kind:
+            w = max(OSD_ICON_PX, tw) + 2 * OSD_PAD_PX
+            h = OSD_PAD_PX + OSD_ICON_PX + gap + th + OSD_PAD_PX
+        else:                                   # v3.2.29-dev.6 — solo testo («Registrazione conclusa»)
+            w, h = tw + 2 * OSD_PAD_PX, th + 2 * OSD_PAD_PX
+        img = Image.new("RGB", (w, h), PANEL)
+        d = ImageDraw.Draw(img)
+        d.rectangle((0, 0, w - 1, h - 1), outline=LINE)
+        if kind:
+            mask, color = _osd_icon(kind, OSD_ICON_PX, TEXT)
+            img.paste(Image.new("RGB", mask.size, color), ((w - OSD_ICON_PX) // 2, OSD_PAD_PX), mask)
+            d.text(((w - tw) // 2 - l, OSD_PAD_PX + OSD_ICON_PX + gap - t), text, font=self._font, fill=TEXT)
+        else:
+            d.text(((w - tw) // 2 - l, OSD_PAD_PX - t), text, font=self._font, fill=TEXT)
+        return img
+
+    def _map(self, img, x, y):
+        d = self._d
+        sc = d.screen()
+        info = d.display.info
+        fmt = next((f for f in info.pixmap_formats if f.depth == sc.root_depth), None)
+        if fmt is None or fmt.bits_per_pixel != 32:
+            self.log("osd: unsupported X pixel format (depth %s)" % sc.root_depth)
+            return
+        w, h = img.size
+        win = sc.root.create_window(x, y, w, h, 0, sc.root_depth, X.InputOutput, X.CopyFromParent,
+                                    background_pixel=0, override_redirect=1, event_mask=0)
+        win.set_wm_name("X-Launcher OSD")
+        win.set_wm_class("xlauncher-osd", "XLauncherOSD")
+        self._shape(win, w, h)
+        gc = win.create_gc()
+        win.map()
+        win.configure(stack_mode=X.Above)
+        data = img.tobytes("raw", "BGRX" if info.image_byte_order == 0 else "XRGB")
+        stride = w * 4
+        rows = max(1, max(4096, info.max_request_length * 4 - 256) // stride)
+        yy = 0
+        while yy < h:
+            n = min(rows, h - yy)
+            win.put_image(gc, 0, yy, w, n, X.ZPixmap, sc.root_depth, 0, data[yy * stride:(yy + n) * stride])
+            yy += n
+        d.flush()
+        self._win = win
+
+    def _shape(self, win, w, h):
+        """Angoli arrotondati (forma visibile) e nessun input (forma di input vuota), se c'e' SHAPE."""
+        try:
+            from Xlib.ext import shape
+            if not self._d.has_extension("SHAPE"):
+                return
+            r = OSD_RADIUS_PX
+            rects = []
+            for i in range(r):
+                dx = r - int(round((r * r - (r - i - 0.5) ** 2) ** 0.5))
+                rects.append((dx, i, w - 2 * dx, 1))
+                rects.append((dx, h - 1 - i, w - 2 * dx, 1))
+            rects.append((0, r, w, max(0, h - 2 * r)))
+            win.shape_rectangles(shape.SO.Set, shape.SK.Bounding, X.Unsorted, 0, 0, rects)
+            try:
+                win.shape_rectangles(shape.SO.Set, shape.SK.Input, X.Unsorted, 0, 0, [])
+            except Exception:
+                pass
+        except Exception as e:  # noqa
+            self.log("osd: shape not applied (%r)" % (e,))
+
+    def _x_hide(self):
+        win, self._win = self._win, None
+        if win is not None:
+            try:
+                win.unmap()
+                win.destroy()
+                self._d.sync()
+            except Exception as e:  # noqa
+                self.log("osd: hide error %r" % (e,))
 
 
 def _entry_colors(title, kind):
@@ -1056,6 +1380,7 @@ class SpacesOverlay:
         self.a_down_t = None
         self.a_last = 0.0
         self.pending = None          # servizio con la conferma di spegnimento armata
+        self.closing = set()         # v3.2.17-dev.10 — spazi in chiusura (pulsante X)
         self.pending_until = 0.0
         self.services = Services(log, getattr(mgr, "bt_pad_in_use", None))
         self.renderer = None
@@ -1121,6 +1446,7 @@ class SpacesOverlay:
             self.cur = cur
             self.sel = (idx + (1 if direction >= 0 else -1)) % max(1, len(entries)) if len(entries) > 1 else 0
             self.zone = "spaces"
+            self.btn = "close"
             self.svc = 0
             self.toast = ("", 0.0)
             self.a_down_t = None
@@ -1128,6 +1454,7 @@ class SpacesOverlay:
             self._last_entries = time.time()
             self._svc_ver = -1
             self.pending = None
+            self.closing = set()        # v3.2.17-dev.10 — spazi in chiusura (pulsante X)
             self.opened = True
         ev = threading.Event()
         res = {"ok": False}
@@ -1183,16 +1510,55 @@ class SpacesOverlay:
                 if self.zone == "spaces":
                     if n:
                         self.sel = (self.sel + dlt) % n
+                elif self.zone == "close":
+                    # v3.2.17-dev.10 — fra i pulsanti degli spazi (la Dashboard non ne ha);
+                    # v3.2.29-dev.6 — per ogni gioco X poi Rec, in un'unica riga ciclica
+                    row = self._button_row()
+                    if row:
+                        if (self.sel, self.btn) in row:
+                            self.sel, self.btn = row[(row.index((self.sel, self.btn)) + dlt) % len(row)]
+                        else:
+                            self.sel, self.btn = row[0]
                 else:
                     self.svc = max(0, min(len(ITEMS) - 1, self.svc + dlt))
             elif action == "up":
-                self.zone = "services"
+                # v3.2.17-dev.10 — dal pulsante di chiusura si torna al riquadro, da li' ai servizi
+                self.zone = "spaces" if self.zone == "close" else "services"
             elif action == "down":
-                self.zone = "spaces"
+                if self.zone == "spaces":
+                    # v3.2.17-dev.10 — giu' dal riquadro di un gioco: il suo pulsante rosso con la X
+                    if n and self.entries[self.sel]["kind"] != "dashboard":
+                        self.zone = "close"
+                        self.btn = "close"
+                else:
+                    self.zone = "spaces"
             elif action == "b":
                 finish = ("cancel", None)
             elif action == "a_up":
                 self.a_down_t = None
+            elif action == "a" and self.zone == "close" and self.btn == "rec":
+                # v3.2.29-dev.6 — Rec: in registrazione la ferma (l'overlay resta aperto); altrimenti la
+                # richiede e porta allo spazio del gioco: parte appena e' scongelato
+                if n and self.entries[self.sel]["kind"] == "game" and hasattr(self.mgr, "overlay_rec"):
+                    space = self.entries[self.sel]["space"]
+                    stopped, ok = self.mgr.overlay_rec(space)
+                    if not stopped:
+                        if ok:
+                            finish = ("space", space)
+                        else:
+                            self._set_toast("rec_na")
+            elif action == "a" and self.zone == "close":
+                # v3.2.17-dev.10 — primo A: conferma armata (rossa, scade da sola come quella dei
+                # servizi); secondo A: chiusura del processo dello spazio tramite il demone
+                if n and self.entries[self.sel]["kind"] != "dashboard":
+                    space = self.entries[self.sel]["space"]
+                    key = "close:%d" % space
+                    if self.pending == key:
+                        self.pending = None
+                        self._close_space_async(space)
+                    else:
+                        self.pending = key
+                        self.pending_until = time.time() + CONFIRM_TIMEOUT_S
             elif action == "a":
                 if self.zone == "spaces":
                     if n:
@@ -1220,6 +1586,45 @@ class SpacesOverlay:
         else:
             self.q.put(("draw",))
         return True
+
+    def _button_row(self):
+        """v3.2.29-dev.6 — pulsanti della riga in basso, in ordine: (indice dello spazio, "close"|"rec")."""
+        row = []
+        for i, e in enumerate(self.entries):
+            if e["kind"] == "dashboard":
+                continue
+            row.append((i, "close"))
+            if e["kind"] == "game":
+                row.append((i, "rec"))
+        return row
+
+    def _close_space_async(self, space):
+        """v3.2.17-dev.10 — chiusura dello spazio in un thread (la richiesta al demone puo' durare
+        qualche secondo: Steam si chiude in modo ordinato). Chiamato con self.lock preso.
+        Chiuso lo spazio da cui si era aperto l'overlay, si torna alla Dashboard."""
+        if space in self.closing:
+            return
+        self.closing.add(space)
+        self._set_toast("closing")
+
+        def work():
+            ok, key = False, "close_failed"
+            try:
+                ok, key = self.mgr.overlay_close_space(space)
+            except Exception as e:  # noqa
+                self.log("overlay: close space %s: error %r" % (space, e))
+            with self.lock:
+                self.closing.discard(space)
+                if ok:
+                    self.toast = ("", 0.0)
+                elif key:
+                    self._set_toast(key)
+                back_to_dash = ok and self.opened and space == self.cur
+            if back_to_dash:
+                self._finish(0)
+            else:
+                self.q.put(("draw",))
+        threading.Thread(target=work, daemon=True).start()
 
     def _toggle_service(self, item):
         """Bluetooth / Wi-Fi / LAN. Accendere e' immediato; spegnere richiede un secondo A.
@@ -1331,6 +1736,11 @@ class SpacesOverlay:
                     cur_space = self.entries[self.sel]["space"] if self.entries and self.sel < len(self.entries) else None
                     self.entries = ents
                     self.sel = next((i for i, e in enumerate(ents) if e["space"] == cur_space), min(self.sel, max(0, len(ents) - 1)))
+                    # v3.2.17-dev.10 — spazio appena chiuso col pulsante X: niente pulsante sulla Dashboard
+                    if self.zone == "close" and (not ents or ents[self.sel]["kind"] == "dashboard"):
+                        self.zone = "spaces"
+                    if self.btn == "rec" and (not ents or ents[self.sel]["kind"] != "game"):
+                        self.btn = "close"
                     redraw = True
         if now - self._last_refresh > SERVICE_REFRESH_S:
             self._last_refresh = now
@@ -1434,6 +1844,9 @@ class SpacesOverlay:
                              "cover": e.get("cover"), "hero": e.get("hero")})
             return {"zone": self.zone, "sel": self.sel, "svc": self.svc, "entries": ents, "services": snap,
                     "toast": self.toast[0], "pending": self.pending, "busy": sorted(self.services.busy),
+                    "closing": sorted(self.closing),
+                    "btn": self.btn,
+                    "rec": self.mgr.clip_status() if hasattr(self.mgr, "clip_status") else None,
                     "toggles": sorted(self.services.toggles)}
 
     def _x_draw(self):

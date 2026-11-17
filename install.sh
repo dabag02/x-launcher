@@ -181,6 +181,10 @@ fi
 #     rc.xml        -> /opt/x-launcher/openbox/rc.xml        (symlink)
 #     autostart     -> /opt/x-launcher/openbox/autostart     (symlink)
 #     spaces-ctl    -> /opt/x-launcher/openbox/spaces-ctl    (symlink)
+#     environment.example  copia dell'esempio delle variabili (sempre aggiornata)
+#     environment   creato dall'esempio SOLO se manca (righe attive = valori
+#                   predefiniti); se esiste non viene mai toccato, si elencano
+#                   solo le variabili che non contiene
 #   ~/.config/x-launcher/         cartella (layout dei monitor)
 #     shell-display.conf.example  copia dell'esempio (sempre aggiornata); la
 #                                 shell-display.conf attiva NON viene mai creata
@@ -277,6 +281,31 @@ setup_openbox_session() {
     fi
   fi
 
+  # v3.3.17-Mars — variabili della sessione (~/.config/openbox/environment, letto da openbox-session).
+  # L'esempio si aggiorna sempre; il file attivo si crea dall'esempio SOLO se non esiste (le righe
+  # attive dell'esempio sono i valori predefiniti, quindi non cambia il comportamento). Un environment
+  # esistente non viene mai toccato: si segnalano soltanto le variabili nuove che non contiene.
+  local ob_env="$home/.config/openbox/environment" ob_ex="$INSTALL_DIR/openbox/environment.example"
+  if [ -f "$ob_ex" ]; then
+    _as_user cp -f "$ob_ex" "$home/.config/openbox/environment.example"
+    if [ -e "$ob_env" ] || [ -L "$ob_env" ]; then
+      local newvars="" v
+      for v in $(grep -oE '^#? ?export [A-Z_]+=' "$ob_ex" | sed -E 's/^#? ?export //; s/=$//' | sort -u); do
+        grep -qE "^[[:space:]]*#?[[:space:]]*export[[:space:]]+${v}=" "$ob_env" 2>/dev/null || newvars="$newvars $v"
+      done
+      echo "[INSTALL]   environment esistente: non toccato (esempio aggiornato in ~/.config/openbox/environment.example)"
+      if [ -n "$newvars" ]; then
+        echo "[INSTALL]   ℹ variabili disponibili non presenti nel tuo environment (default già attivi, servono solo per cambiarli):"
+        echo "[INSTALL]    ${newvars}"
+      fi
+    else
+      _as_user cp "$ob_ex" "$ob_env"
+      echo "[INSTALL]   creato $ob_env (valori predefiniti; le opzioni facoltative sono commentate)"
+    fi
+  else
+    echo "[INSTALL]   ⚠ manca $ob_ex — environment di Openbox non installato."
+  fi
+
   # Dipendenze della sessione: solo avvisi, mai bloccanti.
   local missing="" t
   for t in openbox wmctrl xdotool xrandr python3; do
@@ -286,6 +315,17 @@ setup_openbox_session() {
     echo "[INSTALL]   ⚠ Mancano per la sessione Openbox:${missing}"
     echo "[INSTALL]     Arch:   sudo pacman -S openbox wmctrl xdotool xorg-xrandr"
     echo "[INSTALL]     Debian: sudo apt install openbox wmctrl xdotool x11-xserver-utils"
+  fi
+  # v3.3.17-Mars — screenshot, clip, sezione Multimedia e filigrana: solo avvisi, mai bloccanti
+  local mmissing=""
+  for t in gpu-screen-recorder ffmpeg ffprobe; do
+    command -v "$t" &>/dev/null || mmissing="$mmissing $t"
+  done
+  command -v magick &>/dev/null || command -v convert &>/dev/null || mmissing="$mmissing magick"
+  if [ -n "$mmissing" ]; then
+    echo "[INSTALL]   ⚠ Mancano per screenshot, clip e Multimedia:${mmissing}"
+    echo "[INSTALL]     Arch:   sudo pacman -S gpu-screen-recorder ffmpeg imagemagick"
+    echo "[INSTALL]     Debian: sudo apt install ffmpeg imagemagick  (gpu-screen-recorder: dai sorgenti, https://git.dec05eba.com/gpu-screen-recorder)"
   fi
   if [ ! -f /usr/share/xsessions/openbox.desktop ]; then
     echo "[INSTALL]   ⚠ /usr/share/xsessions/openbox.desktop assente: la voce \"Openbox\" non comparirà nel greeter finché non installi il pacchetto openbox."

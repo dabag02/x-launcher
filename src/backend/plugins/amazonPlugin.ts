@@ -127,6 +127,80 @@ function getLibraryFromNile(): Promise<NileEntitlement[]> {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// v3.2.17-dev.8 — card fissa "Amazon Luna" (streaming via browser)
+// ---------------------------------------------------------------------------
+//
+// Riga VERA nel DB (non virtuale come Steam Big Picture): passa dal normale
+// launchGame() con il runner 'Web Stream' (runners/implementations.ts) e
+// ottiene scope xlauncher-game-amazon-luna-<ts>, tempo di gioco, cronologia
+// del tray, limite di 2 giochi e congelamento negli spazi (spaces.py,
+// web_app_scopes). Sempre presente, anche senza nile o senza login Amazon
+// Games: Luna non dipende da nile. Sempre "installata"; installazione e
+// disinstallazione sono rifiutate in gameManager. Niente arricchimento
+// SGDB/IGDB (metadataManager): copertina e testo vengono da qui.
+// URL: X_LAUNCHER_LUNA_URL nel .env, altrimenti quello indicato dall'utente.
+// Usato solo al primo inserimento: l'upsert non sovrascrive mai
+// executable_path, quindi un URL cambiato dalla card resta.
+
+export const AMAZON_LUNA_GAME_ID = 'amazon-luna';
+const DEFAULT_LUNA_URL = 'https://luna.amazon.it/?g=s';
+
+// Segnaposto grafico, nello stesso spirito di quello di Big Picture: nessun
+// logo o marchio, solo forme e il nome in testo semplice.
+const LUNA_COVER = `data:image/svg+xml,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 900">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1140"/><stop offset="1" stop-color="#3a1f7a"/>
+    </linearGradient>
+  </defs>
+  <rect width="600" height="900" fill="url(#g)"/>
+  <circle cx="330" cy="330" r="150" fill="#f3efe0" opacity="0.92"/>
+  <circle cx="390" cy="290" r="150" fill="#2a1760"/>
+  <path d="M170 520 a70 70 0 0 1 120 -40 a90 90 0 0 1 170 30 a60 60 0 0 1 -10 120 h-260 a60 60 0 0 1 -20 -110z" fill="#8f7bd8" opacity="0.85"/>
+  <polygon points="295,545 295,615 355,580" fill="#1b1140"/>
+  <text x="300" y="760" font-family="Noto Sans, sans-serif" font-size="64" font-weight="800" fill="#f3efe0" text-anchor="middle" letter-spacing="10">LUNA</text>
+  <text x="300" y="815" font-family="Noto Sans, sans-serif" font-size="26" fill="#cfc6f2" text-anchor="middle" letter-spacing="6">CLOUD GAMING</text>
+</svg>`)}`;
+
+const LUNA_PREVIEW = `data:image/svg+xml,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#120b2e"/><stop offset="1" stop-color="#3a1f7a"/>
+    </linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#g)"/>
+  <circle cx="1380" cy="420" r="260" fill="#f3efe0" opacity="0.9"/>
+  <circle cx="1480" cy="350" r="260" fill="#24145a"/>
+  <path d="M1120 800 a110 110 0 0 1 190 -60 a140 140 0 0 1 260 50 a95 95 0 0 1 -15 185 h-410 a95 95 0 0 1 -25 -175z" fill="#8f7bd8" opacity="0.6"/>
+</svg>`)}`;
+
+/** v3.2.17-dev.9 — segnaposto della card, per tornarci se le immagini locali spariscono e SGDB non dà nulla. */
+export function webStreamPlaceholderImages(gameId: string): { coverImage: string; previewImage: string } | null {
+  return gameId === AMAZON_LUNA_GAME_ID ? { coverImage: LUNA_COVER, previewImage: LUNA_PREVIEW } : null;
+}
+
+function makeLunaCard(): Game {
+  return {
+    id:             AMAZON_LUNA_GAME_ID,
+    title:          'Amazon Luna',
+    store:          'Amazon Games' as const,
+    runner:         'Web Stream' as const,
+    isInstalled:    true,
+    status:         'Ready to Launch',
+    executablePath: process.env.X_LAUNCHER_LUNA_URL?.trim() || DEFAULT_LUNA_URL,
+    coverImage:     LUNA_COVER,
+    previewImage:   LUNA_PREVIEW,
+    rating:         0,
+    playTimeHours:  0,
+    tags:           ['Luna', 'Cloud', 'Streaming'],
+    genres:         [],
+    description:    'Amazon Luna cloud gaming, in its own browser window: play streamed games with your controller, like any other game in the library.',
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Plugin principale
 // ---------------------------------------------------------------------------
 
@@ -138,19 +212,22 @@ export class AmazonPlugin extends StorePlugin {
   readonly requiredTool = 'nile';
 
   async getLibrary(): Promise<Game[]> {
+    // v3.2.17-dev.8 — card fissa Amazon Luna, indipendente da nile.
+    const luna = makeLunaCard();
+
     if (!binaryExists('nile')) {
       writeLog('warning', '[Amazon] nile not found. Install with: yay -S nile-git');
-      return [];
+      return [luna];
     }
 
     const rawEntries = await getLibraryFromNile();
 
     if (rawEntries.length === 0) {
       writeLog('warning', '[Amazon] No titles found. Have you run nile auth --login?');
-      return [];
+      return [luna];
     }
 
-    const games: Game[] = [];
+    const games: Game[] = [luna];
     const seenProductIds = new Set<string>();
 
     for (const entry of rawEntries) {
@@ -193,8 +270,8 @@ export class AmazonPlugin extends StorePlugin {
       });
     }
 
-    const installedCount = games.filter(g => g.isInstalled).length;
-    writeLog('info', `[Amazon] ${games.length} titles (${installedCount} installed)`);
+    const installedCount = games.filter(g => g.isInstalled && g.id !== AMAZON_LUNA_GAME_ID).length;
+    writeLog('info', `[Amazon] ${games.length - 1} titles (${installedCount} installed) + Amazon Luna card`);
     return games;
   }
 

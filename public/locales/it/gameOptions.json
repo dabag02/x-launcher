@@ -62,5 +62,6 @@
   "gamescopeFullscreen": "schermo intero — risoluzione monitor",
   "gamescope4k": "schermo intero — override 4K",
   "gamescopeWindowed": "finestra",
-  "noRunnerFound": "Nessun runner trovato. Apri Sistema → Runner per installarne uno."
+  "noRunnerFound": "Nessun runner trovato. Apri Sistema → Runner per installarne uno.",
+  "serviceUrl": "Indirizzo del servizio"
 }

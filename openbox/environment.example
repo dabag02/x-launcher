@@ -1,0 +1,123 @@
+# =============================================================
+#  X-Launcher — ~/.config/openbox/environment  (v3.3.17-Mars)
+#
+#  Letto da openbox-session all'avvio della sessione "Shell": le variabili
+#  arrivano ad autostart, kiosk-launch.sh, tray.py, spaces.py e overlay.py.
+#  Installazione:
+#    cp <PROGETTO>/openbox/environment.example ~/.config/openbox/environment
+#  Le modifiche valgono dal login successivo (esci e rientra nella sessione).
+#
+#  Convenzione di questo file:
+#   - righe "export" attive  = valore predefinito, scritto per esteso;
+#   - righe "# export"       = opzioni facoltative, spente: togli il "#" per attivarle.
+#  Togliere una riga attiva equivale a lasciare il valore predefinito.
+#
+#  NON vanno qui (stanno nel .env del demone, ~/.local/share/x-launcher/.env):
+#  chiavi API (IGDB, SteamGridDB, YouTube...) e X_LAUNCHER_SCREENSHOT_QUALITY.
+# =============================================================
+
+
+# ---------- Sessione e Dashboard (autostart / kiosk-launch.sh) ----------
+
+# Modalità spazi: un gioco per spazio, Dashboard sempre raggiungibile. 0 = spenta.
+export X_LAUNCHER_SPACES_MODE=1
+
+# Server della Dashboard:
+#   auto = locale (porta 3001) solo se il progetto NON è /opt/x-launcher (copia di sviluppo)
+#   1    = sempre il server locale della copia del symlink (serve "npm run build")
+#   0    = sempre xdash.service (/opt/x-launcher, porta 3000)
+export X_LAUNCHER_LOCAL_SERVER=auto
+
+# Indirizzo del backend per tray.py, spaces.py e overlay.py: lo imposta da solo
+# kiosk-launch.sh (porta 3000, oppure 3001 con il server locale). Non serve impostarlo qui.
+# export X_LAUNCHER_URL=http://localhost:3000
+
+# Cartella del progetto da usare al posto di quella ricavata dal symlink di autostart.
+# export X_LAUNCHER_DIR=/opt/x-launcher
+
+# Etichetta "DEV" sulla Dashboard anche fuori dal server locale. Vuota = automatica.
+# export X_LAUNCHER_SPACES_BADGE=1
+
+# Apre Steam Big Picture in background a inizio sessione (avvio dei giochi Steam più rapido).
+# export X_LAUNCHER_STEAM_PRESTART=1
+
+
+# ---------- Overlay degli spazi (Select + D-pad) ----------
+
+# 1 = Select + D-pad apre l'overlay a schermo intero; 0 = cambio spazio diretto.
+export X_LAUNCHER_SPACES_OVERLAY=1
+
+# L'overlay prende il pad in esclusiva mentre è aperto (il gioco non riceve input).
+export X_LAUNCHER_OVERLAY_GRAB=1
+
+# Chiusura automatica dell'overlay dopo N secondi senza input.
+export X_LAUNCHER_OVERLAY_IDLE_S=60
+
+# Immagine di sfondo dell'overlay: auto | hero | cover | off
+export X_LAUNCHER_OVERLAY_ART=auto
+
+# Interruttori rapidi mostrati nell'overlay (ordine incluso): bt, wifi, lan
+export X_LAUNCHER_OVERLAY_TOGGLES=bt,wifi,lan
+
+# Attesa prima di scongelare il gioco alla chiusura dell'overlay (secondi).
+export X_LAUNCHER_OVERLAY_THAW_DELAY_S=0.6
+
+# Font sostitutivi (default: assets/fonts/NotoSans-*.ttf del progetto).
+# export X_LAUNCHER_OVERLAY_FONT=/usr/share/fonts/noto/NotoSans-Regular.ttf
+# export X_LAUNCHER_OSD_FONT=/usr/share/fonts/noto/NotoSans-Bold.ttf
+
+
+# ---------- Congelamento degli spazi (spaces.py) ----------
+
+# Congela (cgroup freezer) i giochi negli spazi non visibili.
+export X_LAUNCHER_SPACES_FREEZE=1
+
+# Congela anche la Dashboard quando non è lo spazio attivo.
+export X_LAUNCHER_SPACES_FREEZE_DASHBOARD=1
+
+# Tempi del congelamento (secondi). Cambiarli solo per diagnosticare problemi.
+export XL_SPACES_FREEZE_DELAY_S=0.4
+export XL_SPACES_DASHBOARD_FREEZE_DELAY_S=2.0
+export XL_SPACES_GRACE_S=3.0
+export XL_SPACES_KEEP_MAX_DELAY_S=0.5
+export XL_SPACES_THAW_SETTLE_S=0.25
+
+# Riconoscimento delle finestre di un gioco appena lanciato (secondi).
+export XL_SPACES_LAUNCH_GRACE_S=20
+export XL_SPACES_LAUNCH_WINDOW_S=45
+
+# Eseguibile systemctl usato per gli scope dei giochi.
+# export XL_SPACES_SYSTEMCTL=systemctl
+
+
+# ---------- Multimedia: screenshot e clip ----------
+
+# Durata massima di una clip registrata (secondi).
+export X_LAUNCHER_CLIP_MAX_S=120
+
+# Pressione prolungata del tasto Share per avviare la clip invece dello screenshot (secondi).
+export X_LAUNCHER_SHARE_HOLD_S=1.0
+
+# Cartella TEMPORANEA delle clip (default: /tmp/x-launcher-<uid>/clips). Deve coincidere con
+# quella calcolata dal demone (mediaLibrary.ts): cambiarla solo qui rompe le clip.
+# export X_LAUNCHER_CLIPS_DIR=/tmp/x-launcher-1000/clips
+
+
+# ---------- Sfondi contestuali degli spazi ----------
+
+# Sfondo del desktop dello spazio con l'artwork del gioco. 0 = sfondo neutro.
+export X_LAUNCHER_SPACE_BG=1
+
+# Cartella delle immagini di sfondo (default: ~/.local/share/x-launcher/covers).
+# export X_LAUNCHER_COVERS_DIR="$HOME/.local/share/x-launcher/covers"
+
+
+# ---------- Percorsi alternativi (solo sviluppo) ----------
+
+# export X_LAUNCHER_WINDOW_RULES="$HOME/.local/share/x-launcher/window-rules.json"
+# export X_LAUNCHER_APP_CONF="$HOME/.local/share/x-launcher/app.conf"
+# export X_LAUNCHER_LOCALES=/opt/x-launcher/dist/locales
+# export X_LAUNCHER_THEMES=/opt/x-launcher/themes
+
+# Forza tray.py in modalità Shell (senza systray) anche fuori dalla sessione Openbox.
+# export X_LAUNCHER_SHELL=1

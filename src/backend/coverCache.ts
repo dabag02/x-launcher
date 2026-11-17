@@ -30,6 +30,7 @@ import type { Game } from '../types';
 import { DATA_DIR } from './paths';
 import { writeLog } from './logger';
 import { safePublicDownload } from './urlSafety';
+import { isWebArtUrl, webArtFileFromUrl } from './webArt';
 
 export const COVERS_DIR = path.join(DATA_DIR, 'covers');
 
@@ -57,7 +58,7 @@ function readMeta(key: string): Meta {
   }
 }
 
-function isImage(buf: Buffer): boolean {
+export function isImage(buf: Buffer): boolean {
   if (buf.length < 12) return false;
   if (buf[0] === 0xff && buf[1] === 0xd8) return true;                                   // JPEG
   if (buf[0] === 0x89 && buf.toString('latin1', 1, 4) === 'PNG') return true;            // PNG
@@ -75,7 +76,7 @@ async function download(url: string): Promise<Buffer | null> {
 }
 
 /** File normale (non cartella/dispositivo), entro MAX_BYTES, con intestazione d'immagine riconosciuta. */
-function isLocalImageFile(file: string): boolean {
+export function isLocalImageFile(file: string): boolean {
   let fd: number | undefined;
   try {
     const real = realpathSync(file);
@@ -110,7 +111,9 @@ async function cacheOne(key: string, kind: Kind, src: string | undefined, meta: 
       if (!buf) return existsSync(dest);                        // tiene la copia precedente, se c'e'
       writeAtomic(dest, buf);
     } else {
-      const local = src.startsWith('file://') ? decodeURIComponent(src.slice(7)) : src;
+      // v3.2.17-dev.9 — immagini locali delle card Web Stream (/api/web-art/..., vedi webArt.ts)
+      const local = isWebArtUrl(src) ? (webArtFileFromUrl(src) ?? '')
+        : src.startsWith('file://') ? decodeURIComponent(src.slice(7)) : src;
       if (!path.isAbsolute(local) || !existsSync(local)) return existsSync(dest);
       // v3.0.2-dev.5 — si copia solo se e' davvero un'immagine di dimensione ragionevole: prima qualunque file
       // leggibile indicato come "copertina" finiva nella cartella delle copertine (e da li' poteva essere servito).
@@ -179,7 +182,8 @@ export function pruneCovers(validIds: string[]): number {
   try {
     const keep = new Set(validIds.map(coverKey));
     for (const f of readdirSync(COVERS_DIR)) {
-      const key = f.replace(/\.(cover|hero|json)$/, '').replace(/\.tmp-\d+$/, '');
+      // v3.2.29-dev.17 — anche lo sfondo degli spazi (<id>.bg e <id>.bg.json, spaceBackground.ts)
+      const key = f.replace(/\.tmp-\d+$/, '').replace(/\.(bg\.json|cover|hero|bg|json)$/, '');
       if (!keep.has(key)) {
         try { unlinkSync(path.join(COVERS_DIR, f)); removed++; } catch { /* ignora */ }
       }

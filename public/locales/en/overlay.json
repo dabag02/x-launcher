@@ -27,5 +27,17 @@
   "readonly": "Status only: not switchable",
   "noaudio": "Audio not available",
   "btpad": "The controller in use is Bluetooth: not turning it off",
-  "failed": "Operation failed"
+  "failed": "Operation failed",
+  "close": "Close",
+  "close_confirm": "Confirm close",
+  "closing": "Closing…",
+  "close_failed": "Could not close",
+  "close_na": "This space can't be closed from here",
+  "osd_screenshot": "Screenshot captured",
+  "rec": "Record",
+  "rec_stop": "Stop",
+  "rec_paused": "Paused",
+  "rec_na": "Recording not available",
+  "osd_rec_hint": "Press Share to stop recording",
+  "osd_rec_done": "Recording finished"
 }

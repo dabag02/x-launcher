@@ -532,6 +532,8 @@ def run_shell_mode():
 
 
 def main():
+    # v3.2.17-dev.5 — demone usato (porta 3000 = xdash in /opt, 3001 = --local-server)
+    print(f"[tray] Daemon: {DAEMON_URL}", flush=True)
     if SHELL_MODE:
         run_shell_mode()
         return

@@ -18,6 +18,16 @@
   "installedFilter": "Installati",
   "genres": "Generi",
   "categories": "Categorie",
+  "sortAsc": "Crescente",
+  "sortDesc": "Decrescente",
+  "filters": "Filtri",
+  "sortLabel": "Ordina",
+  "sortShort": {
+    "title": "Titolo",
+    "playTime": "Tempo di gioco",
+    "rating": "Voto",
+    "installDate": "Data installazione"
+  },
   "noMatchingTitles": "Nessun titolo trovato",
   "tryAdjustingFilters": "Prova a modificare i filtri o i termini di ricerca",
   "clearAllFilters": "Cancella Tutti i Filtri",
@@ -123,7 +133,8 @@
   "launcherDescriptions": {
     "ea_app_launcher": "Launcher EA App — richiesto da alcuni giochi EA comprati su Epic, GOG, Amazon Games o Steam. Installalo una sola volta: verrà condiviso da tutti i giochi che lo richiedono.",
     "ubisoft_connect_launcher": "Launcher Ubisoft Connect — richiesto da alcuni giochi Ubisoft comprati su Epic, GOG o Amazon Games. Installalo una sola volta: verrà condiviso da tutti i giochi che lo richiedono.",
-    "steam_bigpicture_launcher": "Passa a Steam in modalità Big Picture, con la tua libreria Steam completa e l'interfaccia controller-first nativa di Valve."
+    "steam_bigpicture_launcher": "Passa a Steam in modalità Big Picture, con la tua libreria Steam completa e l'interfaccia controller-first nativa di Valve.",
+    "amazon_luna": "Amazon Luna, il cloud gaming di Amazon, in una finestra del browser tutta sua: giochi in streaming col controller, come ogni altro gioco della libreria. Al primo avvio accedi con il tuo account Amazon."
   },
   "splash": {
     "launchingFrom": "Avvio da {{store}}...",

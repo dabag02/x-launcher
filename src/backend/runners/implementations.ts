@@ -1100,6 +1100,97 @@ export function openSteamBigPicture(): { success: boolean; message: string } {
 }
 
 
+// ---------------------------------------------------------------------------
+// v3.2.17-dev.8 — Web Stream: servizi di gioco in streaming via browser
+// (Amazon Luna, card fissa del plugin Amazon Games) gestiti come un gioco.
+// ---------------------------------------------------------------------------
+//
+// Un SECONDO Chromium, separato dalla Dashboard:
+//   --user-data-dir proprio  → obbligatorio: con lo stesso profilo Chromium
+//       passerebbe l'URL all'istanza già aperta (la Dashboard) ed uscirebbe
+//       subito, aprendo il servizio DENTRO la Dashboard (congelata con lei);
+//       il profilo conserva anche il login al servizio.
+//   --app=<url>              → finestra senza interfaccia del browser;
+//   --class=xlauncher-web-…  → classe X riconoscibile nei log di spaces.py;
+//   --start-fullscreen       → come provato a mano sull'HTPC con Luna.
+// Lanciato nello scope xlauncher-game-<id>-<ts> come ogni gioco: tempo di
+// gioco, cronologia, limite di 2 giochi e Gestore dei processi funzionano
+// da soli. Chromium sposta il suo processo principale in uno scope proprio
+// (app-org.chromium.Chromium-<n>, verificato): spaces.py lo riconosce dai
+// figli rimasti nel nostro scope e congela i due insieme (web_app_scopes).
+//
+// URL: game.executablePath (solo https://), modificabile dalla card.
+// Browser: X_LAUNCHER_WEB_BROWSER nel .env, altrimenti il primo trovato fra
+// chromium, google-chrome-stable, google-chrome.
+// Profilo: ~/.local/share/x-launcher/web-profiles/<id del gioco>.
+export const WEB_STREAM_BROWSERS = ['chromium', 'google-chrome-stable', 'google-chrome'];
+
+function resolveWebBrowser(): string | null {
+  const fromEnv = process.env.X_LAUNCHER_WEB_BROWSER?.trim();
+  if (fromEnv) return binaryExists(fromEnv) ? fromEnv : null;
+  return WEB_STREAM_BROWSERS.find(b => binaryExists(b)) ?? null;
+}
+
+export function webStreamProfileDir(gameId: string): string {
+  return path.join(DATA_DIR, 'web-profiles', gameId.replace(/[^A-Za-z0-9_.-]/g, '-'));
+}
+
+/**
+ * v3.2.17-dev.10 — chiude il browser di una card Web Stream. Chromium sposta il proprio processo
+ * principale fuori dal nostro scope (app-org.chromium.Chromium-<n>): terminare lo scope del gioco
+ * (Gestore dei processi, pulsante X dell'overlay degli spazi) chiude solo i figli. Il processo
+ * principale si riconosce senza ambiguità dal profilo dedicato (--user-data-dir), che nessun altro
+ * Chromium usa — mai la Dashboard. SIGTERM: chiusura ordinata, il profilo resta integro.
+ */
+export function stopWebStreamBrowser(gameId: string): void {
+  const profile = webStreamProfileDir(gameId);
+  const rx = `--user-data-dir=${profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( |$)`;
+  try {
+    execFileSync('pkill', ['-TERM', '-f', '--', rx], { stdio: 'ignore', timeout: 5000 });
+    writeLog('launch', `[WEB-STREAM] Browser closed (profile ${profile}).`);
+  } catch { /* pkill esce con 1 se non trova nulla: il browser era già chiuso */ }
+}
+
+export class WebStreamRunner extends BaseRunner {
+  readonly id = 'Web Stream';
+  readonly name = 'Web Stream (browser)';
+
+  async launch(game: Game, config?: RunnerConfig) {
+    const browser = resolveWebBrowser();
+    if (!browser) {
+      const wanted = process.env.X_LAUNCHER_WEB_BROWSER?.trim();
+      return { success: false, message: wanted
+        ? `Browser "${wanted}" (X_LAUNCHER_WEB_BROWSER) non trovato`
+        : `Nessun browser Chromium trovato (${WEB_STREAM_BROWSERS.join(', ')})` };
+    }
+    const url = (game.executablePath ?? '').trim();
+    if (!/^https:\/\/[^\s]+$/i.test(url)) {
+      return { success: false, message: `Indirizzo del servizio non valido per ${game.title}: serve un URL https://` };
+    }
+    const profile = webStreamProfileDir(game.id);
+    try { mkdirSync(profile, { recursive: true }); } catch { /* lo crea comunque Chromium */ }
+
+    const args = [
+      `--user-data-dir=${profile}`,
+      `--app=${url}`,
+      `--class=xlauncher-web-${game.id.replace(/[^A-Za-z0-9_.-]/g, '-')}`,
+      '--start-fullscreen',
+      '--no-first-run',
+      '--no-default-browser-check',
+      ...(config?.args ?? []),
+    ];
+    writeLog('launch', `[WEB-STREAM] ${browser} ${args.join(' ')}`);
+    const { pid, unit } = spawnDetached(browser, args, config?.env ?? {}, undefined, undefined, { id: game.id, title: game.title, kind: 'game' });
+    return { success: true, pid, unit, message: `${game.title} avviato in ${browser}` };
+  }
+
+  async isAvailable() { return resolveWebBrowser() !== null; }
+  async version() {
+    const b = resolveWebBrowser();
+    return b ? getBinaryVersion(b, '--version') : 'n/a';
+  }
+}
+
 export class ScummVMRunner extends BaseRunner {
   readonly id = 'ScummVM';
   readonly name = 'ScummVM';

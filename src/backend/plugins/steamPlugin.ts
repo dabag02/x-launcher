@@ -9,8 +9,9 @@
 
 import { StorePlugin } from './base';
 import { writeLog } from '../logger';
+import { estimateInstallDate } from '../installDate';
 import { Game } from '../../types';
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
 
@@ -153,6 +154,86 @@ async function fetchPlaytimeMap(steamId: string, apiKey: string): Promise<Map<st
 }
 
 // ---------------------------------------------------------------------------
+// v3.2.17-dev.4 — ore di gioco dal file locale del client Steam
+// ---------------------------------------------------------------------------
+//
+// userdata/<accountId>/config/localconfig.vdf, ramo
+// UserLocalConfigStore > Software > Valve > Steam > apps > <appid>:
+//   "Playtime"   minuti totali  (aggiornato da Steam alla CHIUSURA del gioco)
+//   "LastPlayed" epoch secondi  (aggiornato all'avvio e alla chiusura)
+// Verificato sull'HTPC dell'utente (Limbo, 48000): Playtime fermo durante la
+// sessione, +5 alla chiusura del gioco con Steam ancora aperto. Nessuna chiave
+// API, funziona anche offline — diventa la fonte principale; la Web API resta
+// come seconda fonte se configurata (vince il valore più alto dei due).
+
+/** accountId (cartella userdata) dallo SteamID64: id64 - 76561197960265728. */
+function accountIdFromSteamId64(steamId64: string): string | null {
+  try {
+    const id = BigInt(steamId64) - 76561197960265728n;
+    return id > 0n ? id.toString() : null;
+  } catch { return null; }
+}
+
+/**
+ * Percorso di localconfig.vdf dell'utente: quello dell'account indicato (STEAM_ID
+ * o utente MostRecent di loginusers.vdf) se esiste, altrimenti il più recente fra
+ * quelli presenti (un solo account nella norma).
+ */
+export function findLocalConfigPath(steamRoot: string, steamId64?: string | null): string | null {
+  const userdata = path.join(steamRoot, 'userdata');
+  if (!existsSync(userdata)) return null;
+  const preferred = steamId64 ? accountIdFromSteamId64(steamId64) : null;
+  if (preferred) {
+    const p = path.join(userdata, preferred, 'config', 'localconfig.vdf');
+    if (existsSync(p)) return p;
+  }
+  let best: { p: string; mtime: number } | null = null;
+  try {
+    for (const dir of readdirSync(userdata)) {
+      if (!/^\d+$/.test(dir) || dir === '0') continue;
+      const p = path.join(userdata, dir, 'config', 'localconfig.vdf');
+      try {
+        const m = statSync(p).mtimeMs;
+        if (!best || m > best.mtime) best = { p, mtime: m };
+      } catch { /* account senza localconfig */ }
+    }
+  } catch { /* userdata non leggibile */ }
+  return best?.p ?? null;
+}
+
+/** Ricerca di una chiave senza distinzione maiuscole/minuscole (Steam usa sia "apps" sia "Apps"). */
+function ciGet(obj: any, key: string): any {
+  if (!obj || typeof obj !== 'object') return undefined;
+  if (key in obj) return obj[key];
+  const k = Object.keys(obj).find(x => x.toLowerCase() === key.toLowerCase());
+  return k ? obj[k] : undefined;
+}
+
+/** appid → ore di gioco lette da localconfig.vdf (mappa vuota se il file manca o non si legge). */
+export function readLocalPlaytimeMap(localConfigPath: string | null): Map<string, number> {
+  const map = new Map<string, number>();
+  if (!localConfigPath) return map;
+  try {
+    const parsed = parseVdf(readFileSync(localConfigPath, 'utf-8'));
+    let node: any = ciGet(parsed, 'UserLocalConfigStore');
+    for (const k of ['Software', 'Valve', 'Steam', 'apps']) node = ciGet(node, k);
+    if (!node || typeof node !== 'object') return map;
+    for (const [appId, data] of Object.entries(node) as [string, any][]) {
+      const minutes = Number(ciGet(data, 'Playtime'));
+      if (/^\d+$/.test(appId) && Number.isFinite(minutes) && minutes > 0) map.set(appId, minutes / 60);
+    }
+  } catch (err) {
+    writeLog('warning', `[STEAM] Cannot read local playtime from ${localConfigPath}: ${err}`);
+  }
+  return map;
+}
+
+/** Steam ID attivo (STEAM_ID del .env o loginusers.vdf) — esportato per il watcher in gameManager. */
+export function resolveSteamId(steamRoot: string): string | null {
+  return process.env.STEAM_ID || getActiveSteamId(steamRoot);
+}
+
+// ---------------------------------------------------------------------------
 // Lettura copertine dalla cache locale di Steam
 // ---------------------------------------------------------------------------
 
@@ -206,6 +287,16 @@ export class SteamPlugin extends StorePlugin {
       writeLog('info', '[STEAM] Fetching playtime via Web API...');
       playtimeMap = await fetchPlaytimeMap(steamId, apiKey);
     }
+    // v3.2.17-dev.4 — ore dal file locale del client (vedi readLocalPlaytimeMap):
+    // vince il valore più alto fra file locale e Web API (la Web API può essere
+    // indietro di qualche minuto, il file locale non c'è se Steam non è mai
+    // stato avviato con questo account).
+    const localConfig = findLocalConfigPath(steamRoot, steamId);
+    const localPlaytime = readLocalPlaytimeMap(localConfig);
+    writeLog('info', `[STEAM] Local playtime: ${localPlaytime.size} games from ${localConfig ?? 'no localconfig.vdf found'}`);
+    for (const [appId, hours] of localPlaytime) {
+      if (hours > (playtimeMap.get(appId) ?? 0)) playtimeMap.set(appId, hours);
+    }
 
     // Leggi tutte le librerie (disco principale + dischi aggiuntivi)
     const libraryPaths = findAllLibraryPaths(steamRoot);
@@ -250,8 +341,17 @@ export class SteamPlugin extends StorePlugin {
 
           const sizeOnDisk  = parseInt(app['SizeOnDisk']  ?? '0', 10);
           const lastPlayed  = parseInt(app['LastPlayed']  ?? '0', 10);
-          const installedAt = app['LastUpdated']
-            ? new Date(parseInt(app['LastUpdated'], 10) * 1000).toISOString()
+          // v3.2.17-dev.2 — data di installazione: creazione (birthtime)
+          // della cartella del gioco in steamapps/common/<installdir>.
+          // Prima si usava LastUpdated del manifest, che è la data
+          // dell'ultimo AGGIORNAMENTO: un gioco installato anni fa e
+          // aggiornato ieri finiva in cima all'ordinamento "Installazione".
+          // LastUpdated resta solo come ripiego se la cartella non c'è.
+          const installDir  = app['installdir'] ?? app['InstallDir'] ?? '';
+          const lastUpdated = parseInt(app['LastUpdated'] ?? '0', 10);
+          const installedAt = isInstalled
+            ? (estimateInstallDate([installDir ? path.join(libPath, 'common', installDir) : undefined])
+               ?? (lastUpdated > 0 ? new Date(lastUpdated * 1000).toISOString() : undefined))
             : undefined;
 
           const playHours = playtimeMap.get(appId) ?? 0;

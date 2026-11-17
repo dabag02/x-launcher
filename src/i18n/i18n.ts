@@ -33,7 +33,7 @@ i18n
     lng: 'it',
     fallbackLng: 'it',
     supportedLngs: ['it', 'en'],
-    ns: ['settings', 'quickMenu', 'dashboard', 'gameOptions', 'downloads', 'notifications', 'avatarLibrary', 'processManager'],
+    ns: ['settings', 'quickMenu', 'dashboard', 'gameOptions', 'downloads', 'notifications', 'avatarLibrary', 'processManager', 'multimedia'],
     defaultNS: 'settings',
     backend: {
       // Percorso relativo: risolto sia dal dev server Vite (che serve

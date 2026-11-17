@@ -27,5 +27,17 @@
   "readonly": "Solo stato: non attivabile",
   "noaudio": "Audio non disponibile",
   "btpad": "Il controller in uso è Bluetooth: non lo spengo",
-  "failed": "Operazione non riuscita"
+  "failed": "Operazione non riuscita",
+  "close": "Chiudi",
+  "close_confirm": "Conferma chiusura",
+  "closing": "Chiusura in corso…",
+  "close_failed": "Chiusura non riuscita",
+  "close_na": "Questo spazio non si può chiudere da qui",
+  "osd_screenshot": "Screenshot acquisito",
+  "rec": "Registra",
+  "rec_stop": "Interrompi",
+  "rec_paused": "In pausa",
+  "rec_na": "Registrazione non disponibile",
+  "osd_rec_hint": "Premi Share per interrompere la registrazione",
+  "osd_rec_done": "Registrazione conclusa"
 }

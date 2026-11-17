@@ -335,8 +335,13 @@ if [ -x "$TRAY_VENV/bin/python3" ] && [ -f "$PROJECT_DIR/tray.py" ]; then
     # indefinitamente e mostra sempre solo l'ultima sessione.
     TRAY_LOG="${XDG_DATA_HOME:-$HOME/.local/share}/x-launcher/tray.log"
     mkdir -p "$(dirname "$TRAY_LOG")"
-    "$TRAY_VENV/bin/python3" "$PROJECT_DIR/tray.py" >"$TRAY_LOG" 2>&1 &
-    echo "[KIOSK] Systray avviato (PID $!). Log: $TRAY_LOG"
+    # v3.2.17-dev.5 — il tray parla col demone giusto: tray.py usa X_LAUNCHER_URL (default
+    # http://localhost:3000, cioè xdash in /opt). Con --local-server il demone di sviluppo è sulla
+    # porta ${LOCAL_SERVER_PORT}: senza passargli LAUNCHER_URL la cronologia "Giochi recenti" restava
+    # vuota (xdash fermo o non raggiungibile, errore ignorato da fetch_recent_games), e anche il
+    # lancio dal menu e il controllo "gioco in corso" andavano al demone sbagliato.
+    X_LAUNCHER_URL="$LAUNCHER_URL" "$TRAY_VENV/bin/python3" "$PROJECT_DIR/tray.py" >"$TRAY_LOG" 2>&1 &
+    echo "[KIOSK] Systray avviato (PID $!, demone ${LAUNCHER_URL}). Log: $TRAY_LOG"
   else
     echo "[KIOSK] Systray già attivo — skip."
   fi

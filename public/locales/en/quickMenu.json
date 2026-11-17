@@ -19,5 +19,6 @@
   "localServerBadge": "Local server · :{{port}}",
   "spacesBadge": "Spaces mode · space {{space}} · games {{games}}",
   "spacesBadgeUnreachable": "Spaces mode · manager unreachable",
-  "credits": "conceived and developed with Claude Code by Daniele Bagaglini"
+  "credits": "conceived and developed with Claude Code by Daniele Bagaglini",
+  "multimedia": "Multimedia"
 }

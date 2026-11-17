@@ -15,6 +15,7 @@
 
 import { StorePlugin } from './base';
 import { writeLog } from '../logger';
+import { estimateInstallDate } from '../installDate';
 import { Game } from '../../types';
 import { execSync, spawn } from 'child_process';
 import path from 'path';
@@ -147,7 +148,10 @@ interface LegendaryInstalled {
   executable?: string;
 }
 
-function getInstalledFromLegendary(): Promise<Set<string>> {
+// v3.2.17-dev.2 — restituisce anche install_path (app_name → percorso),
+// usato per la data di installazione (birthtime della cartella). Il
+// percorso può mancare: il gioco resta comunque "installato".
+function getInstalledFromLegendary(): Promise<Map<string, string | undefined>> {
   return new Promise((resolve) => {
     const proc = spawn('legendary', ['list-installed', '--json'], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -156,7 +160,7 @@ function getInstalledFromLegendary(): Promise<Set<string>> {
     let stdout = '';
     const timer = setTimeout(() => {
       proc.kill();
-      resolve(new Set());
+      resolve(new Map());
     }, LEGENDARY_INSTALLED_TIMEOUT_MS);
 
     proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
@@ -165,18 +169,18 @@ function getInstalledFromLegendary(): Promise<Set<string>> {
       clearTimeout(timer);
       try {
         const parsed: LegendaryInstalled[] = JSON.parse(stdout);
-        const installed = new Set(
-          Array.isArray(parsed) ? parsed.map(g => g.app_name) : []
+        const installed = new Map<string, string | undefined>(
+          Array.isArray(parsed) ? parsed.map(g => [g.app_name, g.install_path] as [string, string | undefined]) : []
         );
         resolve(installed);
       } catch {
-        resolve(new Set());
+        resolve(new Map());
       }
     });
 
     proc.on('error', () => {
       clearTimeout(timer);
-      resolve(new Set());
+      resolve(new Map());
     });
   });
 }
@@ -238,6 +242,7 @@ export class EpicPlugin extends StorePlugin {
         tags:         [],
         genres:       [],
         description:  entry.metadata.description ?? '',
+        installedAt:  isInstalled ? estimateInstallDate([installedSet.get(entry.app_name)]) : undefined,
       });
     }
 

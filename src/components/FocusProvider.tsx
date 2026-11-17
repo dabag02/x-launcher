@@ -13,7 +13,7 @@ export type NavigationStrategy = 'geometric' | 'sequential';
 interface FocusContextType {
   focusedId: string | null;
   setFocusedId: (id: string | null, axis?: 'vertical' | 'horizontal', skipScroll?: boolean) => void;
-  register: (id: string, group: string, ref: React.RefObject<HTMLElement | null>, onEnterRef: React.RefObject<(() => void) | undefined>, fallbackPriority?: number, neighbors?: Partial<Record<'up' | 'down' | 'left' | 'right', string>>, sequentialChain?: string, chainAxis?: 'vertical' | 'horizontal' | 'flow') => void;
+  register: (id: string, group: string, ref: React.RefObject<HTMLElement | null>, onEnterRef: React.RefObject<(() => void) | undefined>, fallbackPriority?: number, neighbors?: Partial<Record<'up' | 'down' | 'left' | 'right', string>>, sequentialChain?: string, chainAxis?: 'vertical' | 'horizontal' | 'flow', chainWrap?: boolean) => void;
   unregister: (id: string) => void;
   moveFocus: (direction: 'up' | 'down' | 'left' | 'right') => void;
   // Congela tutta la navigazione gamepad (es. durante un gioco in esecuzione)
@@ -115,6 +115,12 @@ interface RegistryItem {
   // si comporta come una singola sequenza in ordine di lettura,
   // indipendente da dove esattamente il testo va a capo.
   chainAxis?: 'vertical' | 'horizontal' | 'flow';
+  // v3.2.17-dev.3 — ciclo ai bordi della catena: oltre l'ultimo elemento
+  // si torna al primo e viceversa, come le righe della tastiera virtuale,
+  // invece di uscire dalla catena verso neighbors/scoring geometrico.
+  // Vale solo per le direzioni dell'asse della catena: le altre (es.
+  // su/giù su una catena orizzontale) escono normalmente dalla riga.
+  chainWrap?: boolean;
 }
 
 // Verifica che l'elemento sia visibile nel viewport e abbia dimensioni reali.
@@ -389,7 +395,7 @@ export const FocusProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // mescolati a quelli reali, e moveFocus calcolava punteggi su nodi morti,
   // producendo salti casuali e blocchi totali della navigazione.
   // Ora register AGGIORNA sempre il ref se l'id esiste già.
-  const register = useCallback((id: string, group: string, ref: React.RefObject<HTMLElement | null>, onEnterRef: React.RefObject<(() => void) | undefined>, fallbackPriority: number = 0, neighbors?: Partial<Record<'up' | 'down' | 'left' | 'right', string>>, sequentialChain?: string, chainAxis?: 'vertical' | 'horizontal' | 'flow') => {
+  const register = useCallback((id: string, group: string, ref: React.RefObject<HTMLElement | null>, onEnterRef: React.RefObject<(() => void) | undefined>, fallbackPriority: number = 0, neighbors?: Partial<Record<'up' | 'down' | 'left' | 'right', string>>, sequentialChain?: string, chainAxis?: 'vertical' | 'horizontal' | 'flow', chainWrap?: boolean) => {
     const existing = registry.current.find(i => i.id === id);
     if (existing) {
       existing.ref = ref;
@@ -399,8 +405,9 @@ export const FocusProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       existing.neighbors = neighbors;
       existing.sequentialChain = sequentialChain;
       existing.chainAxis = chainAxis;
+      existing.chainWrap = chainWrap;
     } else {
-      registry.current.push({ id, group, ref, onEnterRef, fallbackPriority, neighbors, sequentialChain, chainAxis });
+      registry.current.push({ id, group, ref, onEnterRef, fallbackPriority, neighbors, sequentialChain, chainAxis, chainWrap });
     }
   }, []);
 
@@ -598,7 +605,13 @@ export const FocusProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const chainIndex = chainPool.findIndex(i => i.id === focusedId);
       if (chainIndex !== -1) {
         const forward = (direction === 'down' || direction === 'right');
-        const chainTargetIndex = forward ? chainIndex + 1 : chainIndex - 1;
+        let chainTargetIndex = forward ? chainIndex + 1 : chainIndex - 1;
+        // v3.2.17-dev.3 — chainWrap: ai bordi si cicla sul lato opposto
+        // (solo con almeno 2 elementi, altrimenti si resta fermi sull'unico).
+        if (current.chainWrap && chainPool.length > 1) {
+          if (chainTargetIndex >= chainPool.length) chainTargetIndex = 0;
+          else if (chainTargetIndex < 0) chainTargetIndex = chainPool.length - 1;
+        }
         if (chainTargetIndex >= 0 && chainTargetIndex < chainPool.length) {
           const chainTarget = chainPool[chainTargetIndex];
           const axis = (direction === 'left' || direction === 'right') ? 'horizontal' : 'vertical';
@@ -739,9 +752,11 @@ interface FocusableProps {
   // liste che vanno a capo in modo non prevedibile (flex-wrap con
   // elementi di larghezza variabile).
   chainAxis?: 'vertical' | 'horizontal' | 'flow';
+  // v3.2.17-dev.3 — ai bordi della catena cicla sul lato opposto (vedi RegistryItem).
+  chainWrap?: boolean;
 }
 
-export const Focusable: React.FC<FocusableProps> = ({ id, group = 'main', children, onEnter, className, disableHoverFocus = false, fallbackPriority = 0, neighbors, sequentialChain, chainAxis }) => {
+export const Focusable: React.FC<FocusableProps> = ({ id, group = 'main', children, onEnter, className, disableHoverFocus = false, fallbackPriority = 0, neighbors, sequentialChain, chainAxis, chainWrap }) => {
   const { focusedId, register, unregister, setFocusedId, activeGroup, isStaleMouseEnter } = useFocus();
   const ref = useRef<HTMLDivElement>(null);
   const isFocused = focusedId === id;
@@ -756,9 +771,9 @@ export const Focusable: React.FC<FocusableProps> = ({ id, group = 'main', childr
   const neighborsKey = neighbors ? JSON.stringify(neighbors) : '';
 
   useEffect(() => {
-    register(id, group, ref, onEnterRef, fallbackPriority, neighbors, sequentialChain, chainAxis);
+    register(id, group, ref, onEnterRef, fallbackPriority, neighbors, sequentialChain, chainAxis, chainWrap);
     return () => unregister(id);
-  }, [id, group, register, unregister, fallbackPriority, neighborsKey, sequentialChain, chainAxis]);
+  }, [id, group, register, unregister, fallbackPriority, neighborsKey, sequentialChain, chainAxis, chainWrap]);
 
   useEffect(() => {
     if (!isFocused) return;

@@ -1,5 +1,5 @@
 import { Game, Store, LogEntry, StoreType, DownloadTask, CompatibilityProfile } from '../types';
-import { readFileSync } from 'fs';
+import { readFileSync, watchFile, unwatchFile } from 'fs';
 import { execFileSync, execSync, spawn } from 'child_process';
 import { isSafeStoreId } from './safeExec';
 import { emitLaunchPhase } from './launchPhaseTracker';
@@ -10,7 +10,7 @@ import { MOCK_LOGS } from '../mockData';
 import { StorePlugin } from './plugins/base';
 import { GOGPlugin, isJunkGogSlug } from './plugins/gogPlugin';
 import { ALL_KNOWN_WINE_VERBS, OS_VERSION_VERBS } from '../wineVerbs';
-import { SteamPlugin } from './plugins/steamPlugin';
+import { SteamPlugin, findSteamRoot, findLocalConfigPath, readLocalPlaytimeMap, resolveSteamId } from './plugins/steamPlugin';
 import { EpicPlugin } from './plugins/epicPlugin';
 import { AmazonPlugin } from './plugins/amazonPlugin';
 import { BattlenetPlugin } from './plugins/battlenetPlugin';
@@ -21,16 +21,18 @@ import { getThirdPartyLauncherByStoreId, getThirdPartyLauncherDefinition, THIRD_
 import { ClassicPlugin, REMASTER_PRESETS, hasRemasterPreset, writeRemasterOptions, removeRemasterOptions } from './plugins/classicPlugin';
 import { getActiveDisplayEnv } from './activeDisplay';
 import { BaseRunner } from './runners/base';
-import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, launchEpicViaLegendary, expandHome } from './runners/implementations';
+import { WineRunner, ProtonRunner, DOSBoxRunner, RetroArchRunner, ScummVMRunner, SteamNativeRunner, WebStreamRunner, launchEpicViaLegendary, expandHome } from './runners/implementations';
 import { downloadManager, resolveGogExe, resolveRunnerWineEnv, storeDir, slugFromId } from './downloadManager';
 import { metadataManager } from './metadataManager';
 import { cacheLibraryCovers, cacheGameCovers } from './coverCache';
+import { ensureSpaceBackground, prefetchSpaceBackgrounds } from './spaceBackground';
 import { compatibilityManager } from './compatibilityManager';
 import * as db from './db';
 import { writeLog } from './logger';
 import { notificationEngine } from './notificationEngine';
 import * as attemptTracker from './aiProviders/attemptTracker';
 import * as processManager from './processManager';
+import { setKeepMaximized } from './windowRules';
 
 /**
  * Splitta una stringa di argomenti rispettando le virgolette.
@@ -63,6 +65,9 @@ function shellSplitArgs(args: string): string[] {
   return result.map(a => a.replace(/\\/g, '/'));
 }
 
+// v3.2.17-dev.7 — una sessione di gioco tracciata (lastLaunchedGame o backgroundSessions).
+type TrackedLaunch = { gameId: string; gameTitle: string; pid: number; unit?: string; launchedAt: number; logPath?: string; processNameHint?: string; processNameSeenAtLeastOnce?: boolean };
+
 class GameManager {
   private plugins: StorePlugin[] = [
     new GOGPlugin(),
@@ -84,7 +89,21 @@ class GameManager {
   // evento 'exit' per quel processo: l'unico modo per sapere se è
   // ancora vivo è controllare /proc/<pid> a richiesta (vedi
   // isLastLaunchedGameRunning), non un listener passivo.
-  private lastLaunchedGame: { gameId: string; gameTitle: string; pid: number; unit?: string; launchedAt: number; logPath?: string; processNameHint?: string; processNameSeenAtLeastOnce?: boolean } | null = null;
+  private lastLaunchedGame: TrackedLaunch | null = null;
+
+  // v3.2.17-dev.7 — sessioni di gioco "scavalcate": lastLaunchedGame segue un
+  // solo gioco. Con due giochi aperti negli spazi 1 e 2, lanciare il secondo
+  // sovrascriveva il primo, che perdeva il tempo di gioco della sessione (mai
+  // più controllato fino alla chiusura). Ora il gioco ancora vivo passa qui e
+  // il polling di chiusura lo controlla a parte, con lo stesso test di
+  // isTrackedLaunchAlive(): alla chiusura si somma il tempo di gioco.
+  // v3.2.29-dev.1 — alla chiusura vale ora tutto il percorso dell'ultimo
+  // gioco lanciato (handleSessionClosed): validazione, pulizia del launcher,
+  // chiusura dello scope con il launcher condiviso.
+  private backgroundSessions: TrackedLaunch[] = [];
+  // v3.2.29-dev.1 — sessioni in background la cui chiusura è in corso (è
+  // asincrona): il giro successivo del polling non le gestisce due volte.
+  private closingSessions = new Set<TrackedLaunch>();
 
   // v2.0.41-dev.7 — richiesta utente: la card "Steam Big Picture" deve
   // minimizzare X-Launcher al lancio (stesso comportamento di qualunque
@@ -265,6 +284,135 @@ class GameManager {
     return false;
   }
 
+  // v3.2.17-dev.6 — gioco Steam in corso, per bloccare la Dashboard (e far
+  // nascondere la finestra al tray) come per tutti gli altri giochi. Steam
+  // tiene vivo per tutta la sessione un processo
+  //   …/ubuntu12_32/reaper SteamLaunch AppId=<id> -- <eseguibile>
+  // (verificato sull'HTPC con Limbo 48000: presente a gioco aperto, sparito
+  // alla chiusura con Steam ancora aperto). RunningAppID di registry.vdf
+  // invece NON esiste sul sistema dell'utente: non usato.
+  // Margine di avvio: finché il reaper non è mai comparso il gioco risulta
+  // "in avvio" per STEAM_START_GRACE_MS (Steam a freddo nella sessione
+  // Openbox: gamescope + Big Picture + gioco). Se non compare entro il
+  // margine (lancio annullato o fallito dentro Steam) la sessione si chiude.
+  private steamRunning: { gameId: string; gameTitle: string; appId: string; launchedAt: number; seen: boolean } | null = null;
+  private steamRunningCache: { at: number; alive: boolean } | null = null;
+  private static readonly STEAM_START_GRACE_MS = 120_000;
+  private static readonly STEAM_CHECK_CACHE_MS = 2_000;
+
+  private trackSteamLaunch(game: Game) {
+    const appId = String(game.steamAppId ?? '');
+    if (!/^\d+$/.test(appId)) return;
+    this.steamRunning = { gameId: game.id, gameTitle: game.title, appId, launchedAt: Date.now(), seen: false };
+    this.steamRunningCache = null;
+  }
+
+  private isSteamReaperAlive(appId: string): boolean {
+    const now = Date.now();
+    if (this.steamRunningCache && now - this.steamRunningCache.at < GameManager.STEAM_CHECK_CACHE_MS) {
+      return this.steamRunningCache.alive;
+    }
+    let alive = false;
+    try {
+      // pgrep esce con 1 se non trova nulla (eccezione → false). Lo spazio o
+      // la fine riga dopo l'AppID evitano che 480 corrisponda a 48000.
+      const out = execFileSync('pgrep', ['-f', `SteamLaunch AppId=${appId}( |$)`], { encoding: 'utf-8', timeout: 2000 }).trim();
+      alive = out.length > 0;
+    } catch { alive = false; }
+    this.steamRunningCache = { at: now, alive };
+    return alive;
+  }
+
+  /** Stato del gioco Steam lanciato dalla Dashboard (null = nessuno). */
+  private checkSteamRunning(): { running: boolean; gameId?: string; gameTitle?: string } | null {
+    const s = this.steamRunning;
+    if (!s) return null;
+    if (this.isSteamReaperAlive(s.appId)) {
+      if (!s.seen) {
+        s.seen = true;
+        this.addLog(`[STEAM] ${s.gameTitle}: game process detected (reaper AppId=${s.appId}) after ${Math.round((Date.now() - s.launchedAt) / 1000)} s — Dashboard input stays frozen.`, 'system');
+      }
+      return { running: true, gameId: s.gameId, gameTitle: s.gameTitle };
+    }
+    if (!s.seen && Date.now() - s.launchedAt < GameManager.STEAM_START_GRACE_MS) {
+      return { running: true, gameId: s.gameId, gameTitle: s.gameTitle }; // ancora in avvio
+    }
+    this.addLog(s.seen
+      ? `[STEAM] ${s.gameTitle}: game closed (reaper AppId=${s.appId} gone).`
+      : `[STEAM] ${s.gameTitle}: no game process within ${GameManager.STEAM_START_GRACE_MS / 1000} s — launch considered cancelled.`, 'system');
+    this.steamRunning = null;
+    return null;
+  }
+
+  /**
+   * v3.2.17-dev.6 — stato per /api/system/game-running (Dashboard e tray):
+   * l'ultimo gioco lanciato (tracciamento via PID/scope, invariato) oppure il
+   * gioco Steam in corso. Separato da isLastLaunchedGameRunning(), che resta
+   * il segnale del controllo di chiusura dei giochi non Steam: mescolarli
+   * avrebbe bloccato la chiusura di un gioco aperto mentre Steam gioca.
+   */
+  getRunningGameStatus(): { running: boolean; gameId?: string; gameTitle?: string } {
+    const last = this.isLastLaunchedGameRunning();
+    if (last.running) return last;
+    // v3.2.17-dev.7 — anche un gioco rimasto aperto in un altro spazio
+    const bg = this.backgroundSessions.find(e => this.isTrackedLaunchAlive(e));
+    if (bg) return { running: true, gameId: bg.gameId, gameTitle: bg.gameTitle };
+    return this.checkSteamRunning() ?? last;
+  }
+
+  /** v3.2.17-dev.7 — true se il gioco risulta aperto (ultimo lanciato o in background). */
+  isGameRunningById(gameId: string): boolean {
+    const last = this.isLastLaunchedGameRunning();
+    if (last.running && last.gameId === gameId) return true;
+    return this.backgroundSessions.some(e => e.gameId === gameId && this.isTrackedLaunchAlive(e));
+  }
+
+  /**
+   * v3.2.17-dev.7 — chiamata subito prima di sovrascrivere lastLaunchedGame
+   * con un nuovo lancio: se il gioco precedente è ancora vivo passa alle
+   * sessioni in background (vedi backgroundSessions), altrimenti la sua
+   * chiusura la gestirà il polling come sempre (non è ancora stata vista).
+   */
+  private moveLastLaunchToBackground(newGameId: string) {
+    const prev = this.lastLaunchedGame;
+    if (!prev || prev.gameId === newGameId) return;
+    if (!this.isTrackedLaunchAlive(prev)) return;
+    this.backgroundSessions = this.backgroundSessions.filter(e => e.gameId !== prev.gameId);
+    this.backgroundSessions.push(prev);
+    this.addLog(`[LAUNCH] ${prev.gameTitle} still running: its session continues in the background (play time counted on close).`, 'system');
+  }
+
+  /**
+   * v3.2.17-dev.7 — controllo delle sessioni in background, a ogni giro del
+   * polling di chiusura. Alla chiusura: tempo di gioco (stessa soglia di
+   * "chiusura rapida" dell'ultimo gioco lanciato, per coerenza) e libreria
+   * aggiornata. Se non resta più nessun gioco aperto, si ripristina lo
+   * screensaver.
+   */
+  private async pollBackgroundSessions() {
+    if (this.backgroundSessions.length === 0) return;
+    const finished = new Set<TrackedLaunch>();
+    for (const entry of [...this.backgroundSessions]) {
+      if (this.closingSessions.has(entry)) continue;   // chiusura già in corso (giro precedente)
+      if (this.isTrackedLaunchAlive(entry)) continue;
+      // v3.2.29-dev.1 — stessa chiusura dell'ultimo gioco lanciato (tempo di
+      // gioco, launcher condiviso, validazione); false = ancora in caricamento.
+      this.closingSessions.add(entry);
+      try {
+        if (await this.handleSessionClosed(entry, true)) finished.add(entry);
+      } catch (err) {
+        finished.add(entry);
+        writeLog('error', `[LAUNCH] Error while closing background session ${entry.gameTitle}: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        this.closingSessions.delete(entry);
+      }
+    }
+    // Rilettura dopo gli await: un lancio nel frattempo può aver aggiunto una sessione.
+    if (finished.size > 0) this.backgroundSessions = this.backgroundSessions.filter(e => !finished.has(e));
+    if (this.backgroundSessions.length === 0 && !this.lastLaunchedGame) this.stopScreensaverInhibit();
+  }
+
+
   isLastLaunchedGameRunning(): { running: boolean; gameId?: string; gameTitle?: string } {
     // v2.0.41-dev.7 — vedi bigPictureActive sopra: controllato PRIMA di
     // lastLaunchedGame, indipendente da esso — i due stati non si
@@ -337,25 +485,38 @@ class GameManager {
     // stata la sua lunghezza. Nessun confronto sul nome necessario in
     // quel caso: PID/exec non lasciano mai la cgroup vuota durante un
     // passaggio di consegne fra processi della stessa catena.
-    const hasPreciseNameCheck = !!this.lastLaunchedGame.processNameHint;
-    const hasScope = !!this.lastLaunchedGame.unit;
+    const entry = this.lastLaunchedGame;
+    return this.isTrackedLaunchAlive(entry)
+      ? { running: true, gameId: entry.gameId, gameTitle: entry.gameTitle }
+      : { running: false };
+  }
+
+  /**
+   * v3.2.17-dev.7 — "la sessione è ancora viva?", estratto senza modifiche da
+   * isLastLaunchedGameRunning() (commenti storici sotto invariati) per poterlo
+   * applicare anche alle sessioni in background. Aggiorna
+   * entry.processNameSeenAtLeastOnce come prima.
+   */
+  private isTrackedLaunchAlive(entry: TrackedLaunch): boolean {
+    const hasPreciseNameCheck = !!entry.processNameHint;
+    const hasScope = !!entry.unit;
     if (hasPreciseNameCheck || hasScope) {
       const stillAlive = hasScope
         ? (hasPreciseNameCheck
-            ? processManager.isRealProcessAliveInScope(this.lastLaunchedGame.unit!, this.lastLaunchedGame.processNameHint!)
-            : processManager.getScopePids(this.lastLaunchedGame.unit!).length > 0)
-        : this.pgrepGameStillRunning(this.lastLaunchedGame.processNameHint!);
+            ? processManager.isRealProcessAliveInScope(entry.unit!, entry.processNameHint!)
+            : processManager.getScopePids(entry.unit!).length > 0)
+        : this.pgrepGameStillRunning(entry.processNameHint!);
       // v2.1.10-dev.14 — diagnostica: conferma sul prossimo lancio reale
       // quale ramo viene effettivamente preso (soprattutto il nuovo caso
       // "scope senza hint di nome", quello che copre Wine/Proton generici
       // come Control Ultimate Edition) e cosa decide.
-      this.addLog(`[DIAG] isLastLaunchedGameRunning("${this.lastLaunchedGame.gameTitle}"): hasScope=${hasScope} hasPreciseNameCheck=${hasPreciseNameCheck} stillAlive=${stillAlive}`, 'debug');
+      this.addLog(`[DIAG] isTrackedLaunchAlive("${entry.gameTitle}"): hasScope=${hasScope} hasPreciseNameCheck=${hasPreciseNameCheck} stillAlive=${stillAlive}`, 'debug');
       if (stillAlive) {
         // Trovato — segna che l'abbiamo visto almeno una volta, così un
         // futuro mancato match (chiusura reale) non viene più confuso
         // con "non ancora partito".
-        this.lastLaunchedGame.processNameSeenAtLeastOnce = true;
-        return { running: true, gameId: this.lastLaunchedGame.gameId, gameTitle: this.lastLaunchedGame.gameTitle };
+        entry.processNameSeenAtLeastOnce = true;
+        return true;
       } else {
         // v1.1.32 — pgrep/scope non trova corrispondenze: due letture
         // possibili, non distinguibili dal solo risultato del comando.
@@ -397,18 +558,18 @@ class GameManager {
         // questo. Fallback al vecchio timer SOLO se non c'è uno scope
         // tracciato (systemd-run non disponibile, o lancio non avvolto)
         // — mai un buco silenzioso.
-        if (!this.lastLaunchedGame.processNameSeenAtLeastOnce) {
+        if (!entry.processNameSeenAtLeastOnce) {
           const stillLoading = hasScope
-            ? processManager.isScopeActive(this.lastLaunchedGame.unit!)
-            : (Date.now() - this.lastLaunchedGame.launchedAt) < GameManager.PROCESS_NAME_STARTUP_GRACE_MS;
+            ? processManager.isScopeActive(entry.unit!)
+            : (Date.now() - entry.launchedAt) < GameManager.PROCESS_NAME_STARTUP_GRACE_MS;
           if (stillLoading) {
-            return { running: true, gameId: this.lastLaunchedGame.gameId, gameTitle: this.lastLaunchedGame.gameTitle };
+            return true;
           }
         }
         // Visto in passato e ora sparito, oppure mai visto e periodo di
         // grazia scaduto — in entrambi i casi è una chiusura/fallimento
         // reale.
-        return { running: false };
+        return false;
       }
     }
 
@@ -421,12 +582,12 @@ class GameManager {
       // kill con segnale 0 non termina il processo, verifica solo
       // se esiste ed è raggiungibile dall'utente corrente — più
       // leggero di uno spawn "ps" per un controllo così frequente.
-      process.kill(this.lastLaunchedGame.pid, 0);
-      return { running: true, gameId: this.lastLaunchedGame.gameId, gameTitle: this.lastLaunchedGame.gameTitle };
+      process.kill(entry.pid, 0);
+      return true;
     } catch {
       // ESRCH (processo non esiste) o EPERM — il chiamante sa che non è
       // più in esecuzione, ma NON tocchiamo più lastLaunchedGame qui.
-      return { running: false };
+      return false;
     }
   }
 
@@ -560,6 +721,63 @@ class GameManager {
   // distinguere chiaramente un crash immediato da una sessione reale.
   private static readonly QUICK_EXIT_THRESHOLD_MS = 8000;
 
+  // v3.2.17-dev.4 — tempo di gioco dei giochi Steam letto da Steam stesso.
+  // Steam riscrive userdata/<account>/config/localconfig.vdf alla chiusura di
+  // ogni gioco ("Playtime" in minuti, verificato sull'HTPC): un controllo
+  // della data di modifica ogni 10 s (fs.watchFile, polling — un inotify su un
+  // file che Steam rimpiazza in blocco può perdere l'evento) aggiorna subito le
+  // ore in DB, senza aspettare la sync periodica di 5 minuti. Vale anche per i
+  // giochi avviati da dentro Big Picture. Il file viene risolto di nuovo ogni
+  // 5 minuti (Steam installato o account cambiato dopo l'avvio del demone).
+  private steamPlaytimeWatchedPath: string | null = null;
+  private steamPlaytimeTimer: ReturnType<typeof setInterval> | null = null;
+
+  private applySteamLocalPlaytime(reason: string) {
+    const file = this.steamPlaytimeWatchedPath;
+    if (!file) return;
+    const map = readLocalPlaytimeMap(file);
+    let changed = 0;
+    for (const g of db.getAllGames()) {
+      if (g.store !== 'Steam' || !g.steamAppId) continue;
+      const hours = map.get(String(g.steamAppId));
+      // Steam è l'autorità: si scrive solo se il suo valore è più alto (mai
+      // all'indietro, per esempio se la Web API ha già un valore più fresco).
+      if (hours !== undefined && hours > (g.playTimeHours ?? 0) + 1e-6) {
+        db.setPlayTime(g.id, hours);
+        changed++;
+      }
+    }
+    if (changed > 0) {
+      this.addLog(`[STEAM] Play time updated from localconfig.vdf for ${changed} game(s) (${reason}).`, 'system');
+      this.notifyLibraryRefreshed();
+    }
+  }
+
+  private startSteamPlaytimeWatch() {
+    const resolveAndWatch = () => {
+      try {
+        const root = findSteamRoot();
+        const file = root ? findLocalConfigPath(root, resolveSteamId(root)) : null;
+        if (file === this.steamPlaytimeWatchedPath) return;
+        if (this.steamPlaytimeWatchedPath) unwatchFile(this.steamPlaytimeWatchedPath);
+        this.steamPlaytimeWatchedPath = file;
+        if (!file) return;
+        writeLog('system', `[STEAM] Watching ${file} for play time changes.`);
+        watchFile(file, { interval: 10_000, persistent: false }, (cur, prev) => {
+          if (cur.mtimeMs !== prev.mtimeMs) this.applySteamLocalPlaytime('localconfig.vdf changed');
+        });
+        this.applySteamLocalPlaytime('watch started');
+      } catch (err) {
+        writeLog('warning', `[STEAM] Play time watch not started: ${err}`);
+      }
+    };
+    resolveAndWatch();
+    if (!this.steamPlaytimeTimer) {
+      this.steamPlaytimeTimer = setInterval(resolveAndWatch, 5 * 60_000);
+      this.steamPlaytimeTimer.unref?.();
+    }
+  }
+
   private startGameExitPolling() {
     if (this.gameExitPollTimer) return;
     this.gameExitPollTimer = setInterval(async () => {
@@ -570,271 +788,312 @@ class GameManager {
       // in futuro in questo blocco deve restare contenuto — nel peggiore
       // dei casi salta un prompt di validazione, non l'intero daemon.
       try {
+        await this.pollBackgroundSessions(); // v3.2.17-dev.7 — giochi rimasti aperti in altri spazi
         const before = this.lastLaunchedGame;
         if (!before) return;
         const check = this.isLastLaunchedGameRunning();
         if (check.running) return; // ancora in esecuzione, nulla da fare
 
-        // Transizione appena avvenuta — a differenza di prima, l'azzeramento
-        // dello stato è ora esplicito e avviene QUI, non dentro
-        // isLastLaunchedGameRunning() — cosi resta atomico con
-        // l'elaborazione che segue, invece di poter essere "rubato" da una
-        // chiamata esterna concorrente (vedi fix sopra).
-        const game = db.getGameById(before.gameId);
-        if (!game) return;
-
-        // v2.0.41-dev.19 — stesso identico principio di
-        // effectiveSharedLauncherId in launchGame() qui sopra (vedi quel
-        // commento esteso per la causa completa) — necessario anche qui,
-        // scope separato (questo blocco gira nel poll periodico, non
-        // dentro launchGame()).
-        //
-        // v2.0.41-dev.52 — BUG REALE CONFERMATO DALL'UTENTE: il lancio
-        // STANDALONE di EA App dalla propria card veniva ucciso da questo
-        // stesso blocco dopo pochi secondi. Causa: `game.requiresLauncher`
-        // o `getThirdPartyLauncherByStoreId(game.store)` risolvevano
-        // "ea-app" ANCHE per la riga del launcher stesso (il suo store è
-        // giocoforza categorizzato come "EA App" — nessuna esclusione
-        // esplicita di sé stesso). Stesso identificatore già usato altrove
-        // in questo file (`isThisGameASharedLauncherApp`, vedi launchGame)
-        // per distinguere "la card è la fonte" da "la card dipende da
-        // un'altra fonte" — riusato qui per lo stesso motivo: un launcher
-        // condiviso non dipende MAI da se stesso.
-        const isThisGameASharedLauncherApp = THIRD_PARTY_LAUNCHERS.some(l => `${l.id}-launcher` === game.id);
-        const effectiveSharedLauncherId = isThisGameASharedLauncherApp
-          ? undefined
-          : (game.requiresLauncher ?? getThirdPartyLauncherByStoreId(game.store)?.id);
-
-        const elapsedMs = Date.now() - before.launchedAt;
-
-        // Step 19d — bug reale trovato su hardware utente: Ubisoft
-        // Connect (UbisoftConnect.exe) lancia un processo figlio reale
-        // (upc.exe + servizi Uplay) e poi ESCE DA SOLO entro pochi
-        // secondi per design — un pattern "stub che rilancia e si
-        // chiude" non raro in launcher moderni. La soglia sotto trattava
-        // SEMPRE questo come fallimento (elapsedMs ~4s < 8s), saltando
-        // per intero il ramo di successo sotto — compreso l'hook che
-        // ri-risolve l'eseguibile reale. Verificato con dati reali
-        // (ps aux durante un lancio riuscito): upc.exe e i suoi processi
-        // Chromium/CEF restavano vivi mentre il processo TRACCIATO
-        // (il wrapper Proton) risultava già chiuso. Prima di dichiarare
-        // fallimento, controlliamo quindi se esistono processi reali
-        // ancora vivi che matchano la cartella di installazione del
-        // gioco (non solo Ubisoft — generico, riusabile da qualunque
-        // altro launcher/gioco con lo stesso pattern stub-e-rilancia).
-        const installDirName = game.executablePath
-          ? game.executablePath.split('/').slice(-2, -1)[0]
-          : null;
-        let realProcessStillRunning = false;
-        if (installDirName) {
-          realProcessStillRunning = this.pgrepGameStillRunning(installDirName);
-        }
-        // v2.1.10-dev.13 — diagnostica per il bug Proton segnalato
-        // dall'utente: riassume in una riga sola la decisione di QUESTO
-        // controllo, prima di qualunque branching sotto — confrontabile
-        // fra il primo poll (che nel log dell'utente rilevava
-        // correttamente il processo reale) e i successivi (dove
-        // qualcosa cambia). effectiveSharedLauncherId incluso perché
-        // altera anche la soglia (quickExitThresholdMs, calcolata poco
-        // sotto ma il suo valore finale non cambia in base a questo log).
-        this.addLog(`[DIAG] Controllo chiusura "${before.gameTitle}": installDirName="${installDirName}" elapsedMs=${elapsedMs} realProcessStillRunning=${realProcessStillRunning} effectiveSharedLauncherId=${effectiveSharedLauncherId ?? 'nessuno'}`, 'debug');
-
-        // v1.5.20-dev.29 — BUG REALE segnalato dall'utente: un gioco con
-        // requiresLauncher può restare per un po' in attesa che il
-        // launcher condiviso diventi DAVVERO responsivo, anche dopo che
-        // isSharedLauncherRunning() lo rileva già presente (il processo
-        // esiste, ma potrebbe non aver ancora finito login/inizializzazione
-        // interna — nessun modo di saperlo con certezza, vedi la stessa
-        // attesa "intelligente" appena aggiunta prima del lancio). Quella
-        // finestra d'attesa aggiuntiva, specifica di questa categoria di
-        // gioco, rischia di superare la soglia ordinaria di tolleranza
-        // "chiusura rapida" — il vero processo che finalmente subentra
-        // arriverebbe già fuori tempo massimo, scambiato per una
-        // chiusura genuina invece che per un avvio riuscito. Soglia
-        // estesa SOLO per questa categoria, non per ogni gioco.
-        const quickExitThresholdMs = effectiveSharedLauncherId
-          ? GameManager.QUICK_EXIT_THRESHOLD_MS * 3
-          : GameManager.QUICK_EXIT_THRESHOLD_MS;
-
-        // v2.0.41-dev.52 — SECONDO BUG REALE CONFERMATO (Dead Space via
-        // EA App, launcher DIPENDENTE questa volta): il processo tracciato
-        // (via `comm` nello scope) può risultare "non trovato" prestissimo
-        // — a 12s contro una soglia di 24s — semplicemente perché l'intera
-        // catena boot+auth del launcher condiviso non ha ancora fatto
-        // partire il vero processo del gioco (non un blip: la soglia
-        // stessa esiste apposta per questo). Prima di dev.50, cadere in
-        // questo stesso ramo "quick exit ma processi reali attivi"
-        // portava SOLO a una notifica innocua ("tieni aperto/chiudi
-        // ora") — sbagliare per eccesso di cautela era innocuo. Ora che
-        // lo stesso ramo porta a `killScope()` (terminazione reale
-        // dell'intera catena), lo stesso margine di errore è diventato
-        // distruttivo: uccideva un lancio ancora legittimamente in
-        // caricamento.
-        //
-        // Fix strutturale: quando siamo ancora dentro la soglia di
-        // "chiusura rapida" E un processo reale collegato al gioco
-        // risulta comunque attivo (pgrep ampio, il segnale che ESISTE
-        // apposta per questa ambiguità), non trattiamo questo come una
-        // chiusura vera — usciamo SENZA azzerare `lastLaunchedGame` e
-        // SENZA eseguire alcuna azione (playtime, notifica, kill),
-        // lasciando che il prossimo giro di polling (4s dopo) rivaluti
-        // con dati più maturi. Esattamente lo stesso principio del "non
-        // ancora visto, ancora in periodo di grazia" già applicato sopra
-        // in isLastLaunchedGameRunning() — qui si applica al blocco di
-        // CHIUSURA, non a quello di rilevamento.
-        if (realProcessStillRunning && elapsedMs < quickExitThresholdMs) {
-          this.addLog(`[LAUNCH] ${before.gameTitle}: processo tracciato chiuso dopo ${Math.round(elapsedMs / 1000)}s, ma processi reali ancora attivi in "${installDirName}" — probabile fase di caricamento, non ancora una chiusura. In attesa del prossimo controllo.`, 'system');
-          return; // `lastLaunchedGame` resta intatto — nessuna azione distruttiva
-        }
-
-        // Da qui in poi, la decisione è definitiva — azzeriamo il
-        // tracciamento e rilasciamo l'inibizione screensaver solo ora,
-        // non prima: se il ramo sopra fosse scattato, il lancio resta
-        // tracciato esattamente come se questo poll non fosse mai
-        // avvenuto.
-        this.lastLaunchedGame = null;
-        this.stopScreensaverInhibit();
-
-        if (elapsedMs < quickExitThresholdMs) {
-          // v0.99.90 — uscita sospettosamente rapida: probabile fallimento
-          // di avvio (exe non trovato, prefix corrotta, dipendenza
-          // mancante che fa crashare subito). A differenza del prompt di
-          // validazione sotto, QUESTO va segnalato anche se il gioco era
-          // già verified=true — una configurazione prima funzionante che
-          // ora fallisce in pochi secondi è una regressione degna di
-          // nota, non una domanda ridondante "ha funzionato?" già nota.
-          let logContent = '';
-          if (before.logPath) {
-            try {
-              logContent = readFileSync(before.logPath, 'utf-8').trim();
-            } catch (err) {
-              // File non scrivibile/apribile per qualche motivo (vedi
-              // fallback difensivo in spawnDetached) — non bloccante,
-              // procediamo comunque con un messaggio generico sotto.
-            }
-          }
-          const errorText = logContent || 'Il processo si è chiuso pochi secondi dopo l\'avvio, senza output catturato su stdout/stderr.';
-          this.addLog(`[LAUNCH] ${before.gameTitle} chiuso dopo ${Math.round(elapsedMs / 1000)}s — trattato come fallimento di avvio.`, 'error');
-          // Step 19d — log diagnostico richiesto dall'utente: il processo
-          // TRACCIATO (quello che monitoriamo per isLastLaunchedGameRunning)
-          // risulta chiuso, ma per Ubisoft Connect una finestra (nera o
-          // bianca a seconda del tentativo) compare comunque DOPO QUALCHE
-          // SECONDO — ben oltre un controllo immediato. Il primo giro di
-          // pgrep sul solo nome exe esatto non ha trovato nulla, ma Wine/
-          // Proton spesso rinominano o troncano il nome del processo
-          // internamente (limite del kernel a 15 caratteri + wrapper
-          // preloader di Proton) — un match troppo specifico può mancare
-          // un processo realmente in esecuzione. Ora: controllo più ampio
-          // (case-insensitive, "wine" o "ubisoft" ovunque nella riga di
-          // comando) E ripetuto con un ritardo, per catturare esattamente
-          // il momento in cui l'utente riporta che la finestra compare.
-          const dumpResidualProcesses = (label: string) => {
-            try {
-              const { execSync } = require('child_process');
-              const procs = execSync(`ps aux | grep -iE "wine|ubisoft" | grep -v grep || true`, { encoding: 'utf-8' }).trim();
-              this.addLog(
-                procs
-                  ? `[LAUNCH-DEBUG] (${label}) Processi wine/ubisoft attivi:\n${procs}`
-                  : `[LAUNCH-DEBUG] (${label}) Nessun processo wine/ubisoft trovato.`,
-                'system'
-              );
-            } catch (err) {
-              this.addLog(`[LAUNCH-DEBUG] (${label}) Verifica processi non riuscita: ${err}`, 'system');
-            }
-          };
-          dumpResidualProcesses('T+0s, subito dopo la chiusura tracciata');
-          // Non bloccante — il resto del daemon continua a girare nel frattempo.
-          setTimeout(() => dumpResidualProcesses('T+6s, ritardato'), 6000);
-          notificationEngine.emit({ type: 'launch-error', gameId: before.gameId, gameTitle: before.gameTitle, error: errorText });
-          return;
-        }
-
-        // Richiesta utente — tempo di gioco reale (era hardcoded a 0 per
-        // GOG/Epic/Classic Console, solo Steam calcola un valore reale
-        // dalla propria Web API). Solo qui, DOPO il controllo di uscita
-        // rapida sopra: una sessione troppo breve è già trattata come
-        // probabile fallimento di avvio, non tempo di gioco reale da
-        // accumulare. Vedi db.addPlayTime per il dettaglio su Steam
-        // (nessun rischio di doppio conteggio, la sua Web API resta
-        // comunque l'autorità finale a ogni sync).
-        db.addPlayTime(before.gameId, elapsedMs / (1000 * 60 * 60));
-        this.notifyLibraryRefreshed(); // la sidebar mostra il tempo aggiornato subito, non al prossimo sync periodico
-
-
-        // v1.5.20-dev.10 — generalizzato: prima un `if (game.store ===
-        // 'Ubisoft' && game.id === UBISOFT_CONNECT_GAME_ID && ...)`
-        // hardcoded qui — vedi StorePlugin.onLauncherProcessClosed per
-        // il perché del cambio. gameManager.ts resta il coordinatore
-        // (tempo di gioco già calcolato sopra), delega la parte
-        // specifica del launcher al plugin giusto — un plugin che non
-        // rappresenta un launcher condiviso (Steam, GOG, Epic...) eredita
-        // il no-op di default, nessun comportamento cambiato per loro.
-        const ownerPlugin = this.plugins.find(p => p.id === game.store);
-        if (ownerPlugin) await ownerPlugin.onLauncherProcessClosed(game);
-
-        // v1.5.20-dev.22 — richiesta utente originale: il gioco appena
-        // chiuso usava un launcher condiviso ancora in esecuzione —
-        // chiedere esplicitamente cosa fare (notifica "tieni aperto/
-        // chiudi ora") invece di deciderlo noi.
-        //
-        // v2.0.41-dev.50 — SEMPLIFICATO su richiesta esplicita
-        // dell'utente dopo la scoperta del bug reale sopra: per un
-        // launcher bootstrappato DENTRO la catena di questo gioco (mai
-        // una sessione "sua", nata solo per farlo partire — il caso
-        // comune per ogni gioco con requiresLauncher, verificato con
-        // Watch Dogs 2/Ubisoft Connect), non ha più senso chiedere — se
-        // lo si usa solo come autenticatore, lasciarlo acceso dopo la
-        // chiusura del gioco non ha valore. Quando è disponibile lo
-        // scope di questo lancio (`before.unit`), lo terminiamo per
-        // intero (gioco + intera catena, launcher condiviso incluso:
-        // umu-run, wineserver, upc.exe, tutto quello che c'è dentro,
-        // stesso principio già verificato allo step 1 con `ps --forest`)
-        // — nessuna notifica, la scelta "è solo un autenticatore" è già
-        // stata presa qui, in generale, non caso per caso.
-        //
-        // La notifica resta come FALLBACK per l'unico scenario in cui
-        // continua ad avere senso: nessuno scope tracciato per questo
-        // lancio (systemd-run non disponibile, o lancio non avvolto) —
-        // lì non abbiamo modo di terminare l'intera catena in blocco,
-        // quindi si torna a chiedere come prima.
-        //
-        // Il lancio STANDALONE del launcher dalla propria card (proprio
-        // scope, kind:'shared-launcher') non passa mai da qui — questo
-        // blocco gira solo alla chiusura di un GIOCO (kind:'game'), il
-        // suo ciclo di vita resta una scelta esplicita dell'utente,
-        // invariato.
-        if (effectiveSharedLauncherId) {
-          if (before.unit) {
-            const killResult = processManager.killScope(before.unit);
-            this.addLog(
-              killResult.success
-                ? `[LAUNCH] ${before.gameTitle}: catena di lancio terminata per intero (launcher condiviso "${effectiveSharedLauncherId}" incluso, era solo autenticatore per questo gioco).`
-                : `[LAUNCH] Terminazione scope fallita per ${before.gameTitle}: ${killResult.message}`,
-              killResult.success ? 'system' : 'warning'
-            );
-          } else if (isSharedLauncherRunning(effectiveSharedLauncherId)) {
-            const launcherDef = getThirdPartyLauncherDefinition(effectiveSharedLauncherId);
-            notificationEngine.emit({
-              type: 'shared-launcher-idle',
-              gameId: before.gameId,
-              gameTitle: before.gameTitle,
-              launcherId: effectiveSharedLauncherId,
-              launcherName: launcherDef?.displayName ?? effectiveSharedLauncherId,
-            });
-          }
-        }
-
-        if (game.verified) {
-          // Spec: "se il gioco funziona il messaggio non appare più" —
-          // una volta verificato, il prompt non deve più ripresentarsi.
-          return;
-        }
-        this.addLog(`[VALIDATE] ${before.gameTitle} chiuso — richiesta conferma funzionamento.`, 'system');
-        notificationEngine.emit({ type: 'validation-prompt', gameId: before.gameId, gameTitle: before.gameTitle });
+        // v3.2.29-dev.1 — la logica di chiusura è in handleSessionClosed(),
+        // condivisa con le sessioni in background.
+        await this.handleSessionClosed(before, false);
       } catch (err) {
         writeLog('error', `[VALIDATE] Error while polling for close: ${err instanceof Error ? err.message : String(err)}`);
       }
     }, 4000);
+  }
+
+  /**
+   * v3.2.29-dev.1 — chiusura di una sessione di gioco tracciata, estratta dal
+   * polling di chiusura: prima valeva solo per l'ultimo gioco lanciato, mentre
+   * per i giochi rimasti aperti in un altro spazio (backgroundSessions, dev.7)
+   * si sommava solo il tempo di gioco. Ora per entrambi: tempo di gioco,
+   * pulizia del plugin del launcher (onLauncherProcessClosed), chiusura dello
+   * scope con il launcher condiviso, richiesta di validazione.
+   * Uniche differenze per una sessione in background: nessuna notifica di
+   * «avvio fallito» per un'uscita rapida (il gioco era già partito) e lo stato
+   * (lista, screensaver) gestito da pollBackgroundSessions().
+   * Per l'ultimo gioco lanciato il comportamento è identico a prima.
+   * Restituisce false se la chiusura va rimandata al prossimo controllo
+   * (processi reali ancora in caricamento), true se la sessione è conclusa.
+   */
+  private async handleSessionClosed(before: TrackedLaunch, background: boolean): Promise<boolean> {
+
+    // Transizione appena avvenuta — a differenza di prima, l'azzeramento
+    // dello stato è ora esplicito e avviene QUI, non dentro
+    // isLastLaunchedGameRunning() — cosi resta atomico con
+    // l'elaborazione che segue, invece di poter essere "rubato" da una
+    // chiamata esterna concorrente (vedi fix sopra).
+    const game = db.getGameById(before.gameId);
+    if (!game) return true;
+
+    // v2.0.41-dev.19 — stesso identico principio di
+    // effectiveSharedLauncherId in launchGame() qui sopra (vedi quel
+    // commento esteso per la causa completa) — necessario anche qui,
+    // scope separato (questo blocco gira nel poll periodico, non
+    // dentro launchGame()).
+    //
+    // v2.0.41-dev.52 — BUG REALE CONFERMATO DALL'UTENTE: il lancio
+    // STANDALONE di EA App dalla propria card veniva ucciso da questo
+    // stesso blocco dopo pochi secondi. Causa: `game.requiresLauncher`
+    // o `getThirdPartyLauncherByStoreId(game.store)` risolvevano
+    // "ea-app" ANCHE per la riga del launcher stesso (il suo store è
+    // giocoforza categorizzato come "EA App" — nessuna esclusione
+    // esplicita di sé stesso). Stesso identificatore già usato altrove
+    // in questo file (`isThisGameASharedLauncherApp`, vedi launchGame)
+    // per distinguere "la card è la fonte" da "la card dipende da
+    // un'altra fonte" — riusato qui per lo stesso motivo: un launcher
+    // condiviso non dipende MAI da se stesso.
+    const isThisGameASharedLauncherApp = THIRD_PARTY_LAUNCHERS.some(l => `${l.id}-launcher` === game.id);
+    const effectiveSharedLauncherId = isThisGameASharedLauncherApp
+      ? undefined
+      : (game.requiresLauncher ?? getThirdPartyLauncherByStoreId(game.store)?.id);
+
+    const elapsedMs = Date.now() - before.launchedAt;
+
+    // Step 19d — bug reale trovato su hardware utente: Ubisoft
+    // Connect (UbisoftConnect.exe) lancia un processo figlio reale
+    // (upc.exe + servizi Uplay) e poi ESCE DA SOLO entro pochi
+    // secondi per design — un pattern "stub che rilancia e si
+    // chiude" non raro in launcher moderni. La soglia sotto trattava
+    // SEMPRE questo come fallimento (elapsedMs ~4s < 8s), saltando
+    // per intero il ramo di successo sotto — compreso l'hook che
+    // ri-risolve l'eseguibile reale. Verificato con dati reali
+    // (ps aux durante un lancio riuscito): upc.exe e i suoi processi
+    // Chromium/CEF restavano vivi mentre il processo TRACCIATO
+    // (il wrapper Proton) risultava già chiuso. Prima di dichiarare
+    // fallimento, controlliamo quindi se esistono processi reali
+    // ancora vivi che matchano la cartella di installazione del
+    // gioco (non solo Ubisoft — generico, riusabile da qualunque
+    // altro launcher/gioco con lo stesso pattern stub-e-rilancia).
+    const installDirName = game.executablePath
+      ? game.executablePath.split('/').slice(-2, -1)[0]
+      : null;
+    let realProcessStillRunning = false;
+    if (installDirName) {
+      realProcessStillRunning = this.pgrepGameStillRunning(installDirName);
+    }
+    // v2.1.10-dev.13 — diagnostica per il bug Proton segnalato
+    // dall'utente: riassume in una riga sola la decisione di QUESTO
+    // controllo, prima di qualunque branching sotto — confrontabile
+    // fra il primo poll (che nel log dell'utente rilevava
+    // correttamente il processo reale) e i successivi (dove
+    // qualcosa cambia). effectiveSharedLauncherId incluso perché
+    // altera anche la soglia (quickExitThresholdMs, calcolata poco
+    // sotto ma il suo valore finale non cambia in base a questo log).
+    this.addLog(`[DIAG] Controllo chiusura "${before.gameTitle}": installDirName="${installDirName}" elapsedMs=${elapsedMs} realProcessStillRunning=${realProcessStillRunning} effectiveSharedLauncherId=${effectiveSharedLauncherId ?? 'nessuno'}`, 'debug');
+
+    // v1.5.20-dev.29 — BUG REALE segnalato dall'utente: un gioco con
+    // requiresLauncher può restare per un po' in attesa che il
+    // launcher condiviso diventi DAVVERO responsivo, anche dopo che
+    // isSharedLauncherRunning() lo rileva già presente (il processo
+    // esiste, ma potrebbe non aver ancora finito login/inizializzazione
+    // interna — nessun modo di saperlo con certezza, vedi la stessa
+    // attesa "intelligente" appena aggiunta prima del lancio). Quella
+    // finestra d'attesa aggiuntiva, specifica di questa categoria di
+    // gioco, rischia di superare la soglia ordinaria di tolleranza
+    // "chiusura rapida" — il vero processo che finalmente subentra
+    // arriverebbe già fuori tempo massimo, scambiato per una
+    // chiusura genuina invece che per un avvio riuscito. Soglia
+    // estesa SOLO per questa categoria, non per ogni gioco.
+    const quickExitThresholdMs = effectiveSharedLauncherId
+      ? GameManager.QUICK_EXIT_THRESHOLD_MS * 3
+      : GameManager.QUICK_EXIT_THRESHOLD_MS;
+
+    // v2.0.41-dev.52 — SECONDO BUG REALE CONFERMATO (Dead Space via
+    // EA App, launcher DIPENDENTE questa volta): il processo tracciato
+    // (via `comm` nello scope) può risultare "non trovato" prestissimo
+    // — a 12s contro una soglia di 24s — semplicemente perché l'intera
+    // catena boot+auth del launcher condiviso non ha ancora fatto
+    // partire il vero processo del gioco (non un blip: la soglia
+    // stessa esiste apposta per questo). Prima di dev.50, cadere in
+    // questo stesso ramo "quick exit ma processi reali attivi"
+    // portava SOLO a una notifica innocua ("tieni aperto/chiudi
+    // ora") — sbagliare per eccesso di cautela era innocuo. Ora che
+    // lo stesso ramo porta a `killScope()` (terminazione reale
+    // dell'intera catena), lo stesso margine di errore è diventato
+    // distruttivo: uccideva un lancio ancora legittimamente in
+    // caricamento.
+    //
+    // Fix strutturale: quando siamo ancora dentro la soglia di
+    // "chiusura rapida" E un processo reale collegato al gioco
+    // risulta comunque attivo (pgrep ampio, il segnale che ESISTE
+    // apposta per questa ambiguità), non trattiamo questo come una
+    // chiusura vera — usciamo SENZA azzerare `lastLaunchedGame` e
+    // SENZA eseguire alcuna azione (playtime, notifica, kill),
+    // lasciando che il prossimo giro di polling (4s dopo) rivaluti
+    // con dati più maturi. Esattamente lo stesso principio del "non
+    // ancora visto, ancora in periodo di grazia" già applicato sopra
+    // in isLastLaunchedGameRunning() — qui si applica al blocco di
+    // CHIUSURA, non a quello di rilevamento.
+    if (realProcessStillRunning && elapsedMs < quickExitThresholdMs) {
+      this.addLog(`[LAUNCH] ${before.gameTitle}: processo tracciato chiuso dopo ${Math.round(elapsedMs / 1000)}s, ma processi reali ancora attivi in "${installDirName}" — probabile fase di caricamento, non ancora una chiusura. In attesa del prossimo controllo.`, 'system');
+      return false; // `lastLaunchedGame` (o la sessione in background) resta intatto — nessuna azione distruttiva
+    }
+
+    // Da qui in poi, la decisione è definitiva — azzeriamo il
+    // tracciamento e rilasciamo l'inibizione screensaver solo ora,
+    // non prima: se il ramo sopra fosse scattato, il lancio resta
+    // tracciato esattamente come se questo poll non fosse mai
+    // avvenuto.
+    // v3.2.29-dev.1 — per una sessione in background la rimozione dalla
+    // lista (e lo screensaver) li gestisce pollBackgroundSessions().
+    if (!background) {
+      this.lastLaunchedGame = null;
+      // v3.2.17-dev.7 — screensaver ripristinato solo se non resta aperto
+      // nessun altro gioco (sessioni in background, vedi backgroundSessions).
+      if (this.backgroundSessions.length === 0) this.stopScreensaverInhibit();
+    }
+
+    if (elapsedMs < quickExitThresholdMs && background) {
+      // v3.2.29-dev.1 — una sessione in background era viva quando è stata
+      // scavalcata dal lancio successivo: il gioco era partito, quindi
+      // niente notifica di «avvio fallito». Solo log, nessun tempo di gioco
+      // (stessa soglia di prima).
+      this.addLog(`[LAUNCH] ${before.gameTitle} (background session) closed after ${Math.round(elapsedMs / 1000)}s — play time not counted (quick exit).`, 'system');
+      return true;
+    }
+
+    if (elapsedMs < quickExitThresholdMs) {
+      // v0.99.90 — uscita sospettosamente rapida: probabile fallimento
+      // di avvio (exe non trovato, prefix corrotta, dipendenza
+      // mancante che fa crashare subito). A differenza del prompt di
+      // validazione sotto, QUESTO va segnalato anche se il gioco era
+      // già verified=true — una configurazione prima funzionante che
+      // ora fallisce in pochi secondi è una regressione degna di
+      // nota, non una domanda ridondante "ha funzionato?" già nota.
+      let logContent = '';
+      if (before.logPath) {
+        try {
+          logContent = readFileSync(before.logPath, 'utf-8').trim();
+        } catch (err) {
+          // File non scrivibile/apribile per qualche motivo (vedi
+          // fallback difensivo in spawnDetached) — non bloccante,
+          // procediamo comunque con un messaggio generico sotto.
+        }
+      }
+      const errorText = logContent || 'Il processo si è chiuso pochi secondi dopo l\'avvio, senza output catturato su stdout/stderr.';
+      this.addLog(`[LAUNCH] ${before.gameTitle} chiuso dopo ${Math.round(elapsedMs / 1000)}s — trattato come fallimento di avvio.`, 'error');
+      // Step 19d — log diagnostico richiesto dall'utente: il processo
+      // TRACCIATO (quello che monitoriamo per isLastLaunchedGameRunning)
+      // risulta chiuso, ma per Ubisoft Connect una finestra (nera o
+      // bianca a seconda del tentativo) compare comunque DOPO QUALCHE
+      // SECONDO — ben oltre un controllo immediato. Il primo giro di
+      // pgrep sul solo nome exe esatto non ha trovato nulla, ma Wine/
+      // Proton spesso rinominano o troncano il nome del processo
+      // internamente (limite del kernel a 15 caratteri + wrapper
+      // preloader di Proton) — un match troppo specifico può mancare
+      // un processo realmente in esecuzione. Ora: controllo più ampio
+      // (case-insensitive, "wine" o "ubisoft" ovunque nella riga di
+      // comando) E ripetuto con un ritardo, per catturare esattamente
+      // il momento in cui l'utente riporta che la finestra compare.
+      const dumpResidualProcesses = (label: string) => {
+        try {
+          const { execSync } = require('child_process');
+          const procs = execSync(`ps aux | grep -iE "wine|ubisoft" | grep -v grep || true`, { encoding: 'utf-8' }).trim();
+          this.addLog(
+            procs
+              ? `[LAUNCH-DEBUG] (${label}) Processi wine/ubisoft attivi:\n${procs}`
+              : `[LAUNCH-DEBUG] (${label}) Nessun processo wine/ubisoft trovato.`,
+            'system'
+          );
+        } catch (err) {
+          this.addLog(`[LAUNCH-DEBUG] (${label}) Verifica processi non riuscita: ${err}`, 'system');
+        }
+      };
+      dumpResidualProcesses('T+0s, subito dopo la chiusura tracciata');
+      // Non bloccante — il resto del daemon continua a girare nel frattempo.
+      setTimeout(() => dumpResidualProcesses('T+6s, ritardato'), 6000);
+      notificationEngine.emit({ type: 'launch-error', gameId: before.gameId, gameTitle: before.gameTitle, error: errorText });
+      return true;
+    }
+
+    // Richiesta utente — tempo di gioco reale (era hardcoded a 0 per
+    // GOG/Epic/Classic Console, solo Steam calcola un valore reale
+    // dalla propria Web API). Solo qui, DOPO il controllo di uscita
+    // rapida sopra: una sessione troppo breve è già trattata come
+    // probabile fallimento di avvio, non tempo di gioco reale da
+    // accumulare. Vedi db.addPlayTime per il dettaglio su Steam
+    // (nessun rischio di doppio conteggio, la sua Web API resta
+    // comunque l'autorità finale a ogni sync).
+    db.addPlayTime(before.gameId, elapsedMs / (1000 * 60 * 60));
+    this.notifyLibraryRefreshed(); // la sidebar mostra il tempo aggiornato subito, non al prossimo sync periodico
+    if (background) {
+      this.addLog(`[LAUNCH] ${before.gameTitle} (background session) closed after ${Math.round(elapsedMs / 60000)} min — play time added.`, 'system');
+    }
+
+
+    // v1.5.20-dev.10 — generalizzato: prima un `if (game.store ===
+    // 'Ubisoft' && game.id === UBISOFT_CONNECT_GAME_ID && ...)`
+    // hardcoded qui — vedi StorePlugin.onLauncherProcessClosed per
+    // il perché del cambio. gameManager.ts resta il coordinatore
+    // (tempo di gioco già calcolato sopra), delega la parte
+    // specifica del launcher al plugin giusto — un plugin che non
+    // rappresenta un launcher condiviso (Steam, GOG, Epic...) eredita
+    // il no-op di default, nessun comportamento cambiato per loro.
+    const ownerPlugin = this.plugins.find(p => p.id === game.store);
+    if (ownerPlugin) await ownerPlugin.onLauncherProcessClosed(game);
+
+    // v1.5.20-dev.22 — richiesta utente originale: il gioco appena
+    // chiuso usava un launcher condiviso ancora in esecuzione —
+    // chiedere esplicitamente cosa fare (notifica "tieni aperto/
+    // chiudi ora") invece di deciderlo noi.
+    //
+    // v2.0.41-dev.50 — SEMPLIFICATO su richiesta esplicita
+    // dell'utente dopo la scoperta del bug reale sopra: per un
+    // launcher bootstrappato DENTRO la catena di questo gioco (mai
+    // una sessione "sua", nata solo per farlo partire — il caso
+    // comune per ogni gioco con requiresLauncher, verificato con
+    // Watch Dogs 2/Ubisoft Connect), non ha più senso chiedere — se
+    // lo si usa solo come autenticatore, lasciarlo acceso dopo la
+    // chiusura del gioco non ha valore. Quando è disponibile lo
+    // scope di questo lancio (`before.unit`), lo terminiamo per
+    // intero (gioco + intera catena, launcher condiviso incluso:
+    // umu-run, wineserver, upc.exe, tutto quello che c'è dentro,
+    // stesso principio già verificato allo step 1 con `ps --forest`)
+    // — nessuna notifica, la scelta "è solo un autenticatore" è già
+    // stata presa qui, in generale, non caso per caso.
+    //
+    // La notifica resta come FALLBACK per l'unico scenario in cui
+    // continua ad avere senso: nessuno scope tracciato per questo
+    // lancio (systemd-run non disponibile, o lancio non avvolto) —
+    // lì non abbiamo modo di terminare l'intera catena in blocco,
+    // quindi si torna a chiedere come prima.
+    //
+    // Il lancio STANDALONE del launcher dalla propria card (proprio
+    // scope, kind:'shared-launcher') non passa mai da qui — questo
+    // blocco gira solo alla chiusura di un GIOCO (kind:'game'), il
+    // suo ciclo di vita resta una scelta esplicita dell'utente,
+    // invariato.
+    if (effectiveSharedLauncherId) {
+      if (before.unit) {
+        const killResult = processManager.killScope(before.unit);
+        this.addLog(
+          killResult.success
+            ? `[LAUNCH] ${before.gameTitle}: catena di lancio terminata per intero (launcher condiviso "${effectiveSharedLauncherId}" incluso, era solo autenticatore per questo gioco).`
+            : `[LAUNCH] Terminazione scope fallita per ${before.gameTitle}: ${killResult.message}`,
+          killResult.success ? 'system' : 'warning'
+        );
+      } else if (isSharedLauncherRunning(effectiveSharedLauncherId)) {
+        const launcherDef = getThirdPartyLauncherDefinition(effectiveSharedLauncherId);
+        notificationEngine.emit({
+          type: 'shared-launcher-idle',
+          gameId: before.gameId,
+          gameTitle: before.gameTitle,
+          launcherId: effectiveSharedLauncherId,
+          launcherName: launcherDef?.displayName ?? effectiveSharedLauncherId,
+        });
+      }
+    }
+
+    if (game.verified) {
+      // Spec: "se il gioco funziona il messaggio non appare più" —
+      // una volta verificato, il prompt non deve più ripresentarsi.
+      return true;
+    }
+    this.addLog(`[VALIDATE] ${before.gameTitle} chiuso — richiesta conferma funzionamento.`, 'system');
+    notificationEngine.emit({ type: 'validation-prompt', gameId: before.gameId, gameTitle: before.gameTitle });
+    return true;
   }
 
   // Refresh periodico in background mentre il daemon è attivo (v0.99.2,
@@ -854,6 +1113,7 @@ class GameManager {
     ['RetroArch',     new RetroArchRunner()],
     ['ScummVM',       new ScummVMRunner()],
     ['Steam Native',  new SteamNativeRunner()],
+    ['Web Stream',    new WebStreamRunner()],   // v3.2.17-dev.8 — Amazon Luna (card fissa del plugin Amazon Games)
   ]);
 
   private protonRunners: Map<string, BaseRunner> = new Map();
@@ -876,12 +1136,10 @@ class GameManager {
     // v0.99.36 — Step 2: DownloadManager consulta questo checker prima
     // di iniziare a scrivere sulla prefix di un gioco (vedi
     // downloadManager.addTask).
-    downloadManager.setRunningGameChecker((gameId) => {
-      const check = this.isLastLaunchedGameRunning();
-      return check.running && check.gameId === gameId;
-    });
+    downloadManager.setRunningGameChecker((gameId) => this.isGameRunningById(gameId));
 
     this.startGameExitPolling();
+    this.startSteamPlaytimeWatch();
 
     downloadManager.addListener((task) => {
       // Persiste ogni aggiornamento di stato del download su DB
@@ -1391,10 +1649,17 @@ class GameManager {
       this.protectInstalledState(enriched);
 
       db.upsertGames(enriched);
+      // v3.2.17-dev.9 — card Web Stream (Luna): le immagini (locali o SGDB) sostituiscono il
+      // segnaposto del plugin, che l'upsert altrimenti conserverebbe per sempre.
+      for (const g of enriched) {
+        if (g.runner === 'Web Stream') db.setGameImages(g.id, g.coverImage, g.previewImage);
+      }
       this.notifyLibraryRefreshed();
       this.addLog(`[DAEMON] Metadati aggiornati per ${enriched.length} titoli.`, 'system');
       // v2.7.2-dev.4 — copia locale delle copertine per l'overlay degli spazi (non blocca nulla)
       void cacheLibraryCovers(enriched);
+      // v3.2.29-dev.17 — sfondi degli spazi dei giochi installati, uno alla volta e con calma
+      void prefetchSpaceBackgrounds(enriched);
     });
   }
 
@@ -1459,17 +1724,45 @@ class GameManager {
       games = games.filter(g => g.categories?.includes(query.category!));
     }
     if (query?.sortBy) {
+      // v3.2.17-dev.1 — ordinamento rivisto:
+      //   - titolo con confronto "naturale" (numeri come numeri, maiuscole
+      //     e accenti ignorati): "Doom 2" prima di "Doom 10";
+      //   - a parità di valore (tipico: decine di giochi con 0 ore, senza
+      //     voto o non installati) si ordina SEMPRE per titolo A→Z, a
+      //     prescindere dal verso — prima l'ordine dei pareggi era quello
+      //     del DB, quindi giochi diversi a ogni sync;
+      //   - valori mancanti (null/NaN/data non valida) sempre in fondo,
+      //     in entrambi i versi: in decrescente "senza voto" non deve
+      //     finire in cima invertendo l'ascendente.
       const ord = query.order === 'desc' ? -1 : 1;
-      games.sort((a, b) => {
-        if (query.sortBy === 'playTime')    return (a.playTimeHours - b.playTimeHours) * ord;
-        if (query.sortBy === 'installDate') {
-          const da = a.installedAt ? new Date(a.installedAt).getTime() : 0;
-          const db2 = b.installedAt ? new Date(b.installedAt).getTime() : 0;
-          return (da - db2) * ord;
+      const byTitle = (a: Game, b: Game) =>
+        a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
+      const num = (v: unknown): number | null => {
+        const n = typeof v === 'number' ? v : Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const keyOf = (g: Game): number | null => {
+        if (query.sortBy === 'playTime') return num(g.playTimeHours) ?? 0;
+        if (query.sortBy === 'rating') {
+          // 0 = "nessun voto" (IGDB non trovato), non un voto pessimo
+          const r = num(g.rating);
+          return r !== null && r > 0 ? r : null;
         }
-        if (query.sortBy === 'rating') return ((a.rating || 0) - (b.rating || 0)) * ord;
-        if (query.sortBy === 'title')  return a.title.localeCompare(b.title) * ord;
-        return 0;
+        if (query.sortBy === 'installDate') {
+          if (!g.installedAt) return null;
+          const t = new Date(g.installedAt).getTime();
+          return Number.isFinite(t) ? t : null;
+        }
+        return null;
+      };
+      games.sort((a, b) => {
+        if (query.sortBy === 'title') return byTitle(a, b) * ord;
+        const ka = keyOf(a), kb = keyOf(b);
+        if (ka === null && kb === null) return byTitle(a, b);
+        if (ka === null) return 1;
+        if (kb === null) return -1;
+        if (ka !== kb) return (ka - kb) * ord;
+        return byTitle(a, b);
       });
     }
     return games;
@@ -1529,9 +1822,12 @@ class GameManager {
     // prefix. Lo scope del gioco (processManager) e' la fonte affidabile; l'ultimo lancio resta come
     // ripiego per i lanci non avvolti in uno scope. Nessuna azione automatica: solo una notifica
     // (server.ts, tipo 'launch-already-running'), il giocatore decide cosa fare.
-    const runningCheck = this.isLastLaunchedGameRunning();
+    // v3.2.17-dev.7 — anche le sessioni in background (isGameRunningById)
     const activeScope = processManager.findActiveScope('game', id);
-    if (activeScope || (runningCheck.running && runningCheck.gameId === id)) {
+    // v3.2.29-dev.17 — sfondo del desktop dello spazio: se manca lo si cerca subito (spaces.py lo applica
+    // appena il file c'è); non blocca il lancio
+    void ensureSpaceBackground(game, 'launch');
+    if (activeScope || this.isGameRunningById(id)) {
       this.addLog(`[LAUNCH] Bloccato — ${game.title} risulta già in esecuzione (${activeScope ? `scope ${activeScope.unit}` : 'PID attivo'}).`, 'warning');
       return { success: false, alreadyRunning: true, message: `${game.title} è già in esecuzione` };
     }
@@ -1777,8 +2073,17 @@ class GameManager {
       // niente timeout di sicurezza di 10 minuti (raceSplashClose non parte). L'opzione e' di X-Launcher: viene
       // tolta e il gioco non la riceve.
       const splitLaunchArgs = effectiveLaunchArgs ? shellSplitArgs(effectiveLaunchArgs) : undefined;
-      const noSplash = !!splitLaunchArgs?.includes('--no-splash');
-      const gameLaunchArgs = splitLaunchArgs?.filter(a => a !== '--no-splash');
+      // v3.2.17-dev.8 — Web Stream (Luna): sempre senza splash. La finestra del browser sta fuori dallo
+      // scope del gioco (Chromium si sposta in app-org.chromium.Chromium-<n>), la splash non la troverebbe
+      // e scatterebbe il timeout di sicurezza (stesso problema dei giochi con launcher condiviso).
+      const noSplash = !!splitLaunchArgs?.includes('--no-splash') || game.runner === 'Web Stream';
+      // v3.2.29-dev.2 — `--keep-maximized`: nella sessione Openbox spaces.py riporta in primo piano la
+      // finestra del gioco se si riduce a icona mentre il suo spazio è quello corrente (Dead Space 2, che
+      // perde il focus e si iconifica). Opzione di X-Launcher: tolta dagli argomenti, il gioco non la
+      // riceve; il suo stato va in window-rules.json (vedi windowRules.ts), aggiornato a ogni lancio.
+      const keepMaximized = !!splitLaunchArgs?.includes('--keep-maximized');
+      setKeepMaximized(game.id, keepMaximized);
+      const gameLaunchArgs = splitLaunchArgs?.filter(a => a !== '--no-splash' && a !== '--keep-maximized');
 
       const runnerConfig = {
         env:      profile?.customEnv,
@@ -1945,7 +2250,20 @@ class GameManager {
             this.addLog(`[SPLASH] Orchestrazione splash fallita (non bloccante): ${err}`, 'warning');
           });
         }
-        if (result.pid) {
+        // v3.2.17-dev.4 — giochi Steam: NESSUN tracciamento via PID. Il PID
+        // restituito è quello di `steam steam://rungameid/<id>`, che inoltra
+        // l'URI allo Steam già aperto ed esce in ~1 s (o nessun PID, a Steam
+        // chiuso nella sessione Openbox): il controllo di chiusura lo
+        // trattava come "avvio fallito" (notifica d'errore, niente tempo di
+        // gioco). Il tempo di gioco lo conta Steam stesso: lo legge
+        // startSteamPlaytimeWatch() da localconfig.vdf alla fine della
+        // sessione. Spazi e congelamento restano a spaces.py (spazio 3).
+        if (game.runner === 'Steam Native') {
+          // v3.2.17-dev.6 — "in corso" dal processo reaper di Steam (vedi
+          // checkSteamRunning), anche senza PID (Steam a freddo negli spazi).
+          this.trackSteamLaunch(game);
+          this.addLog(`[STEAM] ${game.title}: launch handed over to Steam — running state from Steam's reaper process, play time from localconfig.vdf.`, 'system');
+        } else if (result.pid) {
           // v1.1.31 — processNameHint originariamente solo per Epic: è
           // il primo caso in cui il PID tracciato (legendary/wrapper
           // Proton) non è affidabile per sapere se il gioco vero è
@@ -1993,6 +2311,7 @@ class GameManager {
           // launchEpicViaLegendary — controllo esplicito invece di un cast,
           // così resta un errore di tipo se la forma cambia in futuro.
           const unit = 'unit' in result ? result.unit : undefined;
+          this.moveLastLaunchToBackground(id);
           this.lastLaunchedGame = { gameId: id, gameTitle: game.title, pid: result.pid, unit, launchedAt: Date.now(), logPath: result.logPath, processNameHint };
           this.startScreensaverInhibit(game.title);
         }
@@ -2241,8 +2560,12 @@ class GameManager {
     // v0.99.36 — Step 2: stesso lock in senso opposto. Se il gioco è
     // già in esecuzione, una (re)installazione scriverebbe sulla stessa
     // WINEPREFIX di un processo wine/proton attualmente attivo.
-    const runningCheck = this.isLastLaunchedGameRunning();
-    if (runningCheck.running && runningCheck.gameId === id) {
+    // v3.2.17-dev.8 — card Web Stream (Luna): niente da installare
+    if (game.runner === 'Web Stream') {
+      return { success: false, message: `${game.title} è un servizio in streaming: non si installa` };
+    }
+    // v3.2.17-dev.7 — anche se il gioco è aperto in background (isGameRunningById)
+    if (this.isGameRunningById(id)) {
       this.addLog(`[INSTALL] Bloccato — ${game.title} è in esecuzione. Chiudi il gioco prima di reinstallare.`, 'error');
       return { success: false, message: `${game.title} è in esecuzione — chiudilo prima di reinstallare` };
     }
@@ -2253,6 +2576,10 @@ class GameManager {
   async uninstallGame(id: string): Promise<{ success: boolean; message?: string }> {
     const game = db.getGameById(id);
     if (!game) return { success: false, message: 'Gioco non trovato' };
+    // v3.2.17-dev.8 — card Web Stream (Luna): niente da disinstallare (la card è fissa del plugin)
+    if (game.runner === 'Web Stream') {
+      return { success: false, message: `${game.title} è un servizio in streaming: non si disinstalla` };
+    }
 
     // v2.0.41-dev.16 — calcolato qui, riusato più sotto sia per il lock
     // "launcher in esecuzione" sia per la cartella da rimuovere/il
@@ -2261,8 +2588,8 @@ class GameManager {
 
     // v0.99.36 — Step 2: stesso lock — non rimuovere file/prefix di un
     // gioco mentre il suo processo wine/proton è ancora attivo.
-    const runningCheck = this.isLastLaunchedGameRunning();
-    if (runningCheck.running && runningCheck.gameId === id) {
+    // v3.2.17-dev.7 — anche se il gioco è aperto in background (isGameRunningById)
+    if (this.isGameRunningById(id)) {
       this.addLog(`[UNINSTALL] Bloccato — ${game.title} è in esecuzione. Chiudi il gioco prima di disinstallare.`, 'error');
       return { success: false, message: `${game.title} è in esecuzione — chiudilo prima di disinstallare` };
     }
@@ -2610,6 +2937,9 @@ class GameManager {
   async getPredictedInstallSize(gameId: string): Promise<number | null> {
     const game = db.getGameById(gameId);
     if (!game) return null;
+    // v3.2.17-dev.10 — card Web Stream (Luna): niente da scaricare. Prima la sidebar chiedeva
+    // `nile install luna --info --json`, che falliva con "Couldn't find what you are looking for".
+    if (game.runner === 'Web Stream') return null;
     if (typeof game.predictedSizeBytes === 'number' && game.predictedSizeBytes > 0) {
       return game.predictedSizeBytes;
     }
@@ -2640,6 +2970,18 @@ class GameManager {
     // Step 19d — switch "Launcher condiviso" in Game Options.
     requiresLauncher?: string | null;
   }) {
+    // v3.2.29-dev.1 — le card Web Stream (Luna) non devono poter perdere il loro
+    // runner: il selettore è nascosto nella UI, ma PATCH /api/games/:id/config
+    // accettava qualunque valore e lo scriveva nel DB (la sync non lo
+    // ripristinava). Vedi sanitizeConfigForRunner().
+    const sanitized = this.sanitizeConfigForRunner(id, config as Record<string, unknown>);
+    if (sanitized.ignored.length > 0) {
+      this.addLog(`[DAEMON] Config for ${id}: ignored ${sanitized.ignored.join('; ')}`, 'warning');
+    }
+    config = sanitized.config as typeof config;
+    if (Object.keys(config).length === 0) {
+      return { success: false, message: 'Nessuna modifica applicabile a questa card.' };
+    }
     db.updateGameConfig(id, config);
     const summary = Object.entries(config)
       .map(([k, v]) => `${k}=${v ?? 'null'}`)
@@ -2681,6 +3023,11 @@ class GameManager {
         metadataManager.enrichGameMetadata(freshGame, true)
           .then(enriched => {
             db.upsertGames([enriched]);
+            // v3.2.17-dev.9 — BUG: l'upsert conserva sempre una copertina già presente, quindi il
+            // rifetch forzato non sostituiva mai l'immagine di un gioco che ne aveva già una.
+            if (enriched.coverImage !== freshGame.coverImage || enriched.previewImage !== freshGame.previewImage) {
+              db.setGameImages(id, enriched.coverImage, enriched.previewImage);
+            }
             void cacheGameCovers(enriched);   // v2.7.2-dev.4 — copertine dell'overlay degli spazi
             // Bug confermato dall'utente con test dal vivo: senza questa
             // riga, il titolo mostrato in libreria/sidebar tornava al nome
@@ -2705,6 +3052,44 @@ class GameManager {
     }
 
     return { success: true };
+  }
+
+  /**
+   * v3.2.29-dev.1 — filtra la configurazione in base al runner del gioco.
+   *
+   * Card Web Stream (Luna): sono modificabili solo indirizzo del servizio
+   * (executablePath, solo https:// non vuoto), argomenti di lancio e titolo per
+   * lo scraping; il runner resta «Web Stream». Tutto il resto (runner diverso,
+   * launcher condiviso, prefix, core, steamAppId, classe della finestra…) non
+   * ha senso per una web app e la renderebbe inutilizzabile: viene ignorato.
+   *
+   * Giochi normali: «Web Stream» non è assegnabile (il runner accetta solo un
+   * URL https:// come eseguibile, il lancio fallirebbe sempre).
+   */
+  private sanitizeConfigForRunner(id: string, config: Record<string, unknown>): { config: Record<string, unknown>; ignored: string[] } {
+    const current = db.getGameById(id);
+    const out: Record<string, unknown> = {};
+    const ignored: string[] = [];
+    const isWebStream = current?.runner === 'Web Stream';
+    const webStreamAllowed = new Set(['executablePath', 'launchArgs', 'scrapeTitle', 'runner']);
+    for (const [key, value] of Object.entries(config)) {
+      if (value === undefined) continue;
+      if (isWebStream) {
+        if (!webStreamAllowed.has(key)) { ignored.push(`${key} (not used by Web Stream cards)`); continue; }
+        if (key === 'runner' && value !== 'Web Stream') { ignored.push(`runner=${String(value)} (Web Stream cards keep their runner)`); continue; }
+        if (key === 'executablePath') {
+          const url = typeof value === 'string' ? value.trim() : '';
+          if (!/^https:\/\/\S+$/i.test(url)) { ignored.push(`executablePath="${String(value ?? '')}" (a Web Stream card needs an https:// address)`); continue; }
+          out[key] = url;
+          continue;
+        }
+      } else if (key === 'runner' && value === 'Web Stream') {
+        ignored.push('runner=Web Stream (only for Web Stream cards)');
+        continue;
+      }
+      out[key] = value;
+    }
+    return { config: out, ignored };
   }
 
   /**

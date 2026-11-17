@@ -1,7 +1,7 @@
 {
   "name": "x-launcher",
   "private": true,
-  "version": "3.2.16-Mars",
+  "version": "3.3.18-dev.1",
   "allowScripts": {
     "better-sqlite3@11.10.0": true,
     "esbuild@0.28.0": true,
@@ -29,6 +29,7 @@
     "i18next-http-backend": "^4.0.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "qrcode": "^1.5.4",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "react-i18next": "^17.0.9",
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.14",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.1",
     "@vitejs/plugin-react": "^5.0.4",

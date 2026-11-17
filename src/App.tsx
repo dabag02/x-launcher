@@ -17,6 +17,7 @@ import {
   Terminal,
   Activity,
   Cpu,
+  Images,
   Monitor,
   LayoutGrid,
   Moon,
@@ -66,6 +67,8 @@ import { NavDebugOverlay } from './components/NavDebugOverlay';
 import { AudioProvider, useAudio } from './components/AudioProvider';
 import { VirtualKeyboard, SuggestionItem } from './components/VirtualKeyboard';
 import { GamepadTester } from './components/GamepadTester';
+import { MediaLibrary, type MediaLibraryHandle } from './components/MediaLibrary';
+import { QrModal } from './components/ShareDialog';
 import { useGamepad } from './hooks/useGamepad';
 import { evaluateSpacesGate, type SpacesInfo } from './lib/spacesGate';
 import { useCloudBackupProviders } from './hooks/useCloudBackupProviders';
@@ -89,6 +92,8 @@ function cn(...inputs: ClassValue[]) {
 // game.isBigPictureLauncher invece di un controllo sull'id, che resta
 // comunque utile per debug/log.
 const STEAM_BIG_PICTURE_ID = 'steam-bigpicture-launcher';
+// v3.2.17-dev.10 — card fissa di Amazon Luna (plugin Amazon Games, vedi amazonPlugin.ts)
+const AMAZON_LUNA_ID = 'amazon-luna';
 
 // v1.1.16 — suggerimenti alternativi per la tastiera virtuale, mostrati
 // premendo Shift al posto dei completamenti di default (.com/.exe/ecc.)
@@ -803,6 +808,12 @@ function MainApp() {
     }).catch(() => {});
   };
   const [showAvatarLibrary, setShowAvatarLibrary] = useState(false);
+  // v3.2.29-dev.7 — sezione Multimedia (screenshot e clip), aperta dal quick-menu o da una notifica
+  const [showMediaLibrary, setShowMediaLibrary] = useState(false);
+  const mediaLibraryRef = useRef<MediaLibraryHandle>(null);
+  // v3.2.29-dev.13 — QR del link di un contenuto condiviso (azione «Mostra QR del link» delle notifiche)
+  const [qrModal, setQrModal] = useState<{ url: string; title?: string; notifId: string } | null>(null);
+  const mediaOriginRef = useRef<'quick-menu' | 'notifications'>('quick-menu');
   const [showProcessManager, setShowProcessManager] = useState(false);
   // v2.1.10-dev.12 — splash di lancio integrata nella Dashboard (prima
   // una finestra browser separata, vedi splashOrchestrator.ts per la
@@ -904,7 +915,7 @@ function MainApp() {
   const [avatarDir, setAvatarDir] = useState<string>('~/.local/share/x-launcher/avatars');
   const [pauseScroll, setPauseScroll] = useState(false);
   const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
-  const [appVersion, setAppVersion] = useState('v3.2.16-Mars');
+  const [appVersion, setAppVersion] = useState('v3.3.18-dev.1');
   const logScrollRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -922,8 +933,18 @@ function MainApp() {
     'All': { genre: '', category: '', onlyInstalled: true }, // default: solo installati
   });
   const currentFilter = storeFilters[activeStore] ?? { genre: '', category: '', onlyInstalled: false };
-  const selectedGenre    = currentFilter.genre;
-  const selectedCategory = currentFilter.category;
+  // v3.2.17-dev.1 — i tag genere/categoria appartengono alla RICERCA, non
+  // allo store: stessa sorte del testo digitato (searchQuery, globale).
+  // Prima stavano in storeFilters[activeStore]: cambiando libreria con
+  // L1/R1 il tag restava "incollato" allo store di partenza e, alla
+  // chiusura della ricerca, l'effetto di reset puliva solo lo store
+  // corrente — la libreria di partenza restava filtrata per genere anche
+  // a ricerca chiusa, senza nessun chip visibile che lo indicasse.
+  // storeFilters resta per onlyInstalled (preferenza di vista per store);
+  // i campi genre/category al suo interno non sono più letti.
+  const [searchTags, setSearchTags] = useState<{ genre: string; category: string }>({ genre: '', category: '' });
+  const selectedGenre    = searchTags.genre;
+  const selectedCategory = searchTags.category;
   const onlyInstalled    = currentFilter.onlyInstalled;
 
   // v1.1.24 — stesso motivo/pattern di activeStoreRef (sopra): servono
@@ -1066,9 +1087,26 @@ function MainApp() {
       [activeStore]: { ...(prev[activeStore] ?? { genre: '', category: '', onlyInstalled: false }), [key]: value },
     }));
   };
-  const setSelectedGenre    = (v: string)  => setStoreFilter('genre', v);
-  const setSelectedCategory = (v: string)  => setStoreFilter('category', v);
+  const setSelectedGenre    = (v: string)  => setSearchTags(prev => ({ ...prev, genre: v }));
+  const setSelectedCategory = (v: string)  => setSearchTags(prev => ({ ...prev, category: v }));
   const setOnlyInstalled    = (v: boolean) => setStoreFilter('onlyInstalled', v);
+
+  // v3.2.17-dev.1 — ordinamento con verso "naturale" per campo: prima il
+  // cambio di campo lasciava il verso corrente (di solito 'asc'), quindi
+  // "Tempo di gioco" metteva in cima i giochi MAI giocati e "Voto" quelli
+  // senza voto. Titolo parte A→Z, gli altri dal valore più alto/recente.
+  // Scegliere di nuovo il campo già attivo inverte il verso — stesso gesto
+  // per mouse (barra filtri) e controller (tag fissi della tastiera).
+  type SortField = 'title' | 'playTime' | 'rating' | 'installDate';
+  const SORT_FIELDS: SortField[] = ['title', 'playTime', 'rating', 'installDate'];
+  const selectSortField = (field: SortField) => {
+    if (field === sortBy) {
+      setSortOrder(o => (o === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(field);
+      setSortOrder(field === 'title' ? 'asc' : 'desc');
+    }
+  };
   const [showSearch, setShowSearch] = useState(false);
   // Ref diretto all'input di ricerca (v0.99.4): usato da
   // openSearchWithPhysicalInput per portare il focus nativo del browser
@@ -1085,6 +1123,25 @@ function MainApp() {
   const [vkCursorPos, setVkCursorPos] = useState<number | null>(null);
 
   const { focusedId, setFocusedId, moveFocus, setFocusFrozen, isFocusFrozen, activeGroup, setActiveGroup, triggerFocusedAction, focusFirstInGroup, cycleSequential, setGroupStrategy } = useFocus();
+
+  // v3.2.29-dev.7 — sezione Multimedia: aperta dal quick-menu o da «Apri Multimedia» di una notifica;
+  // alla chiusura si torna da dove si era partiti. Il focus iniziale lo dà il componente a libreria caricata.
+  const openMediaLibrary = useCallback((origin: 'quick-menu' | 'notifications') => {
+    mediaOriginRef.current = origin;
+    setShowMediaLibrary(true);
+    setActiveGroup('media-library');
+    setFocusedId(null);
+  }, [setActiveGroup, setFocusedId]);
+  const closeMediaLibrary = useCallback(() => {
+    setShowMediaLibrary(false);
+    if (mediaOriginRef.current === 'notifications') {
+      setActiveGroup(null);
+      setFocusedId('footer-notifications');
+    } else {
+      setActiveGroup('quick-menu');
+      setFocusedId('opt-multimedia');
+    }
+  }, [setActiveGroup, setFocusedId]);
   // Ref sincronizzato con focusedId: stesso motivo di activeStoreRef.
   // L'effect gamepad principale aveva focusedId tra le proprie dipendenze,
   // ma cycleStore (e altre azioni) chiamano setFocusedId al loro interno —
@@ -1322,6 +1379,14 @@ function MainApp() {
 
   const { state: gamepadState, isJustPressed } = useGamepad();
   const { play } = useAudio();
+  // v3.2.29-dev.13 — chiusura del QR del link (B o Chiudi): si torna alla notifica
+  const closeQrModal = useCallback(() => {
+    const back = qrModal?.notifId;
+    setQrModal(null);
+    setActiveGroup('notifications');
+    play('back');
+    if (back) setTimeout(() => setFocusedId(`notif-primary-${back}`), 60);
+  }, [qrModal, setActiveGroup, setFocusedId, play]);
 
   // Gestione tastiera on-screen generalizzata:
   // activeField identifica quale campo è in editing, fieldValue è il valore corrente,
@@ -1336,6 +1401,10 @@ function MainApp() {
     // richiamabile anche da Impostazioni (campo budget token) serve
     // tornare al gruppo giusto alla chiusura, non sempre allo stesso.
     returnGroup: string;
+    // v3.2.29-dev.13 — facoltativi, oggi solo per il testo dei post (ShareDialog): righe visibili nel riquadro
+    // del testo (con la barra di scorrimento oltre) e lunghezza massima applicata mentre si scrive.
+    rows?: number;
+    maxLength?: number;
   } | null>(null);
 
   // v1.1.16 — tip del suggerimento (Shift) attualmente a fuoco sulla
@@ -1345,6 +1414,12 @@ function MainApp() {
   // (sbagliato) appena se ne apre un altro, prima ancora che l'utente
   // tocchi Shift o sfogli qualcosa nel nuovo campo.
   const [suggestionTip, setSuggestionTip] = useState<string | undefined>(undefined);
+  // v3.2.29-dev.13 — nel riquadro a righe fisse (testo dei post) il cursore resta sempre visibile
+  const vkCaretRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (activeField?.rows) vkCaretRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [activeField?.rows, activeField?.value, vkCursorPos]);
 
   // Apre la tastiera on-screen per un campo specifico
   const openKeyboardForField = useCallback((
@@ -1352,9 +1427,11 @@ function MainApp() {
     label: string,
     currentValue: string,
     onCommit: (val: string) => void,
-    returnGroup: string = 'game-options'
+    returnGroup: string = 'game-options',
+    opts?: { rows?: number; maxLength?: number },
   ) => {
-    setActiveField({ id, label, value: currentValue, onCommit, returnGroup });
+    const max = opts?.maxLength;
+    setActiveField({ id, label, value: max ? [...currentValue].slice(0, max).join('') : currentValue, onCommit, returnGroup, rows: opts?.rows, maxLength: max });
     setSuggestionTip(undefined);
     setShowKeyboard(true);
     setActiveGroup('keyboard');
@@ -1417,8 +1494,11 @@ function MainApp() {
       // già azzerato qui sopra — un'asimmetria concettuale (sia il testo
       // che i tag sono filtri della STESSA ricerca, dovrebbero avere la
       // stessa sorte alla chiusura). Stesso trattamento del testo.
-      setSelectedGenre('');
-      setSelectedCategory('');
+      // v3.2.17-dev.1 — i tag ora sono globali alla ricerca (vedi
+      // searchTags): il reset non dipende più dallo store corrente, quindi
+      // vale anche quando la ricerca viene chiusa da L1/R1 (cambio store
+      // nello stesso render) o dopo aver girato più librerie.
+      setSearchTags({ genre: '', category: '' });
     }
   }, [showSearch]);
 
@@ -1932,8 +2012,25 @@ function MainApp() {
         const parsed = JSON.parse(e.data);
         const { event, payload } = parsed;
 
+        // v3.2.29-dev.7 — sezione Multimedia: clip salvata/scartata o nuovo screenshot → la sezione si
+        // ricarica se aperta; notifica chiusa dal demone (nessuna clip da rivedere rimasta) → archiviata.
+        if (event === 'media-updated') {
+          window.dispatchEvent(new Event('xl-media-updated'));
+        }
+        // v3.2.29-dev.12 — accesso a un servizio di condivisione concluso o account scollegato (ShareDialog)
+        if (event === 'share-updated') {
+          window.dispatchEvent(new CustomEvent('xl-share-updated', { detail: parsed.provider }));
+        }
+        // v3.2.29-dev.13 — avanzamento di un invio (finestra di condivisione)
+        if (event === 'share-progress') {
+          window.dispatchEvent(new CustomEvent('xl-share-progress', { detail: parsed.job }));
+        }
+        if (event === 'notification-dismissed' && payload?.id) {
+          setNotifications(prev => prev.map(n => n.id === payload.id ? { ...n, status: 'dismissed' } : n));
+        }
         // Notifiche pushed dal NotificationEngine (Step 15b)
         if (event === 'notification' && payload) {
+          window.dispatchEvent(new Event('xl-media-updated'));
           const n = payload as any;
           const mapped: AppNotification = {
             id:             n.id,
@@ -2301,7 +2398,10 @@ function MainApp() {
     if (!selectedGame) return { lastRunnerBridgeId: undefined, firstMiddleId: undefined, lastMiddleId: undefined, firstOverlayContentId: undefined };
 
     const nonDefaultRunners = availableRunners.filter((r: any) => (r.id || r) !== 'Wine-Lutris');
-    const runnerBridgeShown = selectedGame.store !== 'Classic Console';
+    // v3.2.17-dev.10 — card Web Stream (Amazon Luna): come Classic Console non-RetroArch, niente
+    // Runner Bridge né Compatibility Layer (si ripiega su field-executablePath, l'URL del servizio)
+    const isWebStream = selectedGame.runner === 'Web Stream';
+    const runnerBridgeShown = selectedGame.store !== 'Classic Console' && !isWebStream;
     const firstRunnerBridgeId = (runnerBridgeShown && nonDefaultRunners.length > 0)
       ? `game-runner-${nonDefaultRunners[0].id || nonDefaultRunners[0]}`
       : undefined;
@@ -2315,7 +2415,7 @@ function MainApp() {
       const nonDefaultCores = retroarchCores.filter(c => c.name !== retroarchDefaultCore);
       firstMiddleId = nonDefaultCores[0] ? `core-${nonDefaultCores[0].name}` : undefined;
       lastMiddleId  = nonDefaultCores.length > 0 ? `core-${nonDefaultCores[nonDefaultCores.length - 1].name}` : undefined;
-    } else if (selectedGame.store !== 'Classic Console') {
+    } else if (selectedGame.store !== 'Classic Console' && !isWebStream) {
       firstMiddleId = 'compat-fsr';
       // v1.5.20-dev.3 — era 'compat-battleye': valido finché quello era
       // l'ultimo tile della griglia Compatibility Layer. Con l'aggiunta di
@@ -2707,6 +2807,9 @@ function MainApp() {
     return map;
   }, [stores]);
 
+  // v3.2.17-dev.10 — card di Amazon Luna: con un filtro per genere il server non la restituisce,
+  // ma in Amazon Games deve restare la prima (pinAmazonLuna in filteredVisibleGames).
+  const lastLunaCardRef = useRef<Game | null>(null);
   const filteredVisibleGames = useMemo(() => {
     // Il filtro per store è già applicato server-side (vedi gameManager.ts,
     // fetch con ?store=${activeStore}). Filtrare di nuovo qui contro `games`
@@ -2717,6 +2820,9 @@ function MainApp() {
     // nella finestra di latenza. Rimuovendo il doppio filtro, la griglia
     // mostra sempre esattamente ciò che il server ha già restituito.
     let result = games;
+    // v3.2.17-dev.10 — ultima versione vista della card di Luna (vedi pinAmazonLuna sotto)
+    const lunaInGames = games.find(g => g.id === AMAZON_LUNA_ID);
+    if (lunaInGames) lastLunaCardRef.current = lunaInGames;
     // Plugin disabilitati (toggle manuale): nascondi non installati, mantieni installati
     result = result.filter(g => {
       const ps = pluginStateMap.get(g.store as string);
@@ -2737,8 +2843,27 @@ function MainApp() {
       return g.isInstalled;
     });
     if (onlyInstalled) result = result.filter(g => g.isInstalled);
+    // v3.2.17-dev.10 — richiesta utente: in Amazon Games la card di Amazon Luna è
+    // SEMPRE la prima, qualunque ordinamento e qualunque filtro (Installati,
+    // genere, categoria — il genere è filtrato dal server, quindi la card si
+    // recupera anche dalla lista completa). Solo la ricerca testuale la può
+    // nascondere, come per la card di Big Picture. In "Tutti" segue
+    // l'ordinamento come ogni altro gioco.
+    const pinAmazonLuna = (list: Game[], query: string): Game[] => {
+      if (activeStore !== 'Amazon Games') return list;
+      const luna = list.find(g => g.id === AMAZON_LUNA_ID) ?? lastLunaCardRef.current;
+      const rest = list.filter(g => g.id !== AMAZON_LUNA_ID);
+      if (!luna) return rest;
+      if (query) {
+        const q = query.toLowerCase();
+        const hit = luna.title.toLowerCase().includes(q) || luna.description.toLowerCase().includes(q)
+          || luna.tags?.some(t => typeof t === 'string' && t.toLowerCase().includes(q));
+        if (!hit) return rest;
+      }
+      return [luna, ...rest];
+    };
     if (!searchQuery) {
-      return appendSteamBigPictureCard(result, activeStore, '');
+      return appendSteamBigPictureCard(pinAmazonLuna(result, ''), activeStore, '');
     }
     const s = searchQuery.toLowerCase();
     const searched = result.filter(g =>
@@ -2750,8 +2875,44 @@ function MainApp() {
     // come un vero elemento della libreria — non un'eccezione "sempre visibile
     // a prescindere", solo iniettata e poi soggetta allo stesso filtro testuale
     // applicato a tutti gli altri elementi.
-    return appendSteamBigPictureCard(searched, activeStore, searchQuery);
+    return appendSteamBigPictureCard(pinAmazonLuna(searched, searchQuery), activeStore, searchQuery);
   }, [games, searchQuery, onlyInstalled, pluginStateMap, storeConnectedMap, activeStore]);
+
+  // v3.2.17-dev.1 — tag genere/categoria contestuali, un solo calcolo per
+  // la barra filtri (mouse) e per la tastiera virtuale (controller).
+  // Prima: `[...new Set(games.flatMap(...))].slice(0, 8)` su `games`, cioè
+  //   - prima dei filtri lato client (Installati, plugin disattivati, store
+  //     disconnessi): comparivano generi che portavano a zero risultati;
+  //   - nell'ordine di comparsa nella libreria, tagliato a 8: dopo aver
+  //     scelto un genere la lista si ricalcolava sul risultato filtrato e
+  //     il tag attivo poteva finire oltre l'ottavo posto, sparendo — e con
+  //     lui l'unico modo di toglierlo.
+  // Ora: conteggio sui giochi DAVVERO visibili (senza la card virtuale Big
+  // Picture), ordine per frequenza poi alfabetico, e il tag attivo sempre
+  // presente (al posto dell'ultimo, se fuori dai primi N).
+  const contextualTags = useMemo(() => {
+    const pick = (lists: (string[] | undefined)[], max: number, selected: string) => {
+      const counts = new Map<string, number>();
+      for (const list of lists) {
+        for (const v of list ?? []) {
+          if (typeof v === 'string' && v) counts.set(v, (counts.get(v) ?? 0) + 1);
+        }
+      }
+      const sorted = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([v]) => v);
+      const top = sorted.slice(0, max);
+      if (selected && !top.includes(selected)) {
+        if (top.length >= max) top[top.length - 1] = selected; else top.push(selected);
+      }
+      return top;
+    };
+    const real = filteredVisibleGames.filter(g => g.id !== STEAM_BIG_PICTURE_ID);
+    return {
+      genres:     pick(real.map(g => g.genres), 8, selectedGenre),
+      categories: pick(real.map(g => g.categories), 5, selectedCategory),
+    };
+  }, [filteredVisibleGames, selectedGenre, selectedCategory]);
 
   const [time, setTime] = useState(new Date());
 
@@ -3996,6 +4157,9 @@ Vuoi provare ad avviarlo comunque?`);
       } else if (pendingExitRef.current) {
         // Stessa priorità: annulla la conferma di chiusura Dashboard.
         setPendingExit(false);
+      } else if (qrModal) {
+        // v3.2.29-dev.13 — QR del link sopra le notifiche
+        closeQrModal();
       } else if (showFileBrowser) {
         // v1.5.20-dev.12 — Fase A.4: si apre SOPRA il pannello Download
         // (l'unico chiamante oggi) — deve chiudersi per primo, altrimenti
@@ -4010,6 +4174,9 @@ Vuoi provare ad avviarlo comunque?`);
         } else {
           toggleSearch();
         }
+      } else if (showMediaLibrary) {
+        // v3.2.29-dev.7 — B chiude prima la conferma o il visore, poi la sezione
+        if (!mediaLibraryRef.current?.back()) closeMediaLibrary();
       } else if (showAvatarLibrary) {
         setShowAvatarLibrary(false);
         setActiveGroup('quick-menu');
@@ -4072,6 +4239,9 @@ Vuoi provare ad avviarlo comunque?`);
         setActiveGroup('quick-menu');
         setFocusedId('opt-accounts');
         play('back');
+      } else if (showMediaLibrary) {
+        closeMediaLibrary();
+        play('back');
       } else if (showAvatarLibrary) {
         setShowAvatarLibrary(false);
         setActiveGroup('quick-menu');
@@ -4095,7 +4265,7 @@ Vuoi provare ad avviarlo comunque?`);
 
   }, [gamepadState, isJustPressed, moveFocus, isFocusFrozen, viewState, play,
       showDownloads, showSettings, showNotifications, selectedGameId,
-      showGameOptions, showAvatarLibrary, showProcessManager, handlePlay, setFocusedId, toggleSearch,
+      showGameOptions, showAvatarLibrary, showProcessManager, showMediaLibrary, closeMediaLibrary, qrModal, closeQrModal, handlePlay, setFocusedId, toggleSearch,
       setActiveGroup, openGameOptions, closeGameOptions, showKeyboard, activeField, closeKeyboard,
       showFileBrowser, closeFileBrowser, logDiag, splashInfo, closeSplash,
       activeGroup, cycleStore, triggerFocusedAction, cycleSettingsTab, cycleUiLanguage]);
@@ -4556,6 +4726,16 @@ Vuoi provare ad avviarlo comunque?`);
           </div>
         </div>
       </header>
+
+      {/* v3.2.29-dev.13 — QR del link di un contenuto condiviso, sopra le notifiche */}
+      <AnimatePresence>
+        {qrModal && <QrModal url={qrModal.url} title={qrModal.title} onClose={closeQrModal} />}
+      </AnimatePresence>
+
+      {/* v3.2.29-dev.7 — sezione Multimedia (screenshot e clip), stesso livello della libreria avatar */}
+      <AnimatePresence>
+        {showMediaLibrary && <MediaLibrary ref={mediaLibraryRef} onClose={closeMediaLibrary} openKeyboard={openKeyboardForField} />}
+      </AnimatePresence>
 
       {/* Avatar Library — si sovrappone alla main grid solo quando attiva */}
       <AnimatePresence>
@@ -5376,11 +5556,12 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                          className="px-4 py-2 hover:bg-xl-ink/5 rounded-lg flex items-center gap-2 text-[10px] font-black uppercase italic tracking-widest"
                        >
                          {sortOrder === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
-                         {sortOrder}
+                         {/* v3.2.17-dev.1 — prima mostrava 'asc'/'desc' grezzi, non tradotti */}
+                         {t(sortOrder === 'asc' ? 'dashboard:sortAsc' : 'dashboard:sortDesc')}
                        </button>
                        <select 
                          value={sortBy}
-                         onChange={(e) => setSortBy(e.target.value as any)}
+                         onChange={(e) => { selectSortField(e.target.value as SortField); play('select'); }}
   className={cn("text-[10px] font-black uppercase italic tracking-widest px-4 py-2 outline-none cursor-pointer rounded-lg", "bg-xl-control text-xl-control-text border border-xl-control-border")}
                        >
                          <option value="title">{t('dashboard:sortByTitle')}</option>
@@ -5408,7 +5589,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     <div className="w-px h-6 bg-xl-ink/10 self-center mx-1" />
                     {/* Genres — derivati dai giochi reali */}
                     {(() => {
-                      const genres = [...new Set(games.flatMap(g => g.genres ?? []))].slice(0, 8);
+                      const genres = contextualTags.genres;
                       if (genres.length === 0) return null;
                       return (
                         <div className="flex items-center gap-2 mr-4">
@@ -5432,7 +5613,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     })()}
                     {/* Categories — derivate dai giochi reali */}
                     {(() => {
-                      const cats = [...new Set(games.flatMap(g => g.categories ?? []))].slice(0, 5);
+                      const cats = contextualTags.categories;
                       if (cats.length === 0) return null;
                       return (
                         <div className="flex items-center gap-2">
@@ -5658,7 +5839,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   ))}
                 </div>
 
-                {/* Ore di gioco — reali dal DB */}
+                {/* Ore di gioco — reali dal DB.
+                    v3.2.17-dev.4 — nascoste per la card di Steam Big Picture
+                    (richiesta utente): non è un gioco, il dato non serve; il
+                    tempo dei giochi Steam lo conta Steam (localconfig.vdf). */}
+                {selectedGame.id !== STEAM_BIG_PICTURE_ID && (
                 <div className="flex items-center gap-3 p-4 rounded-xl bg-xl-ink/5 border border-xl-ink/5 shrink-0">
                   <Clock size={14} className="text-xl-primary-400 shrink-0" />
                   <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{t('dashboard:sidebar.playtime')}</span>
@@ -5668,6 +5853,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       : <span className="opacity-30 text-xs font-normal">—</span>}
                   </span>
                 </div>
+                )}
 
                 {/* Dimensione prevista di installazione — richiesta utente,
                     GOG/Epic/Amazon (v1.1.112-dev.1: getPredictedInstallSizeBytes
@@ -5677,7 +5863,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     Blocco nascosto del tutto per gli altri store, invece di
                     mostrare sempre un "—" che implicherebbe un dato mancante
                     anziché "non applicabile a questo store". */}
-                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games') && (
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games') && selectedGame.runner !== 'Web Stream' && (
                   <div className="flex items-center gap-3 p-4 rounded-xl bg-xl-ink/5 border border-xl-ink/5 shrink-0">
                     <HardDrive size={14} className="text-xl-primary-400 shrink-0" />
                     <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{t('dashboard:sidebar.predictedSize')}</span>
@@ -5734,7 +5920,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     )}
                   >
                     <p className="text-xs opacity-70 leading-relaxed font-medium italic">
-                      {(selectedGame.id === 'ea-app-launcher' || selectedGame.id === 'ubisoft-connect-launcher' || selectedGame.id === STEAM_BIG_PICTURE_ID)
+                      {(selectedGame.id === 'ea-app-launcher' || selectedGame.id === 'ubisoft-connect-launcher' || selectedGame.id === STEAM_BIG_PICTURE_ID || selectedGame.id === 'amazon-luna')
                         ? translateLauncherGameDescription(selectedGame.id, selectedGame.description)
                         : selectedGame.description}
                     </p>
@@ -6517,6 +6703,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                           setShowNotifications(false);
                                           setShowSettings(true);
                                           setActiveSettingsTab(section);
+                                        } else if (section === 'multimedia') {
+                                          // v3.2.29-dev.7 — «Apri Multimedia» (screenshot, clip da rivedere, clip salvata)
+                                          setShowNotifications(false);
+                                          openMediaLibrary('notifications');
                                         }
                                         setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, status: 'applied' } : n));
                                         return;
@@ -6537,6 +6727,28 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                                       // come questa (a differenza di un
                                       // fix applicato, qui non c'è nulla
                                       // da confermare).
+                                      // v3.2.29-dev.13 — condivisione: QR del link al contenuto, oppure nuovo invio
+                                      if (primaryAction?.handler === 'show_qr' && primaryAction.params?.url) {
+                                        setQrModal({ url: String(primaryAction.params.url), title: primaryAction.params?.title ? String(primaryAction.params.title) : undefined, notifId: notif.id });
+                                        setActiveGroup('qr-modal');
+                                        setTimeout(() => setFocusedId('qr-close'), 60);
+                                        play('select');
+                                        return;
+                                      }
+                                      if (primaryAction?.handler === 'share_retry' && primaryAction.params?.jobId) {
+                                        const jobId = String(primaryAction.params.jobId);
+                                        fetch(`/api/share/jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' })
+                                          .then(r => r.json())
+                                          .then(j => {
+                                            if (j.success) { dismissNotification(notif.id); return; }
+                                            // l'invio non si può ripetere (demone riavviato, file sparito, altro invio in corso): il motivo nella notifica
+                                            setNotifications(prev => prev.map(n => n.id === notif.id
+                                              ? { ...n, body: t(`multimedia:retryErr.${j.code}`, { defaultValue: t('multimedia:retryErr.generic', { code: j.code }) }) } : n));
+                                          })
+                                          .catch(() => {});
+                                        play('select');
+                                        return;
+                                      }
                                       if (primaryAction?.handler === 'close_shared_launcher') {
                                         const launcherId = primaryAction.params?.launcherId;
                                         if (launcherId) {
@@ -6665,6 +6877,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
               <div className="space-y-4">
                 <OptionItem group="quick-menu" id="opt-accounts" icon={Gamepad2} label={t('quickMenu:manageAccounts')} onClick={() => { setShowSettings(true); setActiveGroup('settings'); setActiveSettingsTab('accounts'); setFocusedId(null); setTimeout(() => setFocusedId('settings-tab-accounts'), 80); }} />
                 <OptionItem group="quick-menu" id="opt-avatar" icon={User} label={t('quickMenu:avatar')} onClick={() => { setShowAvatarLibrary(true); setActiveGroup('avatar-library'); setTimeout(() => setFocusedId('avatar-0'), 80); }} />
+                {/* v3.2.29-dev.7 — screenshot e clip dei giochi (src/components/MediaLibrary.tsx) */}
+                <OptionItem group="quick-menu" id="opt-multimedia" icon={Images} label={t('quickMenu:multimedia')} onClick={() => openMediaLibrary('quick-menu')} />
                 <OptionItem group="quick-menu" id="opt-process-manager" icon={Cpu} label={t('quickMenu:processManager')} onClick={() => { setShowProcessManager(true); setActiveGroup('process-manager'); setTimeout(() => setFocusedId('pm-close'), 80); }} />
                 {/* v2.5.0-Mercury — nascosto fuori dalla sessione Kiosk su
                     richiesta esplicita dell'utente: da desktop non c'è
@@ -8656,7 +8870,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     Proton/Wine-Lutris non c'entrano nulla con RetroArch/
                     DOSBox/ScummVM, mostrarli qui serve solo a confondere
                     l'utente su cosa stia effettivamente per cambiare. */}
-                {selectedGame.store !== 'Classic Console' && (
+                {selectedGame.store !== 'Classic Console' && selectedGame.runner !== 'Web Stream' && (
                 <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                   <div className="flex items-center gap-3 mb-4">
                     <Cpu size={16} className="text-xl-primary-400" />
@@ -9008,7 +9222,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       <p className="text-xs opacity-60">{t('gameOptions:noCoreCompatible')}</p>
                     )}
                   </div>
-                ) : selectedGame.store !== 'Classic Console' ? (
+                ) : selectedGame.store !== 'Classic Console' && selectedGame.runner !== 'Web Stream' ? (
                   <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Activity size={16} className="text-xl-primary-400" />
@@ -9375,7 +9589,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   <div className="space-y-3">
                     <label className="block">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Executable Path</span>
+                        <span className="text-[10px] font-black uppercase tracking-widest opacity-40">{selectedGame.runner === 'Web Stream' ? t('gameOptions:serviceUrl') : 'Executable Path'}</span>
                         {localGameConfig.executablePath && (
                           <span className="text-[9px] font-black uppercase tracking-widest text-xl-success-400 bg-xl-success-400/10 border border-xl-success-400/20 px-1.5 py-0.5 rounded-full">
                             {t('gameOptions:configured')}
@@ -9601,7 +9815,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                             // campo nuovo inserito fra i due invece che da
                             // uno scroll. Corretto puntando al nuovo campo
                             // invece di scavalcarlo.
-                            neighbors={{ down: 'field-windowClass' }}
+                            neighbors={{ down: selectedGame.runner === 'Web Stream' ? undefined : 'field-windowClass' }}
                             onEnter={() => {
                               // Nessuna tastiera virtuale: non è un campo
                               // modificabile, è l'id reale del gioco —
@@ -9640,6 +9854,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         indipendentemente dallo store — a differenza del
                         campo xlaunch:// sopra, non innestato nel suo
                         ternario Steam/altri. */}
+                    {/* v3.2.17-dev.10 — nascosto per le card Web Stream: serve solo alla splash, che lì non c'è */}
+                    {selectedGame.runner !== 'Web Stream' && (
                     <label className="block">
                       <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">{t('gameOptions:windowClassLabel')}</span>
                       <Focusable
@@ -9688,6 +9904,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       </Focusable>
                       <p className="text-[10px] opacity-40 mt-1">{t('gameOptions:windowClassHint')}</p>
                     </label>
+                    )}
                     {selectedGame.runner === 'DOSBox' && (
                       <label className="block">
                         <span className="text-[10px] font-black uppercase tracking-widest opacity-40 block mb-1">DOSBox Config (.conf)</span>
@@ -9872,7 +10089,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     verificato di nuovo qui per essere certi che regga.
                     v2.0.41-dev.11: EA App aggiunto, stesso trattamento
                     (Fase B). */}
-                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games' || selectedGame.store === 'Ubisoft' || selectedGame.store === 'EA App') && (
+                {(selectedGame.store === 'GOG Galaxy' || selectedGame.store === 'Epic Games' || selectedGame.store === 'Amazon Games' || selectedGame.store === 'Ubisoft' || selectedGame.store === 'EA App') && selectedGame.runner !== 'Web Stream' && (
                   <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                     <div className="flex items-center gap-3 mb-4">
                       <Package size={16} className="text-xl-primary-400" />
@@ -10083,7 +10300,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     Wine/Proton, dove sono spesso necessarie per singoli
                     titoli problematici) — mostrarla qui confondeva soltanto,
                     stesso trattamento già dato a Runner Bridge. */}
-                {selectedGame.store !== 'Classic Console' && (
+                {selectedGame.store !== 'Classic Console' && selectedGame.runner !== 'Web Stream' && (
                 <div className={cn("p-5 rounded-2xl", "border bg-xl-box border-xl-border-subtle")}>
                   <div className="flex items-center gap-3 mb-4">
                     <Terminal size={16} className="text-xl-primary-400" />
@@ -10437,8 +10654,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                   </Focusable>
                 )}
 
-                {/* Launch button nell'overlay */}
-                {selectedGame.isInstalled ? (
+                {/* Launch button nell'overlay.
+                    v3.2.17-dev.8 — nessun pulsante per le card Web Stream (Amazon
+                    Luna): sempre "installate", niente da installare o disinstallare
+                    (il backend rifiuta comunque entrambe le azioni). */}
+                {selectedGame.runner === 'Web Stream' ? null : selectedGame.isInstalled ? (
                   <Focusable group="game-options" id="game-options-uninstall" onEnter={() => {
                     setPendingAction({ type: 'uninstall', gameId: selectedGame.id, gameTitle: selectedGame.title });
                     setShowGameOptions(false);
@@ -10521,9 +10741,17 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
           // valori fra il nuovo blocco tag qui sotto E la prop
           // topRowExternalUpId passata a VirtualKeyboard più in fondo
           // allo stesso JSX, senza duplicare il calcolo due volte.
-          const searchGenres = !activeField ? [...new Set(games.flatMap(g => g.genres ?? []))].slice(0, 8) : [];
-          const searchCats   = !activeField ? [...new Set(games.flatMap(g => g.categories ?? []))].slice(0, 5) : [];
-          const topRowExternalUpId = searchCats.length > 0 ? 'tag-cat-0' : searchGenres.length > 0 ? 'tag-genre-0' : undefined;
+          // v3.2.17-dev.1 — stessi tag contestuali della barra filtri
+          // (contextualTags), più una riga di filtri FISSI (Installati +
+          // ordinamento) sempre presente in modalità ricerca, a differenza
+          // dei generi/categorie che cambiano con i risultati.
+          const searchGenres = !activeField ? contextualTags.genres : [];
+          const searchCats   = !activeField ? contextualTags.categories : [];
+          const showFixedFilters = !activeField;
+          const topRowExternalUpId = searchCats.length > 0 ? 'tag-cat-0'
+            : searchGenres.length > 0 ? 'tag-genre-0'
+            : showFixedFilters ? 'tag-filter-installed'
+            : undefined;
           return (
           <div className="fixed inset-0 z-[200] flex flex-col items-center justify-end pb-8 md:pb-12 px-2 pointer-events-none bg-xl-shade/40 backdrop-blur-sm">
             {/* Testo digitato — visibile dal divano.
@@ -10540,7 +10768,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 l'intestazione interna della tastiera è stata rimossa
                 (vedi VirtualKeyboard.tsx). */}
             <div className="pointer-events-none mb-4 w-full max-w-4xl px-2">
-              <div className="flex items-start gap-3 bg-xl-shade/60 backdrop-blur-xl border border-xl-ink/10 rounded-2xl px-6 py-4 min-h-[4.5rem] max-h-[9rem] overflow-y-auto">
+              <div className={cn(
+                "flex items-start gap-3 bg-xl-shade/60 backdrop-blur-xl border border-xl-ink/10 rounded-2xl px-6 py-4 min-h-[4.5rem]",
+                // v3.2.29-dev.13 — campo con `rows` (testo dei post): altezza fissa sul testo, vedi sotto
+                activeField?.rows ? "" : "max-h-[9rem] overflow-y-auto",
+              )}>
                 {activeField
                   ? <Edit3 size={20} className="text-xl-primary-400 shrink-0 opacity-60 mt-1" />
                   : <Search size={20} className="text-xl-primary-400 shrink-0 opacity-60 mt-1" />}
@@ -10561,9 +10793,10 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                     </div>
                   )}
                   <div className={cn(
-                    "text-xl-ink break-all whitespace-pre-wrap leading-snug",
+                    "text-xl-ink whitespace-pre-wrap leading-snug",
+                    activeField?.rows ? "break-words overflow-y-auto vk-rows-scrollbar pr-3" : "break-all",
                     activeField ? "font-mono text-lg md:text-xl" : "font-black tracking-wide text-2xl"
-                  )}>
+                  )} style={activeField?.rows ? { height: `${activeField.rows}lh` } : undefined}>
                     {(() => {
                       const currentValue = activeField ? activeField.value : searchQuery;
                       if (!currentValue) {
@@ -10586,7 +10819,7 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                       return (
                         <>
                           <span>{currentValue.slice(0, pos)}</span>
-                          <span className="inline-block w-[2px] h-[1em] align-middle bg-xl-primary-400 animate-pulse mx-px" />
+                          <span ref={activeField?.rows ? vkCaretRef : undefined} className="inline-block w-[2px] h-[1em] align-middle bg-xl-primary-400 animate-pulse mx-px" />
                           <span>{currentValue.slice(pos)}</span>
                         </>
                       );
@@ -10595,13 +10828,78 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 </div>
                 {(activeField ? activeField.value : searchQuery) && (
                   <span className="text-[10px] font-mono text-xl-ink/30 shrink-0 mt-1">
-                    {(activeField ? activeField.value : searchQuery).length} car.
+                    {activeField?.maxLength ? `${[...activeField.value].length} / ${activeField.maxLength}` : `${(activeField ? activeField.value : searchQuery).length} car.`}
                   </span>
                 )}
               </div>
             </div>
-            {(searchGenres.length > 0 || searchCats.length > 0) && (
+            {(showFixedFilters || searchGenres.length > 0 || searchCats.length > 0) && (
               <div className="pointer-events-auto w-full max-w-4xl px-2 mb-3 space-y-2">
+                {/* v3.2.17-dev.1 — filtri fissi: sempre gli stessi a ogni
+                    apertura della ricerca, per filtrare e ordinare qualunque
+                    libreria. Stessi stati della barra filtri del mouse
+                    (onlyInstalled per store, sortBy/sortOrder globali). Un
+                    tag di ordinamento già attivo, premuto di nuovo, inverte
+                    il verso (freccia ↑/↓ sul tag). */}
+                {showFixedFilters && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-xl-ink/40 italic shrink-0">{t('dashboard:filters')}</span>
+                    <Focusable
+                      id="tag-filter-installed"
+                      group="keyboard"
+                      sequentialChain="tag-filters"
+                      chainAxis="horizontal"
+                      chainWrap
+                      neighbors={{ down: searchGenres.length > 0 ? 'tag-genre-0' : searchCats.length > 0 ? 'tag-cat-0' : 'key-sugg-0' }}
+                      onEnter={() => setOnlyInstalled(!onlyInstalled)}
+                    >
+                      {(isFocused: boolean) => (
+                        <div className={cn(
+                          "flex items-center gap-1.5 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
+                          isFocused
+                            ? "ring-2 ring-xl-primary-400 scale-105 bg-xl-primary-600 text-xl-on-accent"
+                            : onlyInstalled
+                              ? "bg-xl-primary-600 text-xl-on-accent"
+                              : "bg-xl-ink/10 text-xl-ink/60"
+                        )}>
+                          <Download size={9} />
+                          {t('dashboard:installedFilter')}
+                        </div>
+                      )}
+                    </Focusable>
+                    <div className="w-px h-4 bg-xl-ink/15 mx-1 shrink-0" />
+                    <span className="text-[8px] font-black uppercase tracking-[0.2em] text-xl-ink/40 italic shrink-0">{t('dashboard:sortLabel')}</span>
+                    {SORT_FIELDS.map(field => {
+                      const active = sortBy === field;
+                      return (
+                        <Focusable
+                          key={field}
+                          id={`tag-sort-${field}`}
+                          group="keyboard"
+                          sequentialChain="tag-filters"
+                          chainAxis="horizontal"
+                          chainWrap
+                          neighbors={{ down: searchGenres.length > 0 ? 'tag-genre-0' : searchCats.length > 0 ? 'tag-cat-0' : 'key-sugg-0' }}
+                          onEnter={() => selectSortField(field)}
+                        >
+                          {(isFocused: boolean) => (
+                            <div className={cn(
+                              "flex items-center gap-1 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest italic transition-all",
+                              isFocused
+                                ? "ring-2 ring-xl-primary-400 scale-105 bg-xl-primary-600 text-xl-on-accent"
+                                : active
+                                  ? "bg-xl-primary-600 text-xl-on-accent"
+                                  : "bg-xl-ink/10 text-xl-ink/60"
+                            )}>
+                              {t(`dashboard:sortShort.${field}`)}
+                              {active && (sortOrder === 'asc' ? <ArrowUp size={9} /> : <ArrowDown size={9} />)}
+                            </div>
+                          )}
+                        </Focusable>
+                      );
+                    })}
+                  </div>
+                )}
                 {searchGenres.length > 0 && (
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[8px] font-black uppercase tracking-[0.2em] text-xl-ink/40 italic shrink-0">{t('dashboard:genres')}</span>
@@ -10612,7 +10910,11 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         group="keyboard"
                         sequentialChain="tag-genres"
                         chainAxis="horizontal"
-                        neighbors={{ down: searchCats.length > 0 ? 'tag-cat-0' : 'key-sugg-0' }}
+                        chainWrap
+                        neighbors={{
+                          up: showFixedFilters ? 'tag-filter-installed' : undefined,
+                          down: searchCats.length > 0 ? 'tag-cat-0' : 'key-sugg-0',
+                        }}
                         onEnter={() => setSelectedGenre(selectedGenre === genre ? '' : genre)}
                       >
                         {(isFocused: boolean) => (
@@ -10641,8 +10943,9 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                         group="keyboard"
                         sequentialChain="tag-categories"
                         chainAxis="horizontal"
+                        chainWrap
                         neighbors={{
-                          up: searchGenres.length > 0 ? 'tag-genre-0' : undefined,
+                          up: searchGenres.length > 0 ? 'tag-genre-0' : showFixedFilters ? 'tag-filter-installed' : undefined,
                           down: 'key-sugg-0',
                         }}
                         onEnter={() => setSelectedCategory(selectedCategory === cat ? '' : cat)}
@@ -10670,7 +10973,8 @@ className={cn("w-full rounded-xl py-3 pl-12 pr-4 text-sm font-medium focus:outli
                 value={activeField ? activeField.value : searchQuery}
                 onChange={(val) => {
                   if (activeField) {
-                    setActiveField(prev => prev ? { ...prev, value: val } : null);
+                    // v3.2.29-dev.13 — lunghezza massima del campo (caratteri, non unità UTF-16: emoji e accenti contano 1)
+                    setActiveField(prev => prev ? { ...prev, value: prev.maxLength && [...val].length > prev.maxLength ? [...val].slice(0, prev.maxLength).join('') : val } : null);
                   } else {
                     setSearchQuery(val);
                   }

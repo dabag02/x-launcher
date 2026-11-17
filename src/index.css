@@ -245,6 +245,13 @@
   background: rgba(120, 130, 145, 0.75);
 }
 
+/* v3.2.29-dev.13 — riquadro del testo dei post sopra la VirtualKeyboard (5 righe): barra di scorrimento
+   più evidente di custom-scrollbar, leggibile dal divano, con la guida visibile per capire quanto testo c'è. */
+.vk-rows-scrollbar { scrollbar-gutter: stable; }
+.vk-rows-scrollbar::-webkit-scrollbar { width: 8px; }
+.vk-rows-scrollbar::-webkit-scrollbar-track { background: rgba(120, 130, 145, 0.15); border-radius: 4px; }
+.vk-rows-scrollbar::-webkit-scrollbar-thumb { background: rgba(120, 130, 145, 0.7); border-radius: 4px; }
+
 /* Gamepad activation hint */
 @keyframes fadeInOut {
   0%   { opacity: 0; transform: translateX(-50%) translateY(4px); }

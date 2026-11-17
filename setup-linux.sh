@@ -161,6 +161,19 @@ pkg_name() {
     arch:git)               echo "git" ;;
     debian:git)             echo "git" ;;
     fedora:git)             echo "git" ;;
+    # v3.3.17-Mars — Multimedia: screenshot e clip dei giochi, sezione Multimedia, condivisione.
+    # gpu-screen-recorder: repository extra di Arch; per Debian/Fedora nessun pacchetto nei
+    # repository ufficiali (vuoto = solo avviso, vedi sotto). ffmpeg: su Fedora il pacchetto
+    # ufficiale è ffmpeg-free (senza alcuni codificatori; per NVENC serve RPM Fusion).
+    arch:gpu-screen-recorder)   echo "gpu-screen-recorder" ;;
+    debian:gpu-screen-recorder) echo "" ;;
+    fedora:gpu-screen-recorder) echo "" ;;
+    arch:ffmpeg)            echo "ffmpeg" ;;
+    debian:ffmpeg)          echo "ffmpeg" ;;
+    fedora:ffmpeg)          echo "ffmpeg-free" ;;
+    arch:imagemagick)       echo "imagemagick" ;;
+    debian:imagemagick)     echo "imagemagick" ;;
+    fedora:imagemagick)     echo "ImageMagick" ;;
   esac
 }
 
@@ -169,13 +182,14 @@ pkg_name() {
 # ---------------------------------------------------------------------------
 echo ""
 info "Dipendenze FONDAMENTALI (Wine/winetricks, RetroArch, ScummVM,"
-info "DOSBox Staging, lgogdownloader, unzip/7zip, Python+pip, pciutils):"
+info "DOSBox Staging, lgogdownloader, unzip/7zip, Python+pip, pciutils,"
+info "gpu-screen-recorder, ffmpeg, ImageMagick per screenshot, clip e Multimedia):"
 echo ""
 
 read -p "Installare ora le dipendenze fondamentali mancanti? [S/n] " -n 1 -r REPLY
 echo ""
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-  FONDAMENTALI="wine winetricks retroarch scummvm dosbox lgogdownloader unzip p7zip python git pciutils"
+  FONDAMENTALI="wine winetricks retroarch scummvm dosbox lgogdownloader unzip p7zip python git pciutils gpu-screen-recorder ffmpeg imagemagick"
   TO_INSTALL=""
   for logical in $FONDAMENTALI; do
     real=$(pkg_name "$logical")
@@ -186,10 +200,14 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
       dosbox) bin="dosbox-staging" ;;
       p7zip)  bin="7z" ;;
       python) bin="python3" ;;
+      imagemagick) bin="magick" ;;   # ImageMagick 7; il 6 (Debian) ha solo «convert», controllato sotto
       *)      bin="$logical" ;;
     esac
-    if command -v "$bin" &>/dev/null; then
+    if command -v "$bin" &>/dev/null || { [ "$logical" = imagemagick ] && command -v convert &>/dev/null; }; then
       success "$logical → già presente"
+    elif [ -z "$real" ]; then
+      # v3.3.17-Mars — nessun pacchetto nei repository ufficiali di questa famiglia
+      warn "$logical → non presente e senza pacchetto ufficiale per ${DISTRO_FAMILY}: compilalo dai sorgenti (https://git.dec05eba.com/gpu-screen-recorder). Senza, niente clip; gli screenshot usano «import» di ImageMagick."
     else
       TO_INSTALL="$TO_INSTALL $real"
     fi

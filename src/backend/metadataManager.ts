@@ -41,6 +41,8 @@
 import { Game } from '../types';
 import { existsSync } from 'fs';
 import { writeLog } from './logger';
+import { webArtUrl, isWebArtUrl } from './webArt';
+import { webStreamPlaceholderImages } from './plugins/amazonPlugin';
 
 // ---------------------------------------------------------------------------
 // Costanti
@@ -110,6 +112,27 @@ async function sgdbSearchGame(title: string): Promise<number | null> {
   } catch { return null; }
 }
 
+// v3.2.17-dev.9 — ricerca SteamGridDB con corrispondenza ESATTA del nome
+// (maiuscole, spazi e punteggiatura ignorati), per le card Web Stream:
+// sgdbSearchGame prende il primo risultato dell'autocompletamento, che per
+// "Amazon Luna" potrebbe essere un qualunque gioco con "Luna" nel titolo.
+async function sgdbSearchGameExact(title: string): Promise<number | null> {
+  if (!SGDB_KEY) return null;
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  try {
+    const res = await fetch(
+      `${SGDB_BASE}/search/autocomplete/${encodeURIComponent(title)}`,
+      { headers: { Authorization: `Bearer ${SGDB_KEY}` }, signal: AbortSignal.timeout(8_000) }
+    );
+    if (!res.ok) return null;
+    const data = await res.json() as { success: boolean; data: SgdbGame[] };
+    if (!data.success) return null;
+    const hit = data.data.find(g => norm(g.name) === norm(title));
+    writeLog('info', `[METADATA] SGDB exact search "${title}": ${data.data.length} results, ${hit ? `match "${hit.name}" (id ${hit.id})` : 'no exact match'}`);
+    return hit ? hit.id : null;
+  } catch { return null; }
+}
+
 async function sgdbGetCover(gameId: number): Promise<{ coverImage: string; previewImage: string } | null> {
   if (!SGDB_KEY) return null;
   try {
@@ -176,6 +199,59 @@ async function igdbSearch(title: string): Promise<IgdbGame | null> {
     const data = await res.json() as IgdbGame[];
     return data.length > 0 ? data[0] : null;
   } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// v3.2.29-dev.17 — sfondo degli spazi (spaceBackground.ts): immagine ad alta risoluzione per il
+// desktop dello spazio di un gioco. Prima un artwork 16:9 di IGDB (key art ufficiale, il più largo
+// fra quelli con proporzioni fra 1,5 e 2,0), poi un hero di SteamGridDB a 3840×1240 o 1920×620.
+// ---------------------------------------------------------------------------
+
+export type SpaceArtwork = { url: string; source: 'igdb' | 'sgdb'; width: number; height: number };
+
+async function igdbArtwork(title: string): Promise<SpaceArtwork | null> {
+  const token = await getIgdbToken();
+  if (!token) return null;
+  try {
+    const body = `search "${title.replace(/"/g, '')}"; fields name,artworks.image_id,artworks.width,artworks.height; limit 1;`;
+    const res = await fetch(`${IGDB_BASE}/games`, {
+      method: 'POST',
+      headers: { 'Client-ID': IGDB_CLIENT_ID, 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain' },
+      body,
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { artworks?: { image_id: string; width?: number; height?: number }[] }[];
+    const arts = (data[0]?.artworks ?? []).filter(a => a.image_id && a.width && a.height
+      && a.width / a.height >= 1.5 && a.width / a.height <= 2.0 && a.width >= 1280);
+    if (!arts.length) return null;
+    const best = arts.sort((x, y) => (y.width ?? 0) - (x.width ?? 0))[0];
+    // t_original oltre i 4K può superare il limite di dimensione del file: lì basta il 1080p
+    const size = (best.width ?? 0) <= 3840 ? 't_original' : 't_1080p';
+    return { url: `https://images.igdb.com/igdb/image/upload/${size}/${best.image_id}.jpg`, source: 'igdb',
+      width: size === 't_original' ? best.width! : 1920, height: size === 't_original' ? best.height! : Math.round(1920 * best.height! / best.width!) };
+  } catch { return null; }
+}
+
+async function sgdbHeroHiRes(title: string): Promise<SpaceArtwork | null> {
+  if (!SGDB_KEY) return null;
+  const id = await sgdbSearchGame(title);
+  if (!id) return null;
+  try {
+    const res = await fetch(`${SGDB_BASE}/heroes/game/${id}?dimensions=3840x1240,1920x620&limit=5`, {
+      headers: { Authorization: `Bearer ${SGDB_KEY}` }, signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { success: boolean; data: SgdbImage[] };
+    if (!data.success || !data.data.length) return null;
+    const best = data.data.slice().sort((x, y) => (y.width ?? 0) - (x.width ?? 0))[0];
+    return { url: best.url, source: 'sgdb', width: best.width, height: best.height };
+  } catch { return null; }
+}
+
+/** Immagine per lo sfondo dello spazio di un gioco: IGDB 16:9, poi hero di SteamGridDB. null se nessuna. */
+export async function findSpaceArtwork(title: string): Promise<SpaceArtwork | null> {
+  return (await igdbArtwork(title)) ?? (await sgdbHeroHiRes(title));
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +347,47 @@ class MetadataManager {
    * già avere un cover/rating (sbagliati, dallo scraping automatico col
    * nome ROM) che altrimenti farebbero saltare del tutto il nuovo fetch.
    */
+  private async enrichWebStreamImages(game: Game, force: boolean): Promise<Game> {
+    const enriched = { ...game };
+    const localCover = webArtUrl(game.id, 'cover');
+    const localHero  = webArtUrl(game.id, 'hero');
+    if (localCover || localHero) {
+      enriched.coverImage   = localCover ?? localHero!;
+      enriched.previewImage = localHero  ?? localCover!;
+      return enriched;
+    }
+    const placeholder = (src?: string) => !src || src.startsWith('data:') || isWebArtUrl(src);
+    const searchTitle = (game.scrapeTitle || game.title).trim();
+    if (SGDB_KEY && (force || placeholder(game.coverImage) || placeholder(game.previewImage))) await requestQueue.add(async () => {
+      const id = await sgdbSearchGameExact(searchTitle);
+      const images = id ? await sgdbGetCover(id) : null;
+      if (images) {
+        enriched.coverImage   = images.coverImage;
+        enriched.previewImage = images.previewImage;
+        writeLog('info', `[METADATA] ✅ Cover SGDB (Web Stream): ${searchTitle}`);
+      }
+    });
+    // Immagini locali tolte e niente da SGDB: si torna al segnaposto del plugin,
+    // invece di lasciare un URL /api/web-art/... che ora risponde 404.
+    if (isWebArtUrl(enriched.coverImage) || isWebArtUrl(enriched.previewImage)) {
+      const ph = webStreamPlaceholderImages(game.id);
+      if (ph) {
+        if (isWebArtUrl(enriched.coverImage))   enriched.coverImage   = ph.coverImage;
+        if (isWebArtUrl(enriched.previewImage)) enriched.previewImage = ph.previewImage;
+      }
+    }
+    return enriched;
+  }
+
   async enrichGameMetadata(game: Game, force = false): Promise<Game> {
+    // v3.2.17-dev.8/dev.9 — card Web Stream (Amazon Luna): mai IGDB (voto, generi e
+    // descrizione di un titolo omonimo sarebbero sbagliati). Immagini, in ordine:
+    //   1. file dell'utente in ~/.local/share/x-launcher/web-art/<id>/ (webArt.ts);
+    //   2. SteamGridDB con corrispondenza esatta del nome (titolo per lo scraping
+    //      o titolo della card), solo se la copertina è ancora il segnaposto del
+    //      plugin o un'immagine locale non più presente, oppure con force;
+    //   3. il segnaposto del plugin.
+    if (game.runner === 'Web Stream') return this.enrichWebStreamImages(game, force);
     // v1.1.27 — CAUSA REALE trovata nei log: prima, un cache-hit
     // restituiva l'INTERO oggetto cacheato — inclusi isInstalled,
     // executablePath, status e ogni altro campo VOLATILE che non ha
